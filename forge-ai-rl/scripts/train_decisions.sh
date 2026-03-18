@@ -1,0 +1,29 @@
+#!/bin/bash
+# Train decision heads (attack, block) on collected trajectory data.
+# Requires pre-trained value network checkpoint.
+# Usage: ./train_decisions.sh [epochs]
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PYTHON="$PROJECT_ROOT/forge-ai-rl/venv/bin/python3"
+PYTHON_DIR="$PROJECT_ROOT/forge-ai-rl/src/main/python"
+DATA_DIR="$PROJECT_ROOT/rl_data/trajectories"
+SAVE_DIR="$PROJECT_ROOT/rl_data/checkpoints"
+ENCODER="$SAVE_DIR/best_value_model.pt"
+EPOCHS="${1:-50}"
+
+if [ ! -f "$ENCODER" ]; then
+    echo "No encoder checkpoint at $ENCODER"
+    echo "Train the value network first: ./train_ui.sh"
+    exit 1
+fi
+
+cd "$PYTHON_DIR"
+PYTHONUNBUFFERED=1 "$PYTHON" -u training/train_decisions.py \
+    --data-dir "$DATA_DIR" \
+    --save-dir "$SAVE_DIR" \
+    --encoder-checkpoint "$ENCODER" \
+    --epochs "$EPOCHS" \
+    --device cuda \
+    --heads attack,block
