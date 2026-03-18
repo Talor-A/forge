@@ -55,6 +55,7 @@ class TrainingState:
     # Status
     status: str = "Idle"
     phase: str = ""  # "loading", "training", "done"
+    chart_dirty: bool = False  # set by trainer, cleared by UI
 
     # Data loading
     files_total: int = 0
@@ -271,13 +272,13 @@ def trainer_thread(state: TrainingState, args):
         train_loader = torch.utils.data.DataLoader(
             SimpleDataset(samples[:n_train]),
             batch_size=batch_size, shuffle=True,
-            num_workers=2,
+            num_workers=0,
             pin_memory=device.startswith('cuda'),
             drop_last=True)
         val_loader = torch.utils.data.DataLoader(
             SimpleDataset(samples[n_train:]),
             batch_size=batch_size, shuffle=False,
-            num_workers=2,
+            num_workers=0,
             pin_memory=device.startswith('cuda'))
 
         # Model
@@ -428,8 +429,9 @@ def trainer_thread(state: TrainingState, args):
             remaining = args.epochs - epoch
             state.eta = remaining * state.epoch_time
 
-            # GPU mem
+            # Sync GPU and update state
             if device.startswith('cuda'):
+                torch.cuda.synchronize()
                 state.gpu_mem_used_mb = (
                     torch.cuda.memory_allocated() / 1024**2)
                 state.gpu_mem_total_mb = (
@@ -437,6 +439,9 @@ def trainer_thread(state: TrainingState, args):
                     .total_memory / 1024**2)
 
             state.epoch_progress = 1.0
+            state.chart_dirty = True
+            # Brief yield to let UI thread catch up
+            time.sleep(0.05)
 
         model.save(os.path.join(
             args.save_dir, 'value_model_final.pt'))
@@ -446,8 +451,12 @@ def trainer_thread(state: TrainingState, args):
     except Exception as e:
         state.status = f"ERROR: {e}"
         state.phase = "done"
+        state.chart_dirty = True
         import traceback
         traceback.print_exc()
+        # Write error to file for debugging
+        with open('/tmp/rl_train_error.log', 'w') as f:
+            traceback.print_exc(file=f)
 
 
 # ── Tkinter Dashboard ────────────────────────────────
@@ -630,8 +639,9 @@ class TrainingDashboard:
         else:
             self.stat_vars['GPU Mem'].set("—")
 
-        # Update charts
-        if HAS_MATPLOTLIB and s.train_losses:
+        # Update charts only when new data arrives
+        if HAS_MATPLOTLIB and s.chart_dirty and s.train_losses:
+            s.chart_dirty = False
             self.ax_loss.clear()
             self.ax_loss.set_facecolor('#313244')
             self.ax_loss.set_title('Loss', color='#cdd6f4',

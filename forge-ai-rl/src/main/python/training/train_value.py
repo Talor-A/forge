@@ -429,12 +429,12 @@ def main():
 
     train_loader = torch.utils.data.DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=2,
+        num_workers=0,
         pin_memory=device.startswith('cuda'),
         drop_last=True)
     val_loader = torch.utils.data.DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=2,
+        num_workers=0,
         pin_memory=device.startswith('cuda'))
 
     print(f'  Split: {n_train} train / {n_val} val',
