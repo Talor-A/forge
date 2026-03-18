@@ -14,7 +14,6 @@ import forge.ai.rl.LobbyPlayerRL;
 import forge.ai.rl.PlayerControllerRL;
 import forge.ai.rl.RLConfig;
 import forge.ai.rl.RLModelMode;
-import forge.ai.rl.RecordingPlayerController;
 import forge.deck.Deck;
 import forge.deck.io.DeckSerializer;
 import forge.game.*;
@@ -376,13 +375,26 @@ public class SimulateRLTraining {
             }
         }
 
-        // Start trajectory recorders
+        // Start event-based trajectory recording
+        List<forge.ai.rl.GameStateRecorder> recorders =
+                new ArrayList<>();
         for (RegisteredPlayer rp : players) {
             if (rp.getPlayer()
                     instanceof forge.ai.rl.RecordingLobbyPlayerAi) {
-                ((forge.ai.rl.RecordingLobbyPlayerAi) rp.getPlayer())
-                    .getRecorder().startGame(
-                        gameId + "_" + rp.getPlayer().getName());
+                forge.ai.rl.RecordingLobbyPlayerAi rl =
+                    (forge.ai.rl.RecordingLobbyPlayerAi)
+                        rp.getPlayer();
+                Player p = lobbyToPlayer.get(rp.getPlayer());
+                if (p != null) {
+                    rl.getRecorder().startGame(
+                            gameId + "_" + p.getName());
+                    forge.ai.rl.GameStateRecorder gsr =
+                        new forge.ai.rl.GameStateRecorder(
+                            game, p, rl.getRecorder(),
+                            rl.getConfig());
+                    gsr.register();
+                    recorders.add(gsr);
+                }
             }
         }
 
@@ -401,51 +413,18 @@ public class SimulateRLTraining {
             }
         }
 
-        // Record trajectory for ALL players (win + loss)
+        // Stop recording and write trajectory files
         for (RegisteredPlayer rp : players) {
-            if (!(rp.getPlayer()
-                    instanceof forge.ai.rl.RecordingLobbyPlayerAi)) {
-                continue;
+            if (rp.getPlayer()
+                    instanceof forge.ai.rl.RecordingLobbyPlayerAi) {
+                forge.ai.rl.RecordingLobbyPlayerAi rl =
+                    (forge.ai.rl.RecordingLobbyPlayerAi)
+                        rp.getPlayer();
+                boolean won = game.getOutcome() != null
+                        && !game.getOutcome().isDraw()
+                        && game.getOutcome().isWinner(rp);
+                rl.getRecorder().endGame(won);
             }
-            forge.ai.rl.RecordingLobbyPlayerAi rl =
-                (forge.ai.rl.RecordingLobbyPlayerAi) rp.getPlayer();
-            boolean won = game.getOutcome() != null
-                    && !game.getOutcome().isDraw()
-                    && game.getOutcome().isWinner(rp);
-
-            // Use stored player ref (survives game end)
-            Player p = lobbyToPlayer.get(rp.getPlayer());
-            if (p != null) {
-                forge.ai.rl.features.GameStateEncoder enc =
-                    new forge.ai.rl.features.GameStateEncoder(
-                        new RLConfig());
-                forge.ai.rl.features.GameStateFeatures gs =
-                    enc.encode(game, p);
-                forge.ai.rl.decisions.DecisionContext ctx =
-                    new forge.ai.rl.decisions.DecisionContext(
-                        forge.ai.rl.decisions
-                            .DecisionType.PRIORITY_ACTION,
-                        gs, List.of(), 0, 0,
-                        "game_end_turn_"
-                            + game.getPhaseHandler().getTurn());
-                forge.ai.rl.decisions.DecisionResult res =
-                    new forge.ai.rl.decisions.DecisionResult(
-                        List.of(won ? 1 : 0),
-                        new float[0], won ? 1f : -1f, true);
-                Player opp = null;
-                for (Player other : lobbyToPlayer.values()) {
-                    if (other != p) { opp = other; break; }
-                }
-                rl.getRecorder().recordDecision(ctx, res,
-                    p.getLife(),
-                    opp != null ? opp.getLife() : 0,
-                    p.getCardsIn(
-                        forge.game.zone.ZoneType.Hand).size(),
-                    opp != null ? opp.getCardsIn(
-                        forge.game.zone.ZoneType.Hand).size() : 0,
-                    0, 0);
-            }
-            rl.getRecorder().endGame(won);
         }
 
         // Build result

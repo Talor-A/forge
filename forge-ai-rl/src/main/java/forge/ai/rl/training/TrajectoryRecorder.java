@@ -69,6 +69,7 @@ public class TrajectoryRecorder {
         DecisionRecord record = new DecisionRecord();
         record.turnIndex = currentGame.size();
         record.decisionType = context.getType().name();
+        record.contextInfo = context.getContextInfo();
         record.globalFeatures = context.getGameState().getGlobalFeatures();
         record.candidateCount = context.getCandidateFeatures().size();
         record.selectedIndices = result.getSelectedIndices();
@@ -165,6 +166,7 @@ public class TrajectoryRecorder {
     private static class DecisionRecord {
         int turnIndex;
         String decisionType;
+        String contextInfo;
         float[] globalFeatures;
         float[] gameStateFlat;
         float[][] candidateFeatures;
