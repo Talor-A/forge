@@ -70,6 +70,7 @@
         <module>forge-gui-mobile-dev</module>
         <module>forge-gui-desktop</module>
         <module>forge-gui-ios</module>
+        <module>forge-ai-rl</module>
         <module>forge-lda</module>
         <module>adventure-editor</module>
         <module>forge-gui-android</module>

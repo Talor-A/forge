@@ -164,7 +164,24 @@ public class Localizer {
                 englishBundle = ResourceBundle.getBundle("en-US", new Locale("en", "US"), loader);
             } catch (NullPointerException | MissingResourceException e) {
                 //If the language can't be loaded, default to US English
-                resourceBundle = ResourceBundle.getBundle("en-US", new Locale("en_US"), loader);
+                try {
+                    resourceBundle = ResourceBundle.getBundle("en-US", new Locale("en", "US"), loader);
+                } catch (MissingResourceException e2) {
+                    // Java 21+ compatibility: PropertyResourceBundle from file
+                    try {
+                        File langFile = new File(file, "en-US.properties");
+                        java.io.InputStream is = new java.io.FileInputStream(langFile);
+                        resourceBundle = new java.util.PropertyResourceBundle(is);
+                        is.close();
+                    } catch (Exception e3) {
+                        throw new RuntimeException(
+                                "Cannot load language file from "
+                                + languagesDirectory, e3);
+                    }
+                }
+                if (englishBundle == null) {
+                    englishBundle = resourceBundle;
+                }
                 e.printStackTrace();
             }
 

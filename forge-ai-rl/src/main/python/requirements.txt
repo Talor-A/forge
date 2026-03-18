@@ -1,0 +1,13 @@
+# PyTorch with CUDA support for RTX 3080 (CUDA 11.8+)
+--index-url https://download.pytorch.org/whl/cu121
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Training and evaluation
+numpy>=1.24.0
+tensorboard>=2.15.0
+tqdm>=4.66.0
+
+# ONNX export for deployment
+onnx>=1.15.0
+onnxruntime-gpu>=1.17.0
