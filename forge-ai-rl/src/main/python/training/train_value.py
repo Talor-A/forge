@@ -1,16 +1,22 @@
+#!/usr/bin/env python3
 """
-Train Value Network — First training phase.
+Train Value Network — learns to evaluate MTG game states.
 
 Trains the game state encoder + value network to predict
-win/loss from end-of-game state snapshots. This is the
-simplest possible training task and validates the full pipeline.
+win/loss from mid-game state snapshots.
+
+Features:
+- Live terminal dashboard with training metrics
+- Progress bars for data loading and epochs
+- TensorBoard logging for detailed analysis
+- AMP (fp16) for GPU memory efficiency
+- Auto-saves best model checkpoint
 
 Usage:
     python training/train_value.py \
-        --data-dir ../../rl_data/trajectories \
+        --data-dir /path/to/trajectories \
         --device cuda \
-        --epochs 50 \
-        --batch-size 64
+        --epochs 50
 """
 
 import argparse
@@ -18,74 +24,292 @@ import os
 import sys
 import time
 import logging
+import signal
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
 
-# Add parent to path
+# Force unbuffered output
+os.environ['PYTHONUNBUFFERED'] = '1'
+
 sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
 from model.mtg_model import MTGModel
-from model.gpu_config import auto_detect_profile
-from training.dataset import TrajectoryDataset, create_dataloader
+from model.gpu_config import auto_detect_profile, estimate_memory_usage
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s')
+    format='%(asctime)s %(message)s',
+    datefmt='%H:%M:%S',
+    stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 
-def train_epoch(model, dataloader, optimizer, scaler,
+# ── Terminal UI helpers ──────────────────────────────
+
+def clear_line():
+    print('\r' + ' ' * 80 + '\r', end='', flush=True)
+
+def progress_bar(current, total, width=40, prefix='',
+                 suffix='', fill='█'):
+    pct = current / max(total, 1)
+    filled = int(width * pct)
+    bar = fill * filled + '░' * (width - filled)
+    print(f'\r  {prefix} |{bar}| {current}/{total}'
+          f' {pct:.0%} {suffix}', end='', flush=True)
+    if current >= total:
+        print(flush=True)
+
+
+def print_header(title):
+    w = 62
+    print(flush=True)
+    print('┌' + '─' * w + '┐', flush=True)
+    print('│' + title.center(w) + '│', flush=True)
+    print('└' + '─' * w + '┘', flush=True)
+
+
+def print_config(items):
+    """Print config as a nice table."""
+    print('  ┌──────────────────────┬───────────────────────┐',
+          flush=True)
+    for k, v in items:
+        print(f'  │ {k:<20s} │ {str(v):>21s} │', flush=True)
+    print('  └──────────────────────┴───────────────────────┘',
+          flush=True)
+
+
+def print_epoch_header():
+    print(flush=True)
+    print('  Epoch │ Train Loss │ Train Acc │'
+          ' Val Loss │ Val Acc │  Time  │ Status',
+          flush=True)
+    print('  ──────┼────────────┼───────────┼'
+          '──────────┼─────────┼────────┼───────',
+          flush=True)
+
+
+def print_epoch_row(epoch, epochs, tloss, tacc,
+                    vloss, vacc, elapsed, status=''):
+    print(f'  {epoch:>4d}/{epochs:<1d} │'
+          f' {tloss:>10.6f} │'
+          f' {tacc:>8.1%} │'
+          f' {vloss:>8.6f} │'
+          f' {vacc:>6.1%} │'
+          f' {elapsed:>5.1f}s │'
+          f' {status}', flush=True)
+
+
+def print_summary(best_acc, best_epoch, total_time, save_path):
+    print(flush=True)
+    print('  ┌──────────────────────────────────────────┐',
+          flush=True)
+    print(f'  │ Best val accuracy: {best_acc:>6.1%}'
+          f' (epoch {best_epoch})      │', flush=True)
+    print(f'  │ Total training time: {total_time:>6.1f}s'
+          f'              │', flush=True)
+    print(f'  │ Model: {os.path.basename(save_path):<33s}│',
+          flush=True)
+    print('  └──────────────────────────────────────────┘',
+          flush=True)
+
+
+# ── Dataset with progress ────────────────────────────
+
+def load_dataset_with_progress(data_dir, global_dim=64,
+                                card_dim=128, max_board=30,
+                                max_hand=15, max_gy=40,
+                                max_stack=10, max_files=None):
+    """Load trajectory files with a progress bar."""
+    import json
+    import numpy as np
+    from pathlib import Path
+
+    path = Path(data_dir)
+    files = sorted(path.glob('traj_*.jsonl'))
+    if max_files:
+        files = files[:max_files]
+    if not files:
+        logger.error(f"No trajectory files in {data_dir}")
+        return []
+
+    zones_config = [
+        ('my_board', max_board, card_dim),
+        ('opp_board', max_board, card_dim),
+        ('hand', max_hand, card_dim),
+        ('my_gy', max_gy, card_dim),
+        ('opp_gy', max_gy, card_dim),
+        ('stack', max_stack, card_dim),
+    ]
+
+    samples = []
+    wins = 0
+    losses = 0
+    total_decisions = 0
+
+    print(f'  Loading {len(files)} trajectory files...',
+          flush=True)
+
+    for i, filepath in enumerate(files):
+        if i % 50 == 0 or i == len(files) - 1:
+            progress_bar(i + 1, len(files),
+                         prefix='Loading',
+                         suffix=f'{len(samples)} samples')
+        try:
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+            if len(lines) < 2:
+                continue
+
+            header = json.loads(lines[0])
+            won = header.get('won', False)
+            if won:
+                wins += 1
+            else:
+                losses += 1
+
+            for line in lines[1:]:
+                rec = json.loads(line)
+                flat = np.array(
+                    rec.get('gameStateFlat', []),
+                    dtype=np.float32)
+                gf = np.array(
+                    rec.get('globalFeatures', []),
+                    dtype=np.float32)
+
+                # Clamp extreme values
+                np.clip(flat, -10.0, 10.0, out=flat)
+                flat = np.nan_to_num(flat, nan=0.0,
+                                     posinf=1.0, neginf=-1.0)
+                np.clip(gf, -10.0, 10.0, out=gf)
+                gf = np.nan_to_num(gf, nan=0.0,
+                                   posinf=1.0, neginf=-1.0)
+
+                # Parse zones from flat array
+                g = np.zeros(global_dim, dtype=np.float32)
+                g_len = min(len(gf), global_dim)
+                if g_len > 0:
+                    g[:g_len] = gf[:g_len]
+
+                zones = {}
+                masks = {}
+                offset = global_dim
+                for name, count, dim in zones_config:
+                    zs = count * dim
+                    zd = np.zeros((count, dim),
+                                  dtype=np.float32)
+                    zm = np.zeros(count, dtype=np.bool_)
+                    if offset + zs <= len(flat):
+                        raw = flat[offset:offset + zs].reshape(
+                            count, dim)
+                        for j in range(count):
+                            if np.any(raw[j] != 0):
+                                zd[j] = raw[j]
+                                zm[j] = True
+                    offset += zs
+                    zones[name] = zd
+                    masks[name + '_mask'] = zm
+
+                samples.append({
+                    'global_features': g,
+                    'zones': zones,
+                    'masks': masks,
+                    'won': 1.0 if won else 0.0,
+                    'value_target':
+                        1.0 if won else -1.0,
+                })
+                total_decisions += 1
+
+        except Exception:
+            pass
+
+    print(flush=True)
+    print(f'  Loaded {len(samples)} samples '
+          f'({wins}W/{losses}L, '
+          f'{total_decisions} decisions)', flush=True)
+    return samples
+
+
+class TensorDataset(torch.utils.data.Dataset):
+    """Wraps parsed samples into a PyTorch Dataset."""
+    def __init__(self, samples):
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        return {
+            'global_features': torch.from_numpy(
+                s['global_features']),
+            'my_board': torch.from_numpy(
+                s['zones']['my_board']),
+            'my_board_mask': torch.from_numpy(
+                s['masks']['my_board_mask']),
+            'opp_board': torch.from_numpy(
+                s['zones']['opp_board']),
+            'opp_board_mask': torch.from_numpy(
+                s['masks']['opp_board_mask']),
+            'hand': torch.from_numpy(
+                s['zones']['hand']),
+            'hand_mask': torch.from_numpy(
+                s['masks']['hand_mask']),
+            'my_gy': torch.from_numpy(
+                s['zones']['my_gy']),
+            'my_gy_mask': torch.from_numpy(
+                s['masks']['my_gy_mask']),
+            'opp_gy': torch.from_numpy(
+                s['zones']['opp_gy']),
+            'opp_gy_mask': torch.from_numpy(
+                s['masks']['opp_gy_mask']),
+            'stack': torch.from_numpy(
+                s['zones']['stack']),
+            'stack_mask': torch.from_numpy(
+                s['masks']['stack_mask']),
+            'won': torch.tensor(
+                s['won'], dtype=torch.float32),
+            'value_target': torch.tensor(
+                s['value_target'], dtype=torch.float32),
+        }
+
+
+# ── Training loops ───────────────────────────────────
+
+def train_epoch(model, loader, optimizer, scaler,
                 device, use_amp):
-    """Train for one epoch. Returns avg loss and accuracy."""
     model.train()
     total_loss = 0
-    total_correct = 0
-    total_samples = 0
+    correct = 0
+    total = 0
 
-    for batch in dataloader:
-        # Move to device
-        global_f = batch['global_features'].to(device)
-        my_board = batch['my_board'].to(device)
-        my_board_m = batch['my_board_mask'].to(device)
-        opp_board = batch['opp_board'].to(device)
-        opp_board_m = batch['opp_board_mask'].to(device)
-        hand = batch['hand'].to(device)
-        hand_m = batch['hand_mask'].to(device)
-        my_gy = batch['my_gy'].to(device)
-        my_gy_m = batch['my_gy_mask'].to(device)
-        opp_gy = batch['opp_gy'].to(device)
-        opp_gy_m = batch['opp_gy_mask'].to(device)
-        stack = batch['stack'].to(device)
-        stack_m = batch['stack_mask'].to(device)
-        targets = batch['value_target'].to(device)
+    for batch in loader:
+        g = batch['global_features'].to(device)
+        mb = batch['my_board'].to(device)
+        mbm = batch['my_board_mask'].to(device)
+        ob = batch['opp_board'].to(device)
+        obm = batch['opp_board_mask'].to(device)
+        h = batch['hand'].to(device)
+        hm = batch['hand_mask'].to(device)
+        mg = batch['my_gy'].to(device)
+        mgm = batch['my_gy_mask'].to(device)
+        og = batch['opp_gy'].to(device)
+        ogm = batch['opp_gy_mask'].to(device)
+        s = batch['stack'].to(device)
+        sm = batch['stack_mask'].to(device)
+        tgt = batch['value_target'].to(device)
 
         optimizer.zero_grad()
-
         with torch.amp.autocast('cuda', enabled=use_amp):
-            # Forward pass
-            state_embed = model.encode_state(
-                global_f,
-                my_board, my_board_m,
-                opp_board, opp_board_m,
-                hand, hand_m,
-                my_gy, my_gy_m,
-                opp_gy, opp_gy_m,
-                stack, stack_m)
+            emb = model.encode_state(
+                g, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, s, sm)
+            pred = model.get_value(emb).squeeze(-1)
+            loss = nn.functional.mse_loss(pred, tgt)
 
-            # Value prediction
-            value_pred = model.get_value(
-                state_embed).squeeze(-1)
-
-            # MSE loss on value prediction
-            loss = nn.functional.mse_loss(
-                value_pred, targets)
-
-        # Backward
-        if scaler is not None:
+        if scaler:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
@@ -98,149 +322,134 @@ def train_epoch(model, dataloader, optimizer, scaler,
                 model.parameters(), 1.0)
             optimizer.step()
 
-        # Track metrics
-        batch_size = targets.shape[0]
-        total_loss += loss.item() * batch_size
-        # Accuracy: did we predict the right sign?
-        predicted_win = value_pred > 0
-        actual_win = targets > 0
-        total_correct += (
-            predicted_win == actual_win).sum().item()
-        total_samples += batch_size
+        bs = tgt.shape[0]
+        total_loss += loss.item() * bs
+        correct += ((pred > 0) == (tgt > 0)).sum().item()
+        total += bs
 
-    avg_loss = total_loss / max(1, total_samples)
-    accuracy = total_correct / max(1, total_samples)
-    return avg_loss, accuracy
+    return total_loss / max(1, total), correct / max(1, total)
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, use_amp):
-    """Evaluate on validation set."""
+def evaluate(model, loader, device, use_amp):
     model.eval()
     total_loss = 0
-    total_correct = 0
-    total_samples = 0
+    correct = 0
+    total = 0
 
-    for batch in dataloader:
-        global_f = batch['global_features'].to(device)
-        my_board = batch['my_board'].to(device)
-        my_board_m = batch['my_board_mask'].to(device)
-        opp_board = batch['opp_board'].to(device)
-        opp_board_m = batch['opp_board_mask'].to(device)
-        hand = batch['hand'].to(device)
-        hand_m = batch['hand_mask'].to(device)
-        my_gy = batch['my_gy'].to(device)
-        my_gy_m = batch['my_gy_mask'].to(device)
-        opp_gy = batch['opp_gy'].to(device)
-        opp_gy_m = batch['opp_gy_mask'].to(device)
-        stack = batch['stack'].to(device)
-        stack_m = batch['stack_mask'].to(device)
-        targets = batch['value_target'].to(device)
+    for batch in loader:
+        g = batch['global_features'].to(device)
+        mb = batch['my_board'].to(device)
+        mbm = batch['my_board_mask'].to(device)
+        ob = batch['opp_board'].to(device)
+        obm = batch['opp_board_mask'].to(device)
+        h = batch['hand'].to(device)
+        hm = batch['hand_mask'].to(device)
+        mg = batch['my_gy'].to(device)
+        mgm = batch['my_gy_mask'].to(device)
+        og = batch['opp_gy'].to(device)
+        ogm = batch['opp_gy_mask'].to(device)
+        s = batch['stack'].to(device)
+        sm = batch['stack_mask'].to(device)
+        tgt = batch['value_target'].to(device)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
-            state_embed = model.encode_state(
-                global_f,
-                my_board, my_board_m,
-                opp_board, opp_board_m,
-                hand, hand_m,
-                my_gy, my_gy_m,
-                opp_gy, opp_gy_m,
-                stack, stack_m)
-            value_pred = model.get_value(
-                state_embed).squeeze(-1)
-            loss = nn.functional.mse_loss(
-                value_pred, targets)
+            emb = model.encode_state(
+                g, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, s, sm)
+            pred = model.get_value(emb).squeeze(-1)
+            loss = nn.functional.mse_loss(pred, tgt)
 
-        batch_size = targets.shape[0]
-        total_loss += loss.item() * batch_size
-        predicted_win = value_pred > 0
-        actual_win = targets > 0
-        total_correct += (
-            predicted_win == actual_win).sum().item()
-        total_samples += batch_size
+        bs = tgt.shape[0]
+        total_loss += loss.item() * bs
+        correct += ((pred > 0) == (tgt > 0)).sum().item()
+        total += bs
 
-    avg_loss = total_loss / max(1, total_samples)
-    accuracy = total_correct / max(1, total_samples)
-    return avg_loss, accuracy
+    return total_loss / max(1, total), correct / max(1, total)
 
+
+# ── Main ─────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
         description='Train MTG RL Value Network')
-    parser.add_argument(
-        '--data-dir',
-        default='../../rl_data/trajectories',
-        help='Trajectory data directory')
-    parser.add_argument(
-        '--save-dir',
-        default='../../rl_data/checkpoints',
-        help='Checkpoint directory')
-    parser.add_argument(
-        '--log-dir',
-        default='../../rl_data/runs/value_train',
-        help='TensorBoard log directory')
-    parser.add_argument(
-        '--epochs', type=int, default=50)
-    parser.add_argument(
-        '--batch-size', type=int, default=None)
-    parser.add_argument(
-        '--lr', type=float, default=1e-3)
-    parser.add_argument(
-        '--device', default=None)
-    parser.add_argument(
-        '--val-split', type=float, default=0.1,
-        help='Validation split ratio')
-    parser.add_argument(
-        '--save-every', type=int, default=10,
-        help='Save checkpoint every N epochs')
+    parser.add_argument('--data-dir',
+        default='../../rl_data/trajectories')
+    parser.add_argument('--save-dir',
+        default='../../rl_data/checkpoints')
+    parser.add_argument('--log-dir',
+        default='../../rl_data/runs/value_train')
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch-size', type=int, default=None)
+    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--device', default=None)
+    parser.add_argument('--val-split', type=float, default=0.1)
+    parser.add_argument('--save-every', type=int, default=10)
+    parser.add_argument('--max-files', type=int, default=None,
+        help='Limit number of files to load (for testing)')
     args = parser.parse_args()
 
-    # Auto-detect GPU
+    # Setup
     profile = auto_detect_profile()
     device = args.device or (
         'cuda' if torch.cuda.is_available() else 'cpu')
     batch_size = args.batch_size or profile.batch_size
     use_amp = profile.use_amp and device.startswith('cuda')
 
-    logger.info(f"Device: {device} | Batch: {batch_size} "
-                f"| AMP: {use_amp}")
-    logger.info(f"GPU: {profile.name}")
-
-    # Create directories
     os.makedirs(args.save_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
 
+    # Header
+    print_header('MTG RL — Value Network Training')
+
+    print_config([
+        ('Device', f'{device} ({profile.name})'),
+        ('Batch size', str(batch_size)),
+        ('Learning rate', f'{args.lr:.0e}'),
+        ('Epochs', str(args.epochs)),
+        ('Mixed precision', str(use_amp)),
+        ('Data', args.data_dir),
+    ])
+
     # Load data
-    logger.info(f"Loading data from {args.data_dir}")
-    full_dataset = TrajectoryDataset(args.data_dir)
-    if len(full_dataset) == 0:
-        logger.error("No training data found!")
+    print(flush=True)
+    samples = load_dataset_with_progress(
+        args.data_dir, max_files=args.max_files if hasattr(args, 'max_files') else None)
+    if not samples:
         return
 
-    # Train/val split
-    n_val = max(1, int(len(full_dataset) * args.val_split))
-    n_train = len(full_dataset) - n_val
-    train_ds, val_ds = torch.utils.data.random_split(
-        full_dataset, [n_train, n_val])
+    # Split
+    n_val = max(1, int(len(samples) * args.val_split))
+    n_train = len(samples) - n_val
+
+    import random
+    random.shuffle(samples)
+    train_ds = TensorDataset(samples[:n_train])
+    val_ds = TensorDataset(samples[n_train:])
 
     train_loader = torch.utils.data.DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=2, pin_memory=device.startswith('cuda'),
+        num_workers=2,
+        pin_memory=device.startswith('cuda'),
         drop_last=True)
     val_loader = torch.utils.data.DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=2, pin_memory=device.startswith('cuda'))
+        num_workers=2,
+        pin_memory=device.startswith('cuda'))
 
-    logger.info(
-        f"Train: {n_train} samples | Val: {n_val} samples")
+    print(f'  Split: {n_train} train / {n_val} val',
+          flush=True)
 
-    # Create model
+    # Model
     model = MTGModel().to(device)
     params = model.count_parameters()
-    logger.info(f"Model: {params['total']:,} parameters")
-    logger.info(
-        f"  Encoder: {params['state_encoder']:,} | "
-        f"Value: {params['value_network']:,}")
+    print(f'  Model: {params["total"]:,} parameters',
+          flush=True)
+
+    mem = estimate_memory_usage(batch_size)
+    if device.startswith('cuda'):
+        print(f'  Est. VRAM: {mem["total_gb"]:.2f} GB',
+              flush=True)
 
     # Optimizer
     optimizer = optim.AdamW(
@@ -250,70 +459,67 @@ def main():
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
     # TensorBoard
-    writer = SummaryWriter(args.log_dir)
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(args.log_dir)
+    except ImportError:
+        writer = None
 
-    # Training loop
+    # Training
+    print_epoch_header()
     best_val_acc = 0
-    logger.info(f"Starting training for {args.epochs} epochs")
-    logger.info("=" * 60)
+    best_epoch = 0
+    t_total_start = time.time()
+    save_path = os.path.join(
+        args.save_dir, 'best_value_model.pt')
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
 
-        train_loss, train_acc = train_epoch(
+        tloss, tacc = train_epoch(
             model, train_loader, optimizer, scaler,
             device, use_amp)
-        val_loss, val_acc = evaluate(
+        vloss, vacc = evaluate(
             model, val_loader, device, use_amp)
         scheduler.step()
 
         elapsed = time.time() - t0
-        lr = scheduler.get_last_lr()[0]
 
-        logger.info(
-            f"Epoch {epoch:3d}/{args.epochs} | "
-            f"Train Loss: {train_loss:.4f} "
-            f"Acc: {train_acc:.3f} | "
-            f"Val Loss: {val_loss:.4f} "
-            f"Acc: {val_acc:.3f} | "
-            f"LR: {lr:.6f} | "
-            f"{elapsed:.1f}s")
-
-        # TensorBoard
-        writer.add_scalar(
-            'train/loss', train_loss, epoch)
-        writer.add_scalar(
-            'train/accuracy', train_acc, epoch)
-        writer.add_scalar(
-            'val/loss', val_loss, epoch)
-        writer.add_scalar(
-            'val/accuracy', val_acc, epoch)
-        writer.add_scalar(
-            'train/lr', lr, epoch)
-
-        # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            model.save(os.path.join(
-                args.save_dir, 'best_value_model.pt'))
-            logger.info(
-                f"  -> New best val accuracy: {val_acc:.3f}")
-
-        # Periodic checkpoint
-        if epoch % args.save_every == 0:
+        # Status indicator
+        status = ''
+        if vacc > best_val_acc:
+            best_val_acc = vacc
+            best_epoch = epoch
+            model.save(save_path)
+            status = '★ best'
+        elif epoch % args.save_every == 0:
             model.save(os.path.join(
                 args.save_dir,
                 f'value_model_epoch_{epoch}.pt'))
+            status = 'saved'
 
-    # Final save
+        print_epoch_row(epoch, args.epochs,
+                        tloss, tacc, vloss, vacc,
+                        elapsed, status)
+
+        if writer:
+            writer.add_scalar('train/loss', tloss, epoch)
+            writer.add_scalar('train/accuracy', tacc, epoch)
+            writer.add_scalar('val/loss', vloss, epoch)
+            writer.add_scalar('val/accuracy', vacc, epoch)
+            writer.add_scalar('train/lr',
+                scheduler.get_last_lr()[0], epoch)
+
+    # Final
     model.save(os.path.join(
         args.save_dir, 'value_model_final.pt'))
-    logger.info("=" * 60)
-    logger.info(
-        f"Training complete. Best val acc: {best_val_acc:.3f}")
-    logger.info(
-        f"Model saved to {args.save_dir}")
-    writer.close()
+    total_time = time.time() - t_total_start
+
+    print_summary(best_val_acc, best_epoch,
+                  total_time, save_path)
+
+    if writer:
+        writer.close()
 
 
 if __name__ == '__main__':
