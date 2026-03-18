@@ -75,6 +75,9 @@ public class SimulateRLTraining {
         String outputDir = params.containsKey("o")
                 ? params.get("o").get(0) : "rl_data/trajectories";
         boolean quiet = params.containsKey("q");
+        int threads = params.containsKey("t")
+                ? Integer.parseInt(params.get("t").get(0))
+                : Runtime.getRuntime().availableProcessors();
         String grpcHost = params.containsKey("host")
                 ? params.get("host").get(0) : "localhost";
         int grpcPort = params.containsKey("port")
@@ -115,13 +118,14 @@ public class SimulateRLTraining {
             return;
         }
 
-        System.out.println("Mode: " + mode + " | Games: " + nGames + " | Timeout: " + timeout + "s");
+        System.out.println("Mode: " + mode + " | Games: " + nGames
+                + " | Threads: " + threads + " | Timeout: " + timeout + "s");
         System.out.println("Output: " + outputDir);
         System.out.println();
 
         switch (mode) {
             case "collect":
-                runCollectionMode(decks, nGames, timeout, outputDir, quiet);
+                runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads);
                 break;
             case "evaluate":
                 runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort);
@@ -138,67 +142,98 @@ public class SimulateRLTraining {
     /**
      * Collection mode: heuristic AI vs heuristic AI, recording all decisions as trajectories.
      * This produces training data for imitation learning (Phase 2 of the plan).
+     * Runs games in parallel across multiple threads.
      */
     private static void runCollectionMode(List<Deck> decks, int nGames, int timeout,
-                                           String outputDir, boolean quiet) {
+                                           String outputDir, boolean quiet, int threads) {
         System.out.println("=== Imitation Learning Data Collection ===");
+        System.out.println("Using " + threads + " threads");
 
-        RLConfig config = new RLConfig();
-        config.setMode(RLModelMode.HEURISTIC_FALLBACK);
-        config.setRecordTrajectories(true);
-        config.setTrajectoryOutputDir(outputDir);
-
+        AtomicInteger completed = new AtomicInteger(0);
         AtomicInteger p1Wins = new AtomicInteger(0);
         AtomicInteger p2Wins = new AtomicInteger(0);
         AtomicInteger draws = new AtomicInteger(0);
         AtomicInteger errors = new AtomicInteger(0);
-        long totalTimeMs = 0;
+        long startTime = System.currentTimeMillis();
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
 
         for (int i = 0; i < nGames; i++) {
-            // Rotate decks and starting player
-            Deck deck1 = decks.get(i % decks.size());
-            Deck deck2 = decks.get((i + 1) % decks.size());
-            boolean p1First = (i % 2 == 0);
+            final int gameIdx = i;
+            final Deck deck1 = decks.get(i % decks.size());
+            final Deck deck2 = decks.get((i + 1) % decks.size());
+            final boolean p1First = (i % 2 == 0);
 
-            StopWatch sw = new StopWatch();
-            sw.start();
+            futures.add(executor.submit(() -> {
+                // Each thread gets its own RLConfig to avoid contention
+                RLConfig config = new RLConfig();
+                config.setMode(RLModelMode.HEURISTIC_FALLBACK);
+                config.setRecordTrajectories(true);
+                config.setTrajectoryOutputDir(outputDir);
 
+                try {
+                    GameResult result = runSingleGame(
+                            deck1, deck2, config, config,
+                            "P1_" + gameIdx, "P2_" + gameIdx,
+                            timeout, p1First);
+
+                    if (result.isDraw) {
+                        draws.incrementAndGet();
+                    } else if (result.player1Won) {
+                        p1Wins.incrementAndGet();
+                    } else {
+                        p2Wins.incrementAndGet();
+                    }
+                } catch (Exception e) {
+                    errors.incrementAndGet();
+                }
+
+                int done = completed.incrementAndGet();
+                if (quiet && done % 100 == 0) {
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    double gps = done * 1000.0 / elapsed;
+                    int remaining = nGames - done;
+                    double etaSec = remaining / gps;
+                    System.out.printf(
+                            "Progress: %d/%d (%.1f games/sec) "
+                            + "P1:%d P2:%d Draw:%d Err:%d "
+                            + "ETA:%.0fs%n",
+                            done, nGames, gps,
+                            p1Wins.get(), p2Wins.get(),
+                            draws.get(), errors.get(), etaSec);
+                } else if (!quiet && done % 10 == 0) {
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    double gps = done * 1000.0 / elapsed;
+                    System.out.printf(
+                            "Progress: %d/%d (%.1f games/sec) "
+                            + "P1:%d P2:%d%n",
+                            done, nGames, gps,
+                            p1Wins.get(), p2Wins.get());
+                }
+            }));
+        }
+
+        // Wait for all games to complete
+        for (java.util.concurrent.Future<?> f : futures) {
             try {
-                GameResult result = runSingleGame(deck1, deck2, config, config,
-                        "P1_" + i, "P2_" + i, timeout, p1First);
-                sw.stop();
-                totalTimeMs += sw.getTime();
-
-                if (result.isDraw) {
-                    draws.incrementAndGet();
-                } else if (result.player1Won) {
-                    p1Wins.incrementAndGet();
-                } else {
-                    p2Wins.incrementAndGet();
-                }
-
-                if (!quiet) {
-                    System.out.printf("Game %d/%d: %s (%.1fs) [P1: %d | P2: %d | Draw: %d]%n",
-                            i + 1, nGames, result.summary, sw.getTime() / 1000.0,
-                            p1Wins.get(), p2Wins.get(), draws.get());
-                } else if ((i + 1) % 50 == 0) {
-                    System.out.printf("Progress: %d/%d games (P1: %d | P2: %d | Draw: %d | Avg: %.0fms)%n",
-                            i + 1, nGames, p1Wins.get(), p2Wins.get(), draws.get(),
-                            (double) totalTimeMs / (i + 1));
-                }
-
+                f.get(timeout + 30, TimeUnit.SECONDS);
             } catch (Exception e) {
-                if (sw.isStarted()) sw.stop();
                 errors.incrementAndGet();
-                System.out.printf("Game %d FAILED: %s%n", i + 1, e.getMessage());
             }
         }
+        executor.shutdown();
+
+        long totalMs = System.currentTimeMillis() - startTime;
+        double gamesPerSec = nGames * 1000.0 / totalMs;
 
         System.out.println();
         System.out.println("=== Collection Complete ===");
-        System.out.printf("Games: %d | P1 Wins: %d | P2 Wins: %d | Draws: %d | Errors: %d%n",
+        System.out.printf("Games: %d | P1: %d | P2: %d | Draw: %d | Errors: %d%n",
                 nGames, p1Wins.get(), p2Wins.get(), draws.get(), errors.get());
-        System.out.printf("Avg game time: %.0fms%n", (double) totalTimeMs / Math.max(1, nGames - errors.get()));
+        System.out.printf("Total time: %.1fs | %.1f games/sec (%d threads)%n",
+                totalMs / 1000.0, gamesPerSec, threads);
         System.out.println("Trajectories saved to: " + outputDir);
     }
 
@@ -482,6 +517,7 @@ public class SimulateRLTraining {
         System.out.println("  -D <dir>      Load all .dck files from directory");
         System.out.println("  -n <N>        Number of games (default: 100)");
         System.out.println("  -o <dir>      Output directory for trajectories (default: rl_data/trajectories)");
+        System.out.println("  -t <threads>  Parallel threads (default: all CPUs)");
         System.out.println("  -c <seconds>  Timeout per game (default: 180)");
         System.out.println("  -host <host>  Model server host (default: localhost)");
         System.out.println("  -port <port>  Model server port (default: 50051)");
