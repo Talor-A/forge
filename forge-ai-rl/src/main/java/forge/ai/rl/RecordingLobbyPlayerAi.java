@@ -2,39 +2,35 @@ package forge.ai.rl;
 
 import forge.ai.LobbyPlayerAi;
 import forge.ai.rl.training.TrajectoryRecorder;
-import forge.game.Game;
-import forge.game.player.Player;
-import forge.game.player.PlayerController;
 
 /**
- * LobbyPlayer that uses standard heuristic AI but provides
- * a TrajectoryRecorder for external state snapshotting.
- *
- * The game runner captures state at turn boundaries and
- * records decisions via the game event system, rather than
- * instrumenting the controller (which breaks AI internals).
+ * Marker subclass of LobbyPlayerAi for trajectory recording.
+ * Holds config and recorder but does NOT modify AI behavior.
+ * Recorder and config are lazily initialized to avoid any
+ * side effects during construction.
  */
 public class RecordingLobbyPlayerAi extends LobbyPlayerAi {
 
-    private final RLConfig config;
+    private RLConfig config;
     private TrajectoryRecorder recorder;
 
-    public RecordingLobbyPlayerAi(
-            String name, RLConfig config) {
+    public RecordingLobbyPlayerAi(String name) {
         super(name, null);
-        setAiProfile("Default");
-        this.config = config;
-        this.recorder = new TrajectoryRecorder(
-                config.getTrajectoryOutputDir());
     }
 
-    // Use standard AI — don't override createIngamePlayer
-
-    public TrajectoryRecorder getRecorder() {
-        return recorder;
+    public void setRLConfig(RLConfig config) {
+        this.config = config;
     }
 
     public RLConfig getConfig() {
         return config;
+    }
+
+    public TrajectoryRecorder getRecorder() {
+        if (recorder == null && config != null) {
+            recorder = new TrajectoryRecorder(
+                    config.getTrajectoryOutputDir());
+        }
+        return recorder;
     }
 }

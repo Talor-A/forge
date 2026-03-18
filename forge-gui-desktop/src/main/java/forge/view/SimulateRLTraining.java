@@ -375,26 +375,31 @@ public class SimulateRLTraining {
             }
         }
 
-        // Start event-based trajectory recording
-        List<forge.ai.rl.GameStateRecorder> recorders =
-                new ArrayList<>();
-        for (RegisteredPlayer rp : players) {
-            if (rp.getPlayer()
-                    instanceof forge.ai.rl.RecordingLobbyPlayerAi) {
-                forge.ai.rl.RecordingLobbyPlayerAi rl =
-                    (forge.ai.rl.RecordingLobbyPlayerAi)
-                        rp.getPlayer();
-                Player p = lobbyToPlayer.get(rp.getPlayer());
-                if (p != null) {
-                    rl.getRecorder().startGame(
-                            gameId + "_" + p.getName());
-                    forge.ai.rl.GameStateRecorder gsr =
-                        new forge.ai.rl.GameStateRecorder(
-                            game, p, rl.getRecorder(),
-                            rl.getConfig());
-                    gsr.register();
-                    recorders.add(gsr);
-                }
+        // Attach decision listeners and state recorders
+        // Uses plain LobbyPlayerAi (subclassing breaks game)
+        // so we create recorders directly here
+        Map<Player, forge.ai.rl.training.TrajectoryRecorder>
+                recorders = new HashMap<>();
+        RLConfig anyConfig = config1.isRecordTrajectories()
+                ? config1 : config2;
+
+        if (anyConfig.isRecordTrajectories()) {
+            for (Player p : lobbyToPlayer.values()) {
+                forge.ai.rl.training.TrajectoryRecorder rec =
+                    new forge.ai.rl.training.TrajectoryRecorder(
+                        anyConfig.getTrajectoryOutputDir());
+                rec.startGame(gameId + "_" + p.getName());
+                recorders.put(p, rec);
+
+                // Decision listener disabled — causes turn-0
+                // (likely PlayerControllerAi checkstyle issues
+                // with modified class in fat jar)
+
+                // Event-based state snapshots
+                forge.ai.rl.GameStateRecorder gsr =
+                    new forge.ai.rl.GameStateRecorder(
+                        game, p, rec, anyConfig);
+                gsr.register();
             }
         }
 
@@ -414,17 +419,16 @@ public class SimulateRLTraining {
         }
 
         // Stop recording and write trajectory files
-        for (RegisteredPlayer rp : players) {
-            if (rp.getPlayer()
-                    instanceof forge.ai.rl.RecordingLobbyPlayerAi) {
-                forge.ai.rl.RecordingLobbyPlayerAi rl =
-                    (forge.ai.rl.RecordingLobbyPlayerAi)
-                        rp.getPlayer();
-                boolean won = game.getOutcome() != null
-                        && !game.getOutcome().isDraw()
-                        && game.getOutcome().isWinner(rp);
-                rl.getRecorder().endGame(won);
-            }
+        for (Map.Entry<Player,
+                forge.ai.rl.training.TrajectoryRecorder> entry
+                : recorders.entrySet()) {
+            Player p = entry.getKey();
+            RegisteredPlayer rp = p.getRegisteredPlayer();
+            boolean won = game.getOutcome() != null
+                    && !game.getOutcome().isDraw()
+                    && rp != null
+                    && game.getOutcome().isWinner(rp);
+            entry.getValue().endGame(won);
         }
 
         // Build result
@@ -444,12 +448,10 @@ public class SimulateRLTraining {
 
     private static LobbyPlayer createPlayer(String name, RLConfig config) {
         if (config.getMode() == RLModelMode.HEURISTIC_FALLBACK) {
-            if (config.isRecordTrajectories()) {
-                // Recording mode — heuristic AI with trajectory capture
-                return new forge.ai.rl.RecordingLobbyPlayerAi(name, config);
-            }
-            // Pure heuristic mode — standard AI player
-            LobbyPlayerAi aiPlayer = new LobbyPlayerAi(name, null);
+            LobbyPlayerAi aiPlayer;
+            // Always use plain LobbyPlayerAi — subclassing
+            // breaks the game engine (turn 0 instant win)
+            aiPlayer = new LobbyPlayerAi(name, null);
             aiPlayer.setAiProfile("Default");
             return aiPlayer;
         } else {
