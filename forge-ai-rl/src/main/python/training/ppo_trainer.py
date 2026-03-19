@@ -296,11 +296,12 @@ def compute_ppo_batch(model, head, samples, device,
             (1 - probs) * F.logsigmoid(-safe_logits))
         entropy = (entropy * cm.float()).sum(dim=1).mean()
 
-        # Total loss
+        # Total loss — entropy coefficient 0.1 encourages
+        # exploration (prevents sigmoid saturation)
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.01 * entropy)
+            0.1 * entropy)
 
     metrics = {
         'policy_loss': policy_loss.item(),

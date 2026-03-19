@@ -67,7 +67,9 @@ class AttackHead(nn.Module):
 
         # Binary decision per creature
         logits = self.attack_classifier(combined).squeeze(-1)
-        # Use large negative (not -inf) to avoid NaN in BCE loss
+        # Clamp logits to prevent sigmoid saturation — keeps gradients
+        # and entropy non-zero so PPO can learn
+        logits = logits.clamp(-5.0, 5.0)
         logits = logits.masked_fill(~creature_mask, -100.0)
 
         return logits
