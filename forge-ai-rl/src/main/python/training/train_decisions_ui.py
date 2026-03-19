@@ -54,6 +54,8 @@ class TrainingState:
     status: str = "Idle"
     phase: str = ""
     chart_dirty: bool = False
+    log_lines: List[str] = field(default_factory=list)
+    log_dirty: bool = False
 
     # Loading
     files_total: int = 0
@@ -104,6 +106,15 @@ class TrainingState:
 
     gpu_mem_used_mb: float = 0.0
     gpu_mem_total_mb: float = 0.0
+
+
+def log(state, msg):
+    """Thread-safe logging to console and state."""
+    print(msg, flush=True)
+    state.log_lines.append(msg)
+    if len(state.log_lines) > 200:
+        state.log_lines = state.log_lines[-200:]
+    state.log_dirty = True
 
 
 # ── Data loading ─────────────────────────────────────
@@ -290,8 +301,15 @@ def make_batch(model, batch, device, use_amp, head):
 
         logits = head(state_emb, cf, cm)
 
+        # Only compute loss on real creatures (mask=True)
+        # Replace padding logits with 0 to avoid NaN in BCE
+        safe_logits = logits.clone()
+        safe_logits[~cm] = 0.0
+        safe_tgt = tgt.clone()
+        safe_tgt[~cm] = 0.0
+
         loss = nn.functional.binary_cross_entropy_with_logits(
-            logits, tgt, reduction='none')
+            safe_logits, safe_tgt, reduction='none')
         loss = (loss * cm.float()).sum() / \
                cm.float().sum().clamp(min=1)
 
@@ -310,6 +328,8 @@ def train_head(model, head, head_name, samples, args,
                state, device, use_amp):
     state.current_head = head_name
     state.status = f"Training {head_name} head..."
+    log(state, f"\n=== Training {head_name} head ===")
+    log(state, f"Samples: {len(samples)}")
 
     for p in model.state_encoder.parameters():
         p.requires_grad = False
@@ -320,6 +340,7 @@ def train_head(model, head, head_name, samples, args,
 
     state.head_params = sum(
         p.numel() for p in head.parameters())
+    log(state, f"Head params: {state.head_params:,}")
 
     optimizer = optim.AdamW(
         head.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -431,6 +452,17 @@ def train_head(model, head, head_name, samples, args,
         else:
             state.block_best_acc = best_acc
 
+        status = ' *BEST*' if va == best_acc and va > 0 else ''
+        log(state,
+            f"  Epoch {epoch:>3d}/{args.epochs} | "
+            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
+            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
+
+        # Early stop on NaN
+        if np.isnan(tl) or np.isnan(vl):
+            log(state, f"  NaN detected! Stopping {head_name} training.")
+            break
+
         state.epoch_time = time.time() - t0
         state.elapsed = time.time() - start
         state.eta = (args.epochs - epoch) * state.epoch_time
@@ -469,10 +501,15 @@ def trainer_thread(state, args):
         # Load model
         state.phase = "training"
         state.status = "Loading encoder..."
+        log(state, f"\nDevice: {device} ({state.gpu_name})")
+        log(state, f"AMP: {use_amp}")
         if os.path.exists(args.encoder_checkpoint):
+            log(state, f"Loading encoder: {args.encoder_checkpoint}")
             model = MTGModel.load(
                 args.encoder_checkpoint, device=device)
+            log(state, "Encoder loaded.")
         else:
+            log(state, "No checkpoint — random init")
             model = MTGModel().to(device)
 
         state.encoder_params = sum(
@@ -499,14 +536,21 @@ def trainer_thread(state, args):
             # too since it's the same binary-per-creature task
 
         # Save combined model
-        model.save(os.path.join(
-            args.save_dir, 'model_with_decisions.pt'))
+        save_path = os.path.join(
+            args.save_dir, 'model_with_decisions.pt')
+        model.save(save_path)
+
+        log(state, f"\n=== Training Complete ===")
+        log(state, f"Attack best val acc: {state.attack_best_acc:.1%}")
+        log(state, f"Block best val acc: {state.block_best_acc:.1%}")
+        log(state, f"Model saved: {save_path}")
 
         state.status = "Training complete!"
         state.phase = "done"
         state.chart_dirty = True
 
     except Exception as e:
+        log(state, f"\nERROR: {e}")
         state.status = f"ERROR: {e}"
         state.phase = "done"
         state.chart_dirty = True

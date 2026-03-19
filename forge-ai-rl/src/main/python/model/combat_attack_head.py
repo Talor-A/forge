@@ -67,7 +67,8 @@ class AttackHead(nn.Module):
 
         # Binary decision per creature
         logits = self.attack_classifier(combined).squeeze(-1)
-        logits = logits.masked_fill(~creature_mask, float('-inf'))
+        # Use large negative (not -inf) to avoid NaN in BCE loss
+        logits = logits.masked_fill(~creature_mask, -100.0)
 
         return logits
 
