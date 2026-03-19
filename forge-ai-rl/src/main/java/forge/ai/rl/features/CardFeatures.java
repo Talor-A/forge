@@ -94,7 +94,11 @@ public class CardFeatures {
         // In-game state [17-21]
         features[idx++] = card.isTapped() ? 1f : 0f;
         features[idx++] = card.hasSickness() ? 1f : 0f;
-        features[idx++] = card.isAttacking() ? 1f : 0f;
+        try {
+            features[idx++] = card.isAttacking() ? 1f : 0f;
+        } catch (NullPointerException e) {
+            features[idx++] = 0f;
+        }
         // Blocking status is tracked on the Combat object, not the Card directly
         // We approximate by checking if untapped and in combat phase context
         features[idx++] = 0f; // populated externally when combat context is available

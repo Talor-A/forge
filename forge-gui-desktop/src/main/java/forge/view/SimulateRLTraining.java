@@ -253,7 +253,8 @@ public class SimulateRLTraining {
 
         RLConfig heuristicConfig = new RLConfig();
         heuristicConfig.setMode(RLModelMode.HEURISTIC_FALLBACK);
-        heuristicConfig.setRecordTrajectories(false);
+        heuristicConfig.setRecordTrajectories(true);
+        heuristicConfig.setTrajectoryOutputDir(outputDir);
 
         AtomicInteger rlWins = new AtomicInteger(0);
         AtomicInteger heuristicWins = new AtomicInteger(0);
@@ -383,26 +384,6 @@ public class SimulateRLTraining {
         RLConfig anyConfig = config1.isRecordTrajectories()
                 ? config1 : config2;
 
-        if (anyConfig.isRecordTrajectories()) {
-            for (Player p : lobbyToPlayer.values()) {
-                forge.ai.rl.training.TrajectoryRecorder rec =
-                    new forge.ai.rl.training.TrajectoryRecorder(
-                        anyConfig.getTrajectoryOutputDir());
-                rec.startGame(gameId + "_" + p.getName());
-                recorders.put(p, rec);
-
-                // Decision listener disabled — causes turn-0
-                // (likely PlayerControllerAi checkstyle issues
-                // with modified class in fat jar)
-
-                // Event-based state snapshots
-                forge.ai.rl.GameStateRecorder gsr =
-                    new forge.ai.rl.GameStateRecorder(
-                        game, p, rec, anyConfig);
-                gsr.register();
-            }
-        }
-
         // Run the game with timeout
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {
@@ -418,17 +399,65 @@ public class SimulateRLTraining {
             }
         }
 
-        // Stop recording and write trajectory files
-        for (Map.Entry<Player,
-                forge.ai.rl.training.TrajectoryRecorder> entry
-                : recorders.entrySet()) {
-            Player p = entry.getKey();
-            RegisteredPlayer rp = p.getRegisteredPlayer();
-            boolean won = game.getOutcome() != null
-                    && !game.getOutcome().isDraw()
-                    && rp != null
-                    && game.getOutcome().isWinner(rp);
-            entry.getValue().endGame(won);
+        // Direct post-game trajectory recording
+        // (EventBus doesn't work with LobbyPlayerRL)
+        if (anyConfig.isRecordTrajectories()
+                && game.isGameOver()
+                && game.getOutcome() != null
+                && !game.getOutcome().isDraw()) {
+            forge.ai.rl.features.GameStateEncoder enc =
+                new forge.ai.rl.features.GameStateEncoder(
+                    anyConfig);
+            LobbyPlayer winner = game.getOutcome()
+                    .getWinningLobbyPlayer();
+
+            for (Player p : lobbyToPlayer.values()) {
+                try {
+                    boolean won = p.getLobbyPlayer()
+                            .equals(winner);
+                    forge.ai.rl.training.TrajectoryRecorder
+                        rec = new forge.ai.rl.training
+                            .TrajectoryRecorder(
+                                anyConfig
+                                .getTrajectoryOutputDir());
+                    rec.startGame(
+                        gameId + "_" + p.getName());
+
+                    forge.ai.rl.features
+                        .GameStateFeatures gs =
+                        enc.encode(game, p);
+                    forge.ai.rl.decisions.DecisionContext
+                        ctx = new forge.ai.rl.decisions
+                            .DecisionContext(
+                        forge.ai.rl.decisions
+                            .DecisionType.PRIORITY_ACTION,
+                        gs, java.util.List.of(), 0, 0,
+                        "game_end_turn_"
+                            + game.getPhaseHandler()
+                                .getTurn());
+                    forge.ai.rl.decisions.DecisionResult
+                        res = new forge.ai.rl.decisions
+                            .DecisionResult(
+                        java.util.List.of(won ? 1 : 0),
+                        new float[0],
+                        won ? 1f : -1f, true);
+                    Player opp = null;
+                    for (Player other
+                            : lobbyToPlayer.values()) {
+                        if (other != p) {
+                            opp = other; break;
+                        }
+                    }
+                    rec.recordDecision(ctx, res,
+                        p.getLife(),
+                        opp != null ? opp.getLife() : 0,
+                        0, 0, 0, 0);
+                    rec.endGame(won);
+                } catch (Exception e) {
+                    System.err.println("REC ERR: "
+                        + e.getMessage());
+                }
+            }
         }
 
         // Build result

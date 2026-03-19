@@ -97,11 +97,14 @@ class ModelServer:
                 client_socket.sendall(response_bytes)
 
         except (ConnectionResetError, BrokenPipeError):
-            logger.info(f"Client {addr} disconnected")
+            pass  # Normal client disconnect
         except Exception as e:
-            logger.error(f"Error handling client {addr}: {e}")
+            logger.debug(f"Client {addr} error: {e}")
         finally:
-            client_socket.close()
+            try:
+                client_socket.close()
+            except Exception:
+                pass
 
     def _recv_exact(self, sock: socket.socket, n: int) -> bytes:
         """Receive exactly n bytes."""
