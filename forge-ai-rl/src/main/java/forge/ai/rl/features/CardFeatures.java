@@ -53,6 +53,15 @@ public class CardFeatures {
     public static float[] encode(Card card) {
         float[] features = new float[FEATURE_SIZE];
         if (card == null) return features;
+        try {
+            return encodeImpl(card, features);
+        } catch (Exception e) {
+            // Return partial/zeroed features rather than crashing
+            return features;
+        }
+    }
+
+    private static float[] encodeImpl(Card card, float[] features) {
 
         int idx = 0;
 

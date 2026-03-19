@@ -27,6 +27,17 @@ public class GameStateEncoder {
      * Encode the current game state from the perspective of the given player.
      */
     public GameStateFeatures encode(Game game, Player player) {
+        try {
+            return encodeImpl(game, player);
+        } catch (Exception e) {
+            // Return zeroed features rather than crashing — the game state
+            // may have nulls during mulligan, between phases, etc.
+            org.tinylog.Logger.warn("GameStateEncoder.encode failed: {}", e.getMessage());
+            return GameStateFeatures.empty();
+        }
+    }
+
+    private GameStateFeatures encodeImpl(Game game, Player player) {
         Player opponent = player.getWeakestOpponent();
 
         float[] globalFeatures = encodeGlobalState(game, player, opponent);

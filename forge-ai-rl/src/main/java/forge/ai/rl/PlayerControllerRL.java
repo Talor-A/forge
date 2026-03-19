@@ -85,7 +85,7 @@ public class PlayerControllerRL extends PlayerController {
      * broken decisions when the server is down.
      */
     private boolean shouldUseFallback() {
-        if (shouldUseFallback()) {
+        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
             return true;
         }
         if (rl.getConfig().getMode() == RLModelMode.GRPC && !rl.isModelServerAvailable()) {

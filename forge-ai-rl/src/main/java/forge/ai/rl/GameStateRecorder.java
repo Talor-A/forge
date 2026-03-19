@@ -92,7 +92,7 @@ public class GameStateRecorder {
                     "attack_" + attackerIndices.size()
                         + "_of_" + allCreatures.size());
         } catch (Exception e) {
-            // Never crash the game
+            org.tinylog.Logger.warn("GameStateRecorder error: {}", e.getMessage());
         }
     }
 
@@ -130,7 +130,7 @@ public class GameStateRecorder {
                     feats, blockerIndices,
                     "block_" + blockerIndices.size());
         } catch (Exception e) {
-            // Never crash the game
+            org.tinylog.Logger.warn("GameStateRecorder error: {}", e.getMessage());
         }
     }
 
@@ -154,7 +154,7 @@ public class GameStateRecorder {
                     "spell_" + desc.substring(0,
                         Math.min(desc.length(), 40)));
         } catch (Exception e) {
-            // Never crash the game
+            org.tinylog.Logger.warn("GameStateRecorder error: {}", e.getMessage());
         }
     }
 
@@ -171,7 +171,7 @@ public class GameStateRecorder {
                     null, List.of(0),
                     "land_" + event.land().getName());
         } catch (Exception e) {
-            // Never crash the game
+            org.tinylog.Logger.warn("GameStateRecorder error: {}", e.getMessage());
         }
     }
 
@@ -180,6 +180,7 @@ public class GameStateRecorder {
     @Subscribe
     public void onTurnPhase(GameEventTurnPhase event) {
         try {
+            System.out.println("GSR_EVENT: onTurnPhase phase=" + event.phase());
             PhaseType phase = event.phase();
 
             // Record at main phase 1 (key decision point)
@@ -194,7 +195,7 @@ public class GameStateRecorder {
                 }
             }
         } catch (Exception e) {
-            // Never crash the game
+            org.tinylog.Logger.warn("GameStateRecorder error: {}", e.getMessage());
         }
     }
 

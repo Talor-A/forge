@@ -48,6 +48,20 @@ public class GameStateFeatures {
         this.stackMask = stackMask;
     }
 
+    /**
+     * Return an empty (zeroed) GameStateFeatures when encoding fails.
+     */
+    public static GameStateFeatures empty() {
+        return new GameStateFeatures(
+                new float[64],
+                new float[30][128], new boolean[30],
+                new float[30][128], new boolean[30],
+                new float[15][128], new boolean[15],
+                new float[40][128], new boolean[40],
+                new float[40][128], new boolean[40],
+                new float[10][128], new boolean[10]);
+    }
+
     public float[] getGlobalFeatures() { return globalFeatures; }
     public float[][] getMyBoardFeatures() { return myBoardFeatures; }
     public boolean[] getMyBoardMask() { return myBoardMask; }
