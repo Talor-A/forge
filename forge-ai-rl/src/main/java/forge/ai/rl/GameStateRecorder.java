@@ -111,10 +111,19 @@ public class GameStateRecorder {
             List<Integer> blockerIndices = new ArrayList<>();
 
             // Collect all blocker card views
+            // The multimap is attacker → [blockers], so values() has the blockers.
+            // When no blockers, the engine puts the attacker as a placeholder — filter those out.
             List<CardView> allBlockerViews = new ArrayList<>();
             for (Multimap<CardView, CardView> mm
                     : event.blockers().values()) {
-                allBlockerViews.addAll(mm.keySet());
+                for (Map.Entry<CardView, CardView> entry : mm.entries()) {
+                    CardView attacker = entry.getKey();
+                    CardView blocker = entry.getValue();
+                    // Skip placeholder entries where attacker == blocker (means unblocked)
+                    if (!attacker.equals(blocker)) {
+                        allBlockerViews.add(blocker);
+                    }
+                }
             }
 
             for (int i = 0; i < allCreatures.size(); i++) {
