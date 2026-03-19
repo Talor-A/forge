@@ -161,10 +161,10 @@ public class GameStateEncoder {
         // Stack
         features[idx++] = normalize(game.getStack().size(), 0, 10);
 
-        // Phase convenience flags
+        // Phase convenience flags (currentPhase is null during mulligan)
         features[idx++] = (currentPhase == PhaseType.MAIN1 && ph.getPlayerTurn() == me) ? 1f : 0f;
         features[idx++] = (currentPhase == PhaseType.MAIN2 && ph.getPlayerTurn() == me) ? 1f : 0f;
-        features[idx++] = (currentPhase.isAfter(PhaseType.MAIN1) && currentPhase.isBefore(PhaseType.MAIN2)) ? 1f : 0f;
+        features[idx++] = (currentPhase != null && currentPhase.isAfter(PhaseType.MAIN1) && currentPhase.isBefore(PhaseType.MAIN2)) ? 1f : 0f;
 
         return features;
     }

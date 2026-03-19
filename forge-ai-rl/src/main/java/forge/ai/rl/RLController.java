@@ -56,6 +56,14 @@ public class RLController {
     public RLConfig getConfig() { return config; }
 
     /**
+     * Check if the model server is reachable.
+     * When false, callers should use heuristic fallback for all decisions.
+     */
+    public boolean isModelServerAvailable() {
+        return config.getMode() == RLModelMode.GRPC && modelClient.isConnected();
+    }
+
+    /**
      * Start a new game — initialize trajectory recording.
      */
     public void onGameStart(String gameId) {
@@ -156,7 +164,7 @@ public class RLController {
 
         DecisionResult result = requestDecision(context);
         if (result == null) {
-            throw new RuntimeException(
+            throw new ModelServerException(
                     "Model server unavailable for attack decision");
         }
         recordDecision(context, result);
@@ -201,7 +209,7 @@ public class RLController {
 
         DecisionResult result = requestDecision(context);
         if (result == null) {
-            throw new RuntimeException(
+            throw new ModelServerException(
                     "Model server unavailable for block decision");
         }
         recordDecision(context, result);

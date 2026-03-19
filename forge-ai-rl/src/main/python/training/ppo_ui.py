@@ -93,7 +93,7 @@ def ppo_thread(state, args):
             load_ppo_data, compute_ppo_batch,
             run_games, start_model_server,
             find_free_port, parse_game_state,
-            PROJECT_ROOT)
+            ModelServerError, PROJECT_ROOT)
         from model.mtg_model import MTGModel
         from model.gpu_config import auto_detect_profile
         import torch
@@ -161,11 +161,17 @@ def ppo_thread(state, args):
                 f"---")
             log(state, "  Collecting games...")
 
-            # Use 'collect' mode for data (both heuristic,
-            # recording works). Evaluate separately for WR.
-            _, stdout = run_games(
-                args.games_per_round, traj_dir,
-                mode='collect', port=port)
+            try:
+                _, stdout = run_games(
+                    args.games_per_round, traj_dir,
+                    mode='evaluate', port=port)
+            except ModelServerError as e:
+                log(state, f"  FATAL: {e}")
+                log(state, "  Stopping PPO — model server "
+                    "is down.")
+                state.status = "ABORTED: model server down"
+                state.phase = "done"
+                break
 
             attack_data, block_data, value_data = \
                 load_ppo_data(traj_dir)
@@ -309,10 +315,18 @@ def ppo_thread(state, args):
                 f"Round {rnd}: evaluating...")
             model.eval()
 
-            eval_wr, _ = run_games(
-                args.eval_games, eval_dir,
-                mode='evaluate', port=port)
-            eval_wr = eval_wr or 0.0
+            try:
+                eval_wr, _ = run_games(
+                    args.eval_games, eval_dir,
+                    mode='evaluate', port=port)
+                eval_wr = eval_wr or 0.0
+            except ModelServerError as e:
+                log(state, f"  FATAL: {e}")
+                log(state, "  Stopping PPO — model server "
+                    "is down during eval.")
+                state.status = "ABORTED: model server down"
+                state.phase = "done"
+                break
 
             # Update state
             state.current_win_rate = eval_wr
@@ -577,7 +591,7 @@ def main():
         default=4)
     parser.add_argument('--batch-size', type=int,
         default=32)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--eval-games', type=int,
         default=50)
     parser.add_argument('--port', type=int, default=0)

@@ -78,6 +78,22 @@ public class PlayerControllerRL extends PlayerController {
         return true;
     }
 
+    /**
+     * Check if we should use the heuristic fallback for this decision.
+     * Returns true if mode is HEURISTIC_FALLBACK, or if the model server
+     * is unreachable in GRPC mode. This prevents the RL agent from making
+     * broken decisions when the server is down.
+     */
+    private boolean shouldUseFallback() {
+        if (shouldUseFallback()) {
+            return true;
+        }
+        if (rl.getConfig().getMode() == RLModelMode.GRPC && !rl.isModelServerAvailable()) {
+            return true;
+        }
+        return false;
+    }
+
     // ===== PRIORITY / SPELL ABILITY DECISIONS =====
 
     @Override
@@ -105,7 +121,7 @@ public class PlayerControllerRL extends PlayerController {
         if (abilities.isEmpty()) return null;
         if (abilities.size() == 1) return abilities.get(0);
 
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.getAbilityToPlay(hostCard, abilities, triggerEvent);
         }
 
@@ -134,7 +150,7 @@ public class PlayerControllerRL extends PlayerController {
     public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) {
         if (isMandatory) return true;
 
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.playTrigger(host, wrapperAbility, isMandatory);
         }
 
@@ -150,7 +166,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             fallbackAi.declareAttackers(attacker, combat);
             return;
         }
@@ -184,7 +200,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             fallbackAi.declareBlockers(defender, combat);
             return;
         }
@@ -260,7 +276,7 @@ public class PlayerControllerRL extends PlayerController {
     public CardCollectionView chooseCardsForEffect(CardCollectionView sourceList, SpellAbility sa,
                                                      String title, int min, int max, boolean isOptional,
                                                      Map<String, Object> params) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
         }
 
@@ -300,7 +316,7 @@ public class PlayerControllerRL extends PlayerController {
         if (optionList.isEmpty()) return null;
         if (optionList.size() == 1 && !isOptional) return optionList.getFirst();
 
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, relatedPlayer, params);
         }
 
@@ -337,7 +353,7 @@ public class PlayerControllerRL extends PlayerController {
     @Override
     public CardCollectionView choosePermanentsToSacrifice(SpellAbility sa, int min, int max,
                                                             CardCollectionView validTargets, String message) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
         }
 
@@ -358,7 +374,7 @@ public class PlayerControllerRL extends PlayerController {
     @Override
     public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max,
                                                           CardCollectionView validTargets, String message) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.choosePermanentsToDestroy(sa, min, max, validTargets, message);
         }
         return choosePermanentsToSacrifice(sa, min, max, validTargets, message);
@@ -367,7 +383,7 @@ public class PlayerControllerRL extends PlayerController {
     @Override
     public CardCollectionView chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa,
                                                          CardCollection validCards, int min, int max) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max);
         }
 
@@ -390,7 +406,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public CardCollection chooseCardsToDiscardToMaximumHandSize(int numDiscard) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.chooseCardsToDiscardToMaximumHandSize(numDiscard);
         }
 
@@ -453,7 +469,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.mulliganKeepHand(firstPlayer, cardsToReturn);
         }
 
@@ -463,7 +479,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.tuckCardsViaMulligan(hand, cardsToReturn);
         }
 
@@ -563,7 +579,7 @@ public class PlayerControllerRL extends PlayerController {
     @Override
     public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message,
                                    List<String> options, Card cardToShow, Map<String, Object> params) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.confirmAction(sa, mode, message, options, cardToShow, params);
         }
         return rl.decideBinary("confirm_" + mode.name());
@@ -577,7 +593,7 @@ public class PlayerControllerRL extends PlayerController {
     @Override
     public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA,
                                               GameEntity affected, String question) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.confirmReplacementEffect(replacementEffect, effectSA, affected, question);
         }
         return rl.decideBinary("confirm_replacement");
@@ -590,7 +606,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public boolean confirmTrigger(WrappedAbility sa) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.confirmTrigger(sa);
         }
         return rl.decideBinary("confirm_trigger");
@@ -605,7 +621,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, int min, int max) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.chooseNumber(sa, title, min, max);
         }
         return rl.decideNumber(min, max, "choose_number");
@@ -618,7 +634,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kindOfChoice, Boolean defaultChoice) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.chooseBinary(sa, question, kindOfChoice, defaultChoice);
         }
         return rl.decideBinary("binary_" + kindOfChoice.name());
@@ -722,7 +738,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.arrangeForScry(topN);
         }
 
@@ -743,7 +759,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.arrangeForSurveil(topN);
         }
         // Same logic as scry for now
@@ -752,7 +768,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public boolean willPutCardOnTop(Card c) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.willPutCardOnTop(c);
         }
         return rl.decideBinary("put_on_top_" + c.getName());
@@ -767,7 +783,7 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
+        if (shouldUseFallback()) {
             return fallbackAi.chooseCardsPile(sa, pile1, pile2, faceUp);
         }
         return rl.decideBinary("choose_pile");

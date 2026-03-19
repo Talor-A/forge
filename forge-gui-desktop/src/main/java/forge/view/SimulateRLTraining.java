@@ -11,6 +11,7 @@ import org.apache.commons.lang3.time.StopWatch;
 import forge.LobbyPlayer;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.rl.LobbyPlayerRL;
+import forge.ai.rl.ModelServerException;
 import forge.ai.rl.PlayerControllerRL;
 import forge.ai.rl.RLConfig;
 import forge.ai.rl.RLModelMode;
@@ -258,6 +259,8 @@ public class SimulateRLTraining {
         AtomicInteger rlWins = new AtomicInteger(0);
         AtomicInteger heuristicWins = new AtomicInteger(0);
         AtomicInteger draws = new AtomicInteger(0);
+        AtomicInteger serverErrors = new AtomicInteger(0);
+        final int MAX_SERVER_ERRORS = 3;
 
         for (int i = 0; i < nGames; i++) {
             Deck rlDeck = decks.get(i % decks.size());
@@ -273,6 +276,9 @@ public class SimulateRLTraining {
                     result = runSingleGame(aiDeck, rlDeck, heuristicConfig, rlConfig,
                             "Heuristic_" + i, "RL_" + i, timeout, true);
                 }
+
+                // Game completed successfully — reset consecutive error count
+                serverErrors.set(0);
 
                 if (result.isDraw) {
                     draws.incrementAndGet();
@@ -290,6 +296,17 @@ public class SimulateRLTraining {
                             i + 1, nGames, winRate * 100, rlWins.get(), total);
                 }
 
+            } catch (ModelServerException e) {
+                int errCount = serverErrors.incrementAndGet();
+                System.out.printf("Game %d MODEL_SERVER_ERROR (%d/%d): %s%n",
+                        i + 1, errCount, MAX_SERVER_ERRORS, e.getMessage());
+                if (errCount >= MAX_SERVER_ERRORS) {
+                    System.out.println();
+                    System.out.println("ABORT: Model server failed " + MAX_SERVER_ERRORS
+                            + " consecutive games. Server is down or broken.");
+                    System.out.println("ABORT: Fix the model server and retry.");
+                    break;
+                }
             } catch (Exception e) {
                 System.out.printf("Game %d FAILED: %s%n", i + 1, e.getMessage());
             }
@@ -298,9 +315,13 @@ public class SimulateRLTraining {
         int totalDecisive = rlWins.get() + heuristicWins.get();
         double winRate = totalDecisive > 0 ? (double) rlWins.get() / totalDecisive : 0;
         System.out.println();
-        System.out.println("=== Evaluation Complete ===");
-        System.out.printf("RL Wins: %d (%.1f%%) | Heuristic Wins: %d | Draws: %d%n",
-                rlWins.get(), winRate * 100, heuristicWins.get(), draws.get());
+        if (serverErrors.get() >= MAX_SERVER_ERRORS) {
+            System.out.println("=== Evaluation ABORTED (model server down) ===");
+        } else {
+            System.out.println("=== Evaluation Complete ===");
+        }
+        System.out.printf("RL Wins: %d (%.1f%%) | Heuristic Wins: %d | Draws: %d | Server Errors: %d%n",
+                rlWins.get(), winRate * 100, heuristicWins.get(), draws.get(), serverErrors.get());
     }
 
     /**
@@ -318,6 +339,9 @@ public class SimulateRLTraining {
         config.setRecordTrajectories(true);
         config.setTrajectoryOutputDir(outputDir);
 
+        int serverErrors = 0;
+        final int MAX_SERVER_ERRORS = 3;
+
         for (int i = 0; i < nGames; i++) {
             Deck deck1 = decks.get(i % decks.size());
             Deck deck2 = decks.get((i + 1) % decks.size());
@@ -326,8 +350,20 @@ public class SimulateRLTraining {
                 GameResult result = runSingleGame(deck1, deck2, config, config,
                         "RL_A_" + i, "RL_B_" + i, timeout, i % 2 == 0);
 
+                serverErrors = 0; // reset on success
+
                 if (!quiet && (i + 1) % 10 == 0) {
                     System.out.printf("Self-play game %d/%d complete%n", i + 1, nGames);
+                }
+            } catch (ModelServerException e) {
+                serverErrors++;
+                System.out.printf("Game %d MODEL_SERVER_ERROR (%d/%d): %s%n",
+                        i + 1, serverErrors, MAX_SERVER_ERRORS, e.getMessage());
+                if (serverErrors >= MAX_SERVER_ERRORS) {
+                    System.out.println();
+                    System.out.println("ABORT: Model server failed " + MAX_SERVER_ERRORS
+                            + " consecutive games. Server is down or broken.");
+                    break;
                 }
             } catch (Exception e) {
                 System.out.printf("Game %d FAILED: %s%n", i + 1, e.getMessage());
@@ -412,7 +448,17 @@ public class SimulateRLTraining {
             if (!game.isGameOver()) {
                 game.setGameOver(GameEndReason.Draw);
             }
+        } catch (ModelServerException e) {
+            throw e;
         } catch (Exception | StackOverflowError e) {
+            // Check if a ModelServerException is wrapped inside
+            Throwable cause = e.getCause();
+            while (cause != null) {
+                if (cause instanceof ModelServerException) {
+                    throw (ModelServerException) cause;
+                }
+                cause = cause.getCause();
+            }
             if (!game.isGameOver()) {
                 game.setGameOver(GameEndReason.Draw);
             }

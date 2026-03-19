@@ -315,9 +315,15 @@ def compute_ppo_batch(model, head, samples, device,
 
 # ── Game runner subprocess ───────────────────────────
 
+class ModelServerError(Exception):
+    """Raised when Java reports the model server is down."""
+    pass
+
+
 def run_games(n_games, traj_dir, mode='evaluate',
               port=50051, quiet=True):
-    """Run games via Java subprocess."""
+    """Run games via Java subprocess.
+    Raises ModelServerError if the server is detected as down."""
     os.makedirs(traj_dir, exist_ok=True)
     # Clean old trajectories
     for f in Path(traj_dir).glob('traj_*.jsonl'):
@@ -353,8 +359,15 @@ def run_games(n_games, traj_dir, mode='evaluate',
         cmd, cwd=cwd, capture_output=True,
         text=True, timeout=600)
 
+    # Check for model server abort
+    if 'ABORT' in result.stdout:
+        raise ModelServerError(
+            "Model server is down — Java aborted the run. "
+            "Check server logs.")
+
     # Parse win rate from output
     win_rate = None
+    server_errors = 0
     for line in result.stdout.split('\n'):
         if 'RL Wins:' in line:
             try:
@@ -362,9 +375,15 @@ def run_games(n_games, traj_dir, mode='evaluate',
                 win_rate = float(pct) / 100
             except (IndexError, ValueError):
                 pass
+        elif 'MODEL_SERVER_ERROR' in line:
+            server_errors += 1
         elif 'P1:' in line and 'P2:' in line:
             # Collection mode
             pass
+
+    if server_errors > 0:
+        print(f"  WARNING: {server_errors} model server "
+              f"errors during run", flush=True)
 
     return win_rate, result.stdout
 
@@ -378,7 +397,39 @@ def start_model_server(model, device, port=50051):
         target=server.start, daemon=True)
     thread.start()
     time.sleep(1)  # Wait for server to bind
+    # Verify server is actually listening
+    if not check_server_health(port):
+        raise RuntimeError(
+            f"Model server failed to start on port {port}")
     return server
+
+
+def check_server_health(port, host='localhost'):
+    """Verify the model server is reachable and responding."""
+    import struct
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((host, port))
+        # Send a minimal ping request
+        ping = json.dumps({
+            'decisionType': 'PING',
+            'globalFeatures': [],
+            'candidateFeatures': [],
+        }).encode('utf-8')
+        sock.sendall(struct.pack('>I', len(ping)))
+        sock.sendall(ping)
+        # Read response
+        length_bytes = sock.recv(4)
+        if len(length_bytes) == 4:
+            resp_len = struct.unpack('>I', length_bytes)[0]
+            resp = sock.recv(resp_len)
+            sock.close()
+            return True
+        sock.close()
+        return False
+    except Exception:
+        return False
 
 
 def find_free_port():
@@ -486,9 +537,15 @@ def main():
         # ── Step 1: Collect games with RL agent ──
         # Use 'evaluate' mode so RL plays vs heuristic
         # (captures RL's combat decisions)
-        _, stdout = run_games(
-            args.games_per_round, args.traj_dir,
-            mode='evaluate', port=port)
+        try:
+            _, stdout = run_games(
+                args.games_per_round, args.traj_dir,
+                mode='evaluate', port=port)
+        except ModelServerError as e:
+            print(f'\n  FATAL: {e}', flush=True)
+            print('  Stopping PPO — model server is down.',
+                  flush=True)
+            break
 
         # ── Step 2: Load trajectories ──
         attack_data, block_data = load_ppo_data(
@@ -582,10 +639,16 @@ def main():
 
         # ── Step 4: Evaluate vs heuristic ──
         model.eval()
-        eval_wr, _ = run_games(
-            args.eval_games, args.traj_dir + '_eval',
-            mode='evaluate', port=port)
-        eval_wr = eval_wr or 0.0
+        try:
+            eval_wr, _ = run_games(
+                args.eval_games, args.traj_dir + '_eval',
+                mode='evaluate', port=port)
+            eval_wr = eval_wr or 0.0
+        except ModelServerError as e:
+            print(f'\n  FATAL: {e}', flush=True)
+            print('  Stopping PPO — model server down '
+                  'during eval.', flush=True)
+            break
 
         # Save
         status = ''

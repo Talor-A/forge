@@ -95,5 +95,8 @@ forge-gui/tools/PerSetTrackingResults
 __pycache__
 *.pyc
 
+# Ignore RL training data (trajectories, checkpoints, models)
+rl_data/
+
 # Ignore Claude configuration
 .claude

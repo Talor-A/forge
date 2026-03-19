@@ -51,7 +51,7 @@ class ModelServer:
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))
-        server_socket.listen(5)
+        server_socket.listen(128)
         logger.info(f"Model server listening on {self.host}:{self.port}")
 
         try:
@@ -59,17 +59,25 @@ class ModelServer:
                 server_socket.settimeout(1.0)
                 try:
                     client_socket, addr = server_socket.accept()
-                    logger.info(f"Client connected: {addr}")
-                    thread = threading.Thread(target=self._handle_client, args=(client_socket, addr))
+                    thread = threading.Thread(
+                        target=self._handle_client,
+                        args=(client_socket, addr))
                     thread.daemon = True
                     thread.start()
                 except socket.timeout:
                     continue
+                except OSError:
+                    continue
         except KeyboardInterrupt:
-            logger.info("Shutting down...")
+            pass
+        except Exception as e:
+            logger.error(f"Server error: {e}")
         finally:
             self.running = False
-            server_socket.close()
+            try:
+                server_socket.close()
+            except Exception:
+                pass
 
     def _handle_client(self, client_socket: socket.socket, addr):
         """Handle a single client connection."""
