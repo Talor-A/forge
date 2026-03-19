@@ -165,15 +165,16 @@ def ppo_thread(state, args):
                 args.games_per_round, traj_dir,
                 mode='evaluate', port=port)
 
-            attack_data, block_data = load_ppo_data(
-                traj_dir)
+            attack_data, block_data, value_data = \
+                load_ppo_data(traj_dir)
             state.attacks_this_round = len(attack_data)
             state.blocks_this_round = len(block_data)
             log(state,
                 f"  Data: {len(attack_data)} attacks, "
-                f"{len(block_data)} blocks")
+                f"{len(block_data)} blocks, "
+                f"{len(value_data)} value samples")
 
-            if not attack_data and not block_data:
+            if not value_data:
                 log(state, "  No data — skipping")
                 continue
 
@@ -187,7 +188,10 @@ def ppo_thread(state, args):
             n_updates = 0
 
             for ppo_ep in range(args.ppo_epochs):
+                # Train on attack/block data if available
                 for data in [attack_data, block_data]:
+                    if not data:
+                        continue
                     random.shuffle(data)
                     for bi in range(0, len(data),
                                     args.batch_size):
@@ -222,6 +226,76 @@ def ppo_thread(state, args):
                         total_vl += metrics['value_loss']
                         total_ent += metrics['entropy']
                         n_updates += 1
+
+                # Always train value network on outcomes
+                random.shuffle(value_data)
+                for bi in range(0, min(len(value_data),
+                                       500),
+                                args.batch_size):
+                    batch = value_data[
+                        bi:bi + args.batch_size]
+                    if len(batch) < 2:
+                        continue
+                    try:
+                        # Value-only update
+                        bs = len(batch)
+                        gf = torch.zeros(bs, 64,
+                            device=device)
+                        tgt = torch.zeros(bs,
+                            device=device)
+                        for i, s in enumerate(batch):
+                            g = s['global_features']
+                            gl = min(len(g), 64)
+                            if gl > 0:
+                                gf[i, :gl] = \
+                                    torch.from_numpy(
+                                        g[:gl])
+                            tgt[i] = s['outcome']
+
+                        # Minimal encoder input
+                        z30 = torch.zeros(bs, 30, 128,
+                            device=device)
+                        zm30 = torch.zeros(bs, 30,
+                            dtype=torch.bool,
+                            device=device)
+                        z15 = torch.zeros(bs, 15, 128,
+                            device=device)
+                        zm15 = torch.zeros(bs, 15,
+                            dtype=torch.bool,
+                            device=device)
+                        z40 = torch.zeros(bs, 40, 128,
+                            device=device)
+                        zm40 = torch.zeros(bs, 40,
+                            dtype=torch.bool,
+                            device=device)
+                        z10 = torch.zeros(bs, 10, 128,
+                            device=device)
+                        zm10 = torch.zeros(bs, 10,
+                            dtype=torch.bool,
+                            device=device)
+
+                        with torch.amp.autocast('cuda',
+                                enabled=use_amp):
+                            emb = model.encode_state(
+                                gf, z30, zm30, z30, zm30,
+                                z15, zm15, z40, zm40,
+                                z40, zm40, z10, zm10)
+                            val = model.get_value(
+                                emb).squeeze(-1)
+                            vl = F.mse_loss(val, tgt)
+
+                        optimizer.zero_grad()
+                        if scaler:
+                            scaler.scale(vl).backward()
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            vl.backward()
+                            optimizer.step()
+                        total_vl += vl.item()
+                        n_updates += 1
+                    except Exception:
+                        pass
 
             avg_pl = total_pl / max(n_updates, 1)
             avg_vl = total_vl / max(n_updates, 1)

@@ -92,12 +92,14 @@ def parse_game_state(flat, gf):
 
 def load_ppo_data(traj_dir):
     """Load trajectory data for PPO training.
-    Returns attack and block decisions with game outcomes."""
+    Returns game-level samples with state and outcome.
+    Works with both mid-game and end-game-only recordings."""
     path = Path(traj_dir)
     files = sorted(path.glob('traj_*.jsonl'))
 
     attack_samples = []
     block_samples = []
+    value_samples = []
 
     for filepath in files:
         try:
@@ -114,23 +116,6 @@ def load_ppo_data(traj_dir):
                 dt = rec.get('decisionType', '')
                 cand = rec.get('candidateFeatures', [])
                 sel = rec.get('selectedIndices', [])
-                if len(cand) < 1:
-                    continue
-
-                n = len(cand)
-                creatures = np.zeros(
-                    (n, 128), dtype=np.float32)
-                for j, cf in enumerate(cand):
-                    cl = min(len(cf), 128)
-                    creatures[j, :cl] = np.array(
-                        cf[:cl], dtype=np.float32)
-                np.clip(creatures, -10, 10, out=creatures)
-                creatures = np.nan_to_num(creatures)
-
-                action_mask = np.zeros(n, dtype=np.float32)
-                for idx in sel:
-                    if 0 <= idx < n:
-                        action_mask[idx] = 1.0
 
                 gf = np.array(
                     rec.get('globalFeatures', []),
@@ -144,23 +129,49 @@ def load_ppo_data(traj_dir):
                 np.clip(flat, -10, 10, out=flat)
                 flat = np.nan_to_num(flat)
 
-                sample = {
-                    'global_features': gf,
-                    'game_state_flat': flat,
-                    'creature_features': creatures,
-                    'action_mask': action_mask,
-                    'n_creatures': n,
-                    'outcome': outcome,
-                }
+                # Always collect value training data
+                if len(flat) > 0:
+                    value_samples.append({
+                        'global_features': gf,
+                        'game_state_flat': flat,
+                        'outcome': outcome,
+                    })
 
-                if dt == 'DECLARE_ATTACKERS':
-                    attack_samples.append(sample)
-                elif dt == 'DECLARE_BLOCKERS':
-                    block_samples.append(sample)
+                # Collect attack/block if features present
+                if len(cand) >= 1:
+                    n = len(cand)
+                    creatures = np.zeros(
+                        (n, 128), dtype=np.float32)
+                    for j, cf in enumerate(cand):
+                        cl = min(len(cf), 128)
+                        creatures[j, :cl] = np.array(
+                            cf[:cl], dtype=np.float32)
+                    np.clip(creatures, -10, 10,
+                            out=creatures)
+                    creatures = np.nan_to_num(creatures)
+
+                    action_mask = np.zeros(
+                        n, dtype=np.float32)
+                    for idx in sel:
+                        if 0 <= idx < n:
+                            action_mask[idx] = 1.0
+
+                    sample = {
+                        'global_features': gf,
+                        'game_state_flat': flat,
+                        'creature_features': creatures,
+                        'action_mask': action_mask,
+                        'n_creatures': n,
+                        'outcome': outcome,
+                    }
+                    if dt == 'DECLARE_ATTACKERS':
+                        attack_samples.append(sample)
+                    elif dt == 'DECLARE_BLOCKERS':
+                        block_samples.append(sample)
         except Exception:
             pass
 
-    return attack_samples, block_samples
+    return attack_samples, block_samples, value_samples
 
 
 # ── PPO batch computation ────────────────────────────

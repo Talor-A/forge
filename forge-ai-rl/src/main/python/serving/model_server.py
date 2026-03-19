@@ -42,6 +42,8 @@ class ModelServer:
         self.request_count = 0
         # Lock to serialize CUDA inference (not thread-safe)
         self._inference_lock = threading.Lock()
+        # Limit concurrent client threads to prevent OOM
+        self._client_semaphore = threading.Semaphore(32)
 
     def start(self):
         """Start the server."""
@@ -71,36 +73,44 @@ class ModelServer:
 
     def _handle_client(self, client_socket: socket.socket, addr):
         """Handle a single client connection."""
+        self._client_semaphore.acquire()
         try:
+            client_socket.settimeout(300)  # 5 min timeout
             while self.running:
                 # Read length prefix
                 length_bytes = self._recv_exact(client_socket, 4)
                 if not length_bytes:
                     break
                 length = struct.unpack('>I', length_bytes)[0]
+                if length > 10_000_000:  # 10MB sanity limit
+                    break
 
                 # Read payload
                 payload = self._recv_exact(client_socket, length)
                 if not payload:
                     break
 
-                # Parse request
-                request = json.loads(payload.decode('utf-8'))
-                self.request_count += 1
-
-                # Process
-                response = self._process_request(request)
+                # Parse and process
+                try:
+                    request = json.loads(payload.decode('utf-8'))
+                    self.request_count += 1
+                    response = self._process_request(request)
+                except Exception as e:
+                    response = {
+                        'selectedIndices': [0],
+                        'actionProbabilities': [],
+                        'valueEstimate': 0.0,
+                    }
 
                 # Send response
                 response_bytes = json.dumps(response).encode('utf-8')
                 client_socket.sendall(struct.pack('>I', len(response_bytes)))
                 client_socket.sendall(response_bytes)
 
-        except (ConnectionResetError, BrokenPipeError):
-            pass  # Normal client disconnect
-        except Exception as e:
-            logger.debug(f"Client {addr} error: {e}")
+        except Exception:
+            pass  # Client disconnected or error
         finally:
+            self._client_semaphore.release()
             try:
                 client_socket.close()
             except Exception:
@@ -120,8 +130,15 @@ class ModelServer:
     def _process_request(self, request: dict) -> dict:
         """Process an inference request and return the decision.
         Serialized via lock — CUDA is not thread-safe."""
-        with self._inference_lock:
-            return self._process_request_impl(request)
+        try:
+            with self._inference_lock:
+                return self._process_request_impl(request)
+        except Exception as e:
+            return {
+                'selectedIndices': [0],
+                'actionProbabilities': [],
+                'valueEstimate': 0.0,
+            }
 
     def _process_request_impl(self, request: dict) -> dict:
         decision_type = request.get('decisionType', 'UNKNOWN')
