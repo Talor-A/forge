@@ -83,18 +83,10 @@ public class PlayerControllerRL extends PlayerController {
             return null;
         }
 
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK
-                || rl.getConfig().getMode() == RLModelMode.RECORD_HEURISTIC) {
-            // In record mode, record the heuristic's decision but still use it
-            return fallbackChoice;
-        }
-
-        // RL decides which of the playable spells to cast
-        int idx = rl.decidePriorityAction(fallbackChoice);
-        if (idx < 0 || idx >= fallbackChoice.size()) {
-            return null; // pass priority
-        }
-        return Lists.newArrayList(fallbackChoice.get(idx));
+        // Always use heuristic for spell selection — RL
+        // priority head not yet trained with full action
+        // context. Combat decisions use RL (attack/block).
+        return fallbackChoice;
     }
 
     @Override

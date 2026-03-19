@@ -30,25 +30,21 @@ public abstract class LobbyPlayer {
 
     @Override
     public int hashCode() {
-        final int prime = 31;
-        int result = 1;
-        result = prime * result + name.hashCode();
-        result = prime * result + getClass().hashCode();
-        return result;
+        return Objects.hash(name);
     }
 
     /*
-     * Two LobbyPlayers are equal if they have the same name.
+     * Two LobbyPlayers are equal if they have the same name
+     * and are the same kind of player (human vs AI).
+     * Uses instanceof instead of strict class equality so
+     * subclasses (e.g. RecordingLobbyPlayerAi) work correctly.
      */
     @Override
     public boolean equals(Object obj) {
         if (this == obj) {
             return true;
         }
-        if (obj == null) {
-            return false;
-        }
-        if (getClass() != obj.getClass()) {
+        if (!(obj instanceof LobbyPlayer)) {
             return false;
         }
         LobbyPlayer other = (LobbyPlayer) obj;
