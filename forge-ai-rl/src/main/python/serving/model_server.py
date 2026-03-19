@@ -40,6 +40,8 @@ class ModelServer:
         self.device = device
         self.running = False
         self.request_count = 0
+        # Lock to serialize CUDA inference (not thread-safe)
+        self._inference_lock = threading.Lock()
 
     def start(self):
         """Start the server."""
@@ -113,7 +115,12 @@ class ModelServer:
 
     @torch.no_grad()
     def _process_request(self, request: dict) -> dict:
-        """Process an inference request and return the decision."""
+        """Process an inference request and return the decision.
+        Serialized via lock — CUDA is not thread-safe."""
+        with self._inference_lock:
+            return self._process_request_impl(request)
+
+    def _process_request_impl(self, request: dict) -> dict:
         decision_type = request.get('decisionType', 'UNKNOWN')
 
         try:
