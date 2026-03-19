@@ -155,7 +155,10 @@ public class RLController {
                 0, possibleAttackers.size(), "declare_attackers");
 
         DecisionResult result = requestDecision(context);
-        if (result == null) return List.of(); // fallback: don't attack
+        if (result == null) {
+            throw new RuntimeException(
+                    "Model server unavailable for attack decision");
+        }
         recordDecision(context, result);
         return result.getSelectedIndices();
     }
@@ -197,7 +200,10 @@ public class RLController {
                 0, possibleBlockers.size(), "declare_blockers");
 
         DecisionResult result = requestDecision(context);
-        if (result == null) return List.of();
+        if (result == null) {
+            throw new RuntimeException(
+                    "Model server unavailable for block decision");
+        }
         recordDecision(context, result);
 
         // Convert selected indices to blocker-attacker pairs

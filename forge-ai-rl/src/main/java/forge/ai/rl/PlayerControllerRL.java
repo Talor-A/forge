@@ -59,8 +59,13 @@ public class PlayerControllerRL extends PlayerController {
         this.rl = new RLController(config);
         this.rl.setPlayer(p);
 
-        // Create fallback heuristic AI for unimplemented or failed decisions
-        this.fallbackAi = new forge.ai.PlayerControllerAi(game, p, lp);
+        // Create fallback heuristic AI with a proper LobbyPlayerAi
+        // (AiController needs AI profile from LobbyPlayerAi)
+        forge.ai.LobbyPlayerAi fallbackLp =
+                new forge.ai.LobbyPlayerAi(lp.getName(), null);
+        fallbackLp.setAiProfile("Default");
+        this.fallbackAi = new forge.ai.PlayerControllerAi(
+                game, p, fallbackLp);
         this.fallbackBrains = fallbackAi.getAi();
     }
 
