@@ -1,0 +1,791 @@
+#!/usr/bin/env python3
+"""
+Decision Head Training Dashboard — Tkinter GUI for monitoring
+attack and block head imitation learning.
+
+Launch:
+    python training/train_decisions_ui.py \
+        --data-dir /path/to/trajectories \
+        --device cuda --epochs 50
+"""
+
+import argparse
+import json
+import os
+import sys
+import threading
+import time
+import random
+from dataclasses import dataclass, field
+from typing import List
+from pathlib import Path
+
+import tkinter as tk
+from tkinter import ttk
+
+os.environ['PYTHONUNBUFFERED'] = '1'
+
+sys.path.insert(0, os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import (
+        FigureCanvasTkAgg)
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+from model.mtg_model import MTGModel
+from model.gpu_config import auto_detect_profile
+
+
+# ── Shared state ─────────────────────────────────────
+
+@dataclass
+class TrainingState:
+    status: str = "Idle"
+    phase: str = ""
+    chart_dirty: bool = False
+
+    # Loading
+    files_total: int = 0
+    files_loaded: int = 0
+    attack_samples: int = 0
+    block_samples: int = 0
+
+    # Config
+    device: str = "cpu"
+    gpu_name: str = ""
+    encoder_params: int = 0
+    head_params: int = 0
+
+    # Current head being trained
+    current_head: str = ""
+    epoch: int = 0
+    total_epochs: int = 50
+    epoch_progress: float = 0.0
+
+    # Metrics per head
+    attack_train_losses: List[float] = field(
+        default_factory=list)
+    attack_train_accs: List[float] = field(
+        default_factory=list)
+    attack_val_losses: List[float] = field(
+        default_factory=list)
+    attack_val_accs: List[float] = field(
+        default_factory=list)
+    attack_best_acc: float = 0.0
+
+    block_train_losses: List[float] = field(
+        default_factory=list)
+    block_train_accs: List[float] = field(
+        default_factory=list)
+    block_val_losses: List[float] = field(
+        default_factory=list)
+    block_val_accs: List[float] = field(
+        default_factory=list)
+    block_best_acc: float = 0.0
+
+    current_train_loss: float = 0.0
+    current_train_acc: float = 0.0
+    current_val_loss: float = 0.0
+    current_val_acc: float = 0.0
+    epoch_time: float = 0.0
+    elapsed: float = 0.0
+    eta: float = 0.0
+
+    gpu_mem_used_mb: float = 0.0
+    gpu_mem_total_mb: float = 0.0
+
+
+# ── Data loading ─────────────────────────────────────
+
+def parse_game_state(flat, global_feats):
+    card_dim = 128
+    zones = [('my_board', 30), ('opp_board', 30),
+             ('hand', 15), ('my_gy', 40),
+             ('opp_gy', 40), ('stack', 10)]
+    g = np.zeros(64, dtype=np.float32)
+    gl = min(len(global_feats), 64)
+    if gl > 0:
+        g[:gl] = global_feats[:gl]
+    zdata = {}
+    zmask = {}
+    offset = 64
+    for name, count in zones:
+        zs = count * card_dim
+        zd = np.zeros((count, card_dim), dtype=np.float32)
+        zm = np.zeros(count, dtype=np.bool_)
+        if offset + zs <= len(flat):
+            raw = flat[offset:offset + zs].reshape(
+                count, card_dim)
+            for j in range(count):
+                if np.any(raw[j] != 0):
+                    zd[j] = raw[j]
+                    zm[j] = True
+        offset += zs
+        zdata[name] = zd
+        zmask[name + '_mask'] = zm
+    return g, zdata, zmask
+
+
+def load_decisions(data_dir, state, max_files=None):
+    state.phase = "loading"
+    state.status = "Loading trajectory files..."
+
+    path = Path(data_dir)
+    files = sorted(path.glob('traj_*.jsonl'))
+    if max_files:
+        files = files[:max_files]
+    state.files_total = len(files)
+
+    attack_samples = []
+    block_samples = []
+
+    for i, filepath in enumerate(files):
+        state.files_loaded = i + 1
+        try:
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+            if len(lines) < 2:
+                continue
+            header = json.loads(lines[0])
+            won = header.get('won', False)
+
+            for line in lines[1:]:
+                rec = json.loads(line)
+                dt = rec.get('decisionType', '')
+                cand = rec.get('candidateFeatures', [])
+                sel = rec.get('selectedIndices', [])
+
+                if len(cand) < 1:
+                    continue
+
+                n = len(cand)
+                creatures = np.zeros(
+                    (n, 128), dtype=np.float32)
+                for j, cf in enumerate(cand):
+                    cl = min(len(cf), 128)
+                    creatures[j, :cl] = np.array(
+                        cf[:cl], dtype=np.float32)
+                np.clip(creatures, -10, 10, out=creatures)
+                creatures = np.nan_to_num(creatures)
+
+                mask = np.zeros(n, dtype=np.float32)
+                for idx in sel:
+                    if 0 <= idx < n:
+                        mask[idx] = 1.0
+
+                gf = np.array(
+                    rec.get('globalFeatures', []),
+                    dtype=np.float32)
+                np.clip(gf, -10, 10, out=gf)
+                gf = np.nan_to_num(gf)
+                g = np.zeros(64, dtype=np.float32)
+                gl = min(len(gf), 64)
+                if gl > 0:
+                    g[:gl] = gf[:gl]
+
+                flat = np.array(
+                    rec.get('gameStateFlat', []),
+                    dtype=np.float32)
+                np.clip(flat, -10, 10, out=flat)
+                flat = np.nan_to_num(flat)
+
+                sample = {
+                    'global_features': g,
+                    'game_state_flat': flat,
+                    'creature_features': creatures,
+                    'action_mask': mask,
+                    'n_creatures': n,
+                    'won': 1.0 if won else 0.0,
+                }
+
+                if dt == 'DECLARE_ATTACKERS':
+                    attack_samples.append(sample)
+                    state.attack_samples = len(
+                        attack_samples)
+                elif dt == 'DECLARE_BLOCKERS':
+                    block_samples.append(sample)
+                    state.block_samples = len(
+                        block_samples)
+        except Exception:
+            pass
+
+    state.status = (
+        f"Loaded {len(attack_samples)} attack, "
+        f"{len(block_samples)} block decisions")
+    return attack_samples, block_samples
+
+
+# ── Batch processing ─────────────────────────────────
+
+def make_batch(model, batch, device, use_amp, head):
+    max_c = max(s['n_creatures'] for s in batch)
+    max_c = max(max_c, 1)
+    bs = len(batch)
+
+    cf = torch.zeros(bs, max_c, 128, device=device)
+    cm = torch.zeros(bs, max_c, dtype=torch.bool,
+                      device=device)
+    tgt = torch.zeros(bs, max_c, device=device)
+    gf = torch.zeros(bs, 64, device=device)
+
+    mb = torch.zeros(bs, 30, 128, device=device)
+    mbm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    ob = torch.zeros(bs, 30, 128, device=device)
+    obm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    h = torch.zeros(bs, 15, 128, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool,
+                      device=device)
+    mg = torch.zeros(bs, 40, 128, device=device)
+    mgm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    og = torch.zeros(bs, 40, 128, device=device)
+    ogm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    st = torch.zeros(bs, 10, 128, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool,
+                       device=device)
+
+    for i, s in enumerate(batch):
+        nc = s['n_creatures']
+        cf[i, :nc] = torch.from_numpy(
+            s['creature_features'])
+        cm[i, :nc] = True
+        tgt[i, :nc] = torch.from_numpy(s['action_mask'])
+
+        g, zones, masks = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(
+            masks['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.no_grad():
+            state_emb = model.encode_state(
+                gf, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, st, stm)
+
+        logits = head(state_emb, cf, cm)
+
+        loss = nn.functional.binary_cross_entropy_with_logits(
+            logits, tgt, reduction='none')
+        loss = (loss * cm.float()).sum() / \
+               cm.float().sum().clamp(min=1)
+
+    with torch.no_grad():
+        preds = (logits > 0).float()
+        correct = ((preds == tgt) *
+                   cm.float()).sum().item()
+        total = cm.float().sum().item()
+
+    return loss, correct, total
+
+
+# ── Training thread ──────────────────────────────────
+
+def train_head(model, head, head_name, samples, args,
+               state, device, use_amp):
+    state.current_head = head_name
+    state.status = f"Training {head_name} head..."
+
+    for p in model.state_encoder.parameters():
+        p.requires_grad = False
+    for p in model.value_network.parameters():
+        p.requires_grad = False
+    for p in head.parameters():
+        p.requires_grad = True
+
+    state.head_params = sum(
+        p.numel() for p in head.parameters())
+
+    optimizer = optim.AdamW(
+        head.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+
+    random.shuffle(samples)
+    n_val = max(1, int(len(samples) * 0.1))
+    train_s = samples[:-n_val]
+    val_s = samples[-n_val:]
+
+    best_acc = 0
+    save_path = os.path.join(
+        args.save_dir, f'best_{head_name}_model.pt')
+
+    # Get the right metric lists
+    if head_name == 'attack':
+        tl_list = state.attack_train_losses
+        ta_list = state.attack_train_accs
+        vl_list = state.attack_val_losses
+        va_list = state.attack_val_accs
+    else:
+        tl_list = state.block_train_losses
+        ta_list = state.block_train_accs
+        vl_list = state.block_val_losses
+        va_list = state.block_val_accs
+
+    start = time.time()
+
+    for epoch in range(1, args.epochs + 1):
+        state.epoch = epoch
+        state.status = (
+            f"Training {head_name} head: "
+            f"epoch {epoch}/{args.epochs}")
+        t0 = time.time()
+
+        # Train
+        model.train()
+        random.shuffle(train_s)
+        tloss, tc, tt = 0, 0, 0
+        n_batches = max(
+            1, len(train_s) // args.batch_size)
+
+        for bi in range(0, len(train_s), args.batch_size):
+            batch = train_s[bi:bi + args.batch_size]
+            if len(batch) < 2:
+                continue
+            state.epoch_progress = bi / max(
+                len(train_s), 1)
+
+            loss, correct, total = make_batch(
+                model, batch, device, use_amp, head)
+
+            optimizer.zero_grad()
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                optimizer.step()
+
+            tloss += loss.item() * total
+            tc += correct
+            tt += total
+
+        scheduler.step()
+
+        # Val
+        model.eval()
+        vloss, vc, vt = 0, 0, 0
+        with torch.no_grad():
+            for bi in range(0, len(val_s), args.batch_size):
+                batch = val_s[bi:bi + args.batch_size]
+                if len(batch) < 2:
+                    continue
+                loss, correct, total = make_batch(
+                    model, batch, device, use_amp, head)
+                vloss += loss.item() * total
+                vc += correct
+                vt += total
+
+        ta = tc / max(tt, 1)
+        va = vc / max(vt, 1)
+        tl = tloss / max(tt, 1)
+        vl = vloss / max(vt, 1)
+
+        state.current_train_loss = tl
+        state.current_train_acc = ta
+        state.current_val_loss = vl
+        state.current_val_acc = va
+        tl_list.append(tl)
+        ta_list.append(ta)
+        vl_list.append(vl)
+        va_list.append(va)
+
+        if va > best_acc:
+            best_acc = va
+            model.save(save_path)
+
+        if head_name == 'attack':
+            state.attack_best_acc = best_acc
+        else:
+            state.block_best_acc = best_acc
+
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        state.eta = (args.epochs - epoch) * state.epoch_time
+        state.epoch_progress = 1.0
+        state.chart_dirty = True
+
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()
+            state.gpu_mem_used_mb = (
+                torch.cuda.memory_allocated() / 1024**2)
+            state.gpu_mem_total_mb = (
+                torch.cuda.get_device_properties(0)
+                .total_memory / 1024**2)
+
+        time.sleep(0.05)
+
+    return best_acc
+
+
+def trainer_thread(state, args):
+    try:
+        profile = auto_detect_profile()
+        device = args.device or (
+            'cuda' if torch.cuda.is_available() else 'cpu')
+        use_amp = profile.use_amp and device.startswith(
+            'cuda')
+
+        state.device = device
+        state.gpu_name = profile.name
+        state.total_epochs = args.epochs
+
+        # Load data
+        attack_samples, block_samples = load_decisions(
+            args.data_dir, state, args.max_files)
+
+        # Load model
+        state.phase = "training"
+        state.status = "Loading encoder..."
+        if os.path.exists(args.encoder_checkpoint):
+            model = MTGModel.load(
+                args.encoder_checkpoint, device=device)
+        else:
+            model = MTGModel().to(device)
+
+        state.encoder_params = sum(
+            p.numel()
+            for p in model.state_encoder.parameters())
+
+        os.makedirs(args.save_dir, exist_ok=True)
+
+        # Train attack head
+        if attack_samples:
+            train_head(model, model.attack_head, 'attack',
+                       attack_samples, args, state,
+                       device, use_amp)
+
+        # Train block head
+        if block_samples:
+            # Reset epoch tracking for block head
+            state.epoch = 0
+            state.epoch_progress = 0
+            train_head(model, model.attack_head, 'block',
+                       block_samples, args, state,
+                       device, use_amp)
+            # Note: using attack_head architecture for blocks
+            # too since it's the same binary-per-creature task
+
+        # Save combined model
+        model.save(os.path.join(
+            args.save_dir, 'model_with_decisions.pt'))
+
+        state.status = "Training complete!"
+        state.phase = "done"
+        state.chart_dirty = True
+
+    except Exception as e:
+        state.status = f"ERROR: {e}"
+        state.phase = "done"
+        state.chart_dirty = True
+        import traceback
+        traceback.print_exc()
+        with open('/tmp/rl_decision_error.log', 'w') as f:
+            traceback.print_exc(file=f)
+
+
+# ── Tkinter Dashboard ────────────────────────────────
+
+class DecisionDashboard:
+    def __init__(self, root, state):
+        self.root = root
+        self.state = state
+        self.root.title(
+            "MTG RL — Decision Head Training")
+        self.root.geometry("900x750")
+        self.root.configure(bg='#1e1e2e')
+
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('Header.TLabel',
+            font=('Helvetica', 16, 'bold'),
+            background='#1e1e2e', foreground='#cdd6f4')
+        style.configure('Stat.TLabel',
+            font=('Consolas', 11),
+            background='#1e1e2e', foreground='#a6adc8')
+        style.configure('Value.TLabel',
+            font=('Consolas', 11, 'bold'),
+            background='#1e1e2e', foreground='#89b4fa')
+        style.configure('Good.TLabel',
+            font=('Consolas', 11, 'bold'),
+            background='#1e1e2e', foreground='#a6e3a1')
+        style.configure('Status.TLabel',
+            font=('Consolas', 10),
+            background='#1e1e2e', foreground='#f9e2af')
+        style.configure('Dark.TFrame',
+            background='#1e1e2e')
+        style.configure("blue.Horizontal.TProgressbar",
+            troughcolor='#313244', background='#89b4fa')
+
+        self._build_ui()
+        self._update_loop()
+
+    def _build_ui(self):
+        m = ttk.Frame(self.root, style='Dark.TFrame')
+        m.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        ttk.Label(m,
+            text="MTG RL — Decision Head Training",
+            style='Header.TLabel').pack(pady=(0, 10))
+
+        self.status_var = tk.StringVar(
+            value="Initializing...")
+        ttk.Label(m, textvariable=self.status_var,
+            style='Status.TLabel').pack()
+
+        pf = ttk.Frame(m, style='Dark.TFrame')
+        pf.pack(fill=tk.X, pady=5)
+        self.progress = ttk.Progressbar(
+            pf, length=860, mode='determinate',
+            style="blue.Horizontal.TProgressbar")
+        self.progress.pack(fill=tk.X, pady=2)
+        self.prog_label = tk.StringVar(value="")
+        ttk.Label(pf, textvariable=self.prog_label,
+            style='Stat.TLabel').pack(anchor='w')
+
+        # Stats
+        sf = ttk.Frame(m, style='Dark.TFrame')
+        sf.pack(fill=tk.X, pady=5)
+        self.stat_vars = {}
+        stats = [
+            ('Head', '—'), ('Epoch', '—'),
+            ('Train Loss', '—'), ('Train Acc', '—'),
+            ('Val Loss', '—'), ('Val Acc', '—'),
+            ('Best Attack', '—'), ('Best Block', '—'),
+            ('Epoch Time', '—'), ('ETA', '—'),
+            ('GPU Mem', '—'), ('Head Params', '—'),
+        ]
+        for i, (label, default) in enumerate(stats):
+            r, c = divmod(i, 4)
+            lbl = ttk.Label(sf, text=f"{label}:",
+                style='Stat.TLabel')
+            lbl.grid(row=r, column=c*2, sticky='w',
+                padx=(10, 2), pady=2)
+            var = tk.StringVar(value=default)
+            val = ttk.Label(sf, textvariable=var,
+                style='Value.TLabel')
+            val.grid(row=r, column=c*2+1, sticky='w',
+                padx=(0, 15), pady=2)
+            self.stat_vars[label] = var
+
+        # Charts
+        if HAS_MATPLOTLIB:
+            cf = ttk.Frame(m, style='Dark.TFrame')
+            cf.pack(fill=tk.BOTH, expand=True, pady=5)
+
+            self.fig = Figure(figsize=(8.5, 4), dpi=100,
+                facecolor='#1e1e2e')
+
+            self.ax_atk_loss = self.fig.add_subplot(221)
+            self.ax_atk_acc = self.fig.add_subplot(222)
+            self.ax_blk_loss = self.fig.add_subplot(223)
+            self.ax_blk_acc = self.fig.add_subplot(224)
+
+            for ax, title in [
+                    (self.ax_atk_loss, 'Attack Loss'),
+                    (self.ax_atk_acc, 'Attack Accuracy'),
+                    (self.ax_blk_loss, 'Block Loss'),
+                    (self.ax_blk_acc, 'Block Accuracy')]:
+                ax.set_facecolor('#313244')
+                ax.set_title(title, color='#cdd6f4',
+                    fontsize=9)
+                ax.tick_params(colors='#6c7086',
+                    labelsize=7)
+                for spine in ax.spines.values():
+                    spine.set_color('#45475a')
+
+            self.fig.tight_layout(pad=2.0)
+            self.canvas = FigureCanvasTkAgg(
+                self.fig, master=cf)
+            self.canvas.get_tk_widget().pack(
+                fill=tk.BOTH, expand=True)
+
+    def _update_loop(self):
+        s = self.state
+        self.status_var.set(s.status)
+
+        if s.phase == "loading":
+            pct = s.files_loaded / max(
+                s.files_total, 1) * 100
+            self.progress['value'] = pct
+            self.prog_label.set(
+                f"Loading: {s.files_loaded}/"
+                f"{s.files_total} files | "
+                f"Attack: {s.attack_samples} | "
+                f"Block: {s.block_samples}")
+        elif s.phase == "training":
+            # Two heads: attack is first half, block second
+            head_offset = 0 if s.current_head == 'attack' \
+                else 50
+            total_pct = head_offset + (
+                (s.epoch - 1 + s.epoch_progress)
+                / max(s.total_epochs, 1) * 50)
+            self.progress['value'] = total_pct
+            self.prog_label.set(
+                f"{s.current_head.title()} head: "
+                f"epoch {s.epoch}/{s.total_epochs}")
+        elif s.phase == "done":
+            self.progress['value'] = 100
+
+        self.stat_vars['Head'].set(
+            s.current_head.title() or '—')
+        self.stat_vars['Epoch'].set(
+            f"{s.epoch}/{s.total_epochs}")
+        self.stat_vars['Train Loss'].set(
+            f"{s.current_train_loss:.4f}")
+        self.stat_vars['Train Acc'].set(
+            f"{s.current_train_acc:.1%}")
+        self.stat_vars['Val Loss'].set(
+            f"{s.current_val_loss:.4f}")
+        self.stat_vars['Val Acc'].set(
+            f"{s.current_val_acc:.1%}")
+        self.stat_vars['Best Attack'].set(
+            f"{s.attack_best_acc:.1%}")
+        self.stat_vars['Best Block'].set(
+            f"{s.block_best_acc:.1%}")
+        self.stat_vars['Epoch Time'].set(
+            f"{s.epoch_time:.1f}s")
+        self.stat_vars['ETA'].set(
+            f"{s.eta:.0f}s" if s.eta > 0 else "—")
+        self.stat_vars['Head Params'].set(
+            f"{s.head_params:,}" if s.head_params else "—")
+        if s.gpu_mem_total_mb > 0:
+            self.stat_vars['GPU Mem'].set(
+                f"{s.gpu_mem_used_mb:.0f}/"
+                f"{s.gpu_mem_total_mb:.0f} MB")
+
+        if HAS_MATPLOTLIB and s.chart_dirty:
+            s.chart_dirty = False
+            self._draw_charts(s)
+
+        self.root.after(500, self._update_loop)
+
+    def _draw_charts(self, s):
+        for ax, tl, ta, vl, va, title_l, title_a in [
+            (self.ax_atk_loss, s.attack_train_losses,
+             s.attack_train_accs, s.attack_val_losses,
+             s.attack_val_accs,
+             'Attack Loss', 'Attack Accuracy'),
+            (self.ax_blk_loss, s.block_train_losses,
+             s.block_train_accs, s.block_val_losses,
+             s.block_val_accs,
+             'Block Loss', 'Block Accuracy'),
+        ]:
+            # Loss chart
+            ax.clear()
+            ax.set_facecolor('#313244')
+            ax.set_title(title_l, color='#cdd6f4',
+                fontsize=9)
+            if tl:
+                ep = range(1, len(tl) + 1)
+                ax.plot(ep, tl, color='#89b4fa',
+                    linewidth=1.5, label='Train')
+                if vl:
+                    ax.plot(ep, vl, color='#f38ba8',
+                        linewidth=1.5, label='Val')
+                ax.legend(fontsize=7,
+                    facecolor='#313244',
+                    edgecolor='#45475a',
+                    labelcolor='#cdd6f4')
+            ax.tick_params(colors='#6c7086', labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_color('#45475a')
+
+        for ax, ta, va, title_a in [
+            (self.ax_atk_acc, s.attack_train_accs,
+             s.attack_val_accs, 'Attack Accuracy'),
+            (self.ax_blk_acc, s.block_train_accs,
+             s.block_val_accs, 'Block Accuracy'),
+        ]:
+            ax.clear()
+            ax.set_facecolor('#313244')
+            ax.set_title(title_a, color='#cdd6f4',
+                fontsize=9)
+            if ta:
+                ep = range(1, len(ta) + 1)
+                ax.plot(ep, ta, color='#89b4fa',
+                    linewidth=1.5, label='Train')
+                if va:
+                    ax.plot(ep, va, color='#f38ba8',
+                        linewidth=1.5, label='Val')
+                ax.set_ylim(0.4, 1.05)
+                ax.axhline(y=0.5, color='#585b70',
+                    linestyle='--', linewidth=0.8)
+                ax.legend(fontsize=7,
+                    facecolor='#313244',
+                    edgecolor='#45475a',
+                    labelcolor='#cdd6f4')
+            ax.tick_params(colors='#6c7086', labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_color('#45475a')
+
+        self.fig.tight_layout(pad=2.0)
+        self.canvas.draw()
+
+
+# ── Main ─────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Decision Head Training Dashboard')
+    parser.add_argument('--data-dir',
+        default='../../rl_data/trajectories')
+    parser.add_argument('--save-dir',
+        default='../../rl_data/checkpoints')
+    parser.add_argument('--encoder-checkpoint',
+        default='../../rl_data/checkpoints/'
+                'best_value_model.pt')
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch-size', type=int,
+        default=32)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--device', default=None)
+    parser.add_argument('--max-files', type=int,
+        default=None)
+    args = parser.parse_args()
+
+    state = TrainingState()
+
+    t = threading.Thread(target=trainer_thread,
+        args=(state, args), daemon=True)
+    t.start()
+
+    root = tk.Tk()
+    app = DecisionDashboard(root, state)
+    root.mainloop()
+
+
+if __name__ == '__main__':
+    main()
