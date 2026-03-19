@@ -548,7 +548,7 @@ def main():
             break
 
         # ── Step 2: Load trajectories ──
-        attack_data, block_data = load_ppo_data(
+        attack_data, block_data, value_data = load_ppo_data(
             args.traj_dir)
 
         if not attack_data and not block_data:
