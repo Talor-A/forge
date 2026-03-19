@@ -238,69 +238,112 @@ public class SimulateRLTraining {
 
     /**
      * Evaluation mode: RL AI vs heuristic AI, measuring win rate.
+     * Runs in parallel and records trajectories for PPO training.
      */
     private static void runEvaluationMode(List<Deck> decks, int nGames, int timeout,
                                             String outputDir, boolean quiet,
                                             String grpcHost, int grpcPort) {
         System.out.println("=== RL Evaluation Mode ===");
+        int threads = Runtime.getRuntime().availableProcessors();
+        System.out.println("Using " + threads + " threads");
 
-        RLConfig rlConfig = new RLConfig();
-        rlConfig.setMode(RLModelMode.GRPC);
-        rlConfig.setGrpcHost(grpcHost);
-        rlConfig.setGrpcPort(grpcPort);
-        rlConfig.setRecordTrajectories(true);
-        rlConfig.setTrajectoryOutputDir(outputDir);
-
-        RLConfig heuristicConfig = new RLConfig();
-        heuristicConfig.setMode(RLModelMode.HEURISTIC_FALLBACK);
-        heuristicConfig.setRecordTrajectories(false);
-
+        AtomicInteger completed = new AtomicInteger(0);
         AtomicInteger rlWins = new AtomicInteger(0);
         AtomicInteger heuristicWins = new AtomicInteger(0);
         AtomicInteger draws = new AtomicInteger(0);
+        AtomicInteger errors = new AtomicInteger(0);
+        long startTime = System.currentTimeMillis();
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
 
         for (int i = 0; i < nGames; i++) {
-            Deck rlDeck = decks.get(i % decks.size());
-            Deck aiDeck = decks.get((i + 1) % decks.size());
-            boolean rlFirst = (i % 2 == 0);
+            final int gameIdx = i;
+            final Deck rlDeck = decks.get(i % decks.size());
+            final Deck aiDeck = decks.get((i + 1) % decks.size());
+            final boolean rlFirst = (i % 2 == 0);
 
-            try {
-                GameResult result;
-                if (rlFirst) {
-                    result = runSingleGame(rlDeck, aiDeck, rlConfig, heuristicConfig,
-                            "RL_" + i, "Heuristic_" + i, timeout, true);
-                } else {
-                    result = runSingleGame(aiDeck, rlDeck, heuristicConfig, rlConfig,
-                            "Heuristic_" + i, "RL_" + i, timeout, true);
+            futures.add(executor.submit(() -> {
+                RLConfig rlConfig = new RLConfig();
+                rlConfig.setMode(RLModelMode.GRPC);
+                rlConfig.setGrpcHost(grpcHost);
+                rlConfig.setGrpcPort(grpcPort);
+                rlConfig.setRecordTrajectories(true);
+                rlConfig.setTrajectoryOutputDir(outputDir);
+
+                RLConfig heuristicConfig = new RLConfig();
+                heuristicConfig.setMode(RLModelMode.HEURISTIC_FALLBACK);
+                heuristicConfig.setRecordTrajectories(true);
+                heuristicConfig.setTrajectoryOutputDir(outputDir);
+
+                try {
+                    GameResult result;
+                    if (rlFirst) {
+                        result = runSingleGame(
+                                rlDeck, aiDeck,
+                                rlConfig, heuristicConfig,
+                                "RL_" + gameIdx,
+                                "Heuristic_" + gameIdx,
+                                timeout, true);
+                    } else {
+                        result = runSingleGame(
+                                aiDeck, rlDeck,
+                                heuristicConfig, rlConfig,
+                                "Heuristic_" + gameIdx,
+                                "RL_" + gameIdx,
+                                timeout, true);
+                    }
+
+                    if (result.isDraw) {
+                        draws.incrementAndGet();
+                    } else {
+                        boolean rlWon = rlFirst
+                                ? result.player1Won
+                                : !result.player1Won;
+                        if (rlWon) rlWins.incrementAndGet();
+                        else heuristicWins.incrementAndGet();
+                    }
+                } catch (Exception e) {
+                    errors.incrementAndGet();
                 }
 
-                if (result.isDraw) {
-                    draws.incrementAndGet();
-                } else {
-                    // Figure out if RL won
-                    boolean rlWon = rlFirst ? result.player1Won : !result.player1Won;
-                    if (rlWon) rlWins.incrementAndGet();
-                    else heuristicWins.incrementAndGet();
+                int done = completed.incrementAndGet();
+                if (done % 10 == 0) {
+                    int total = rlWins.get()
+                            + heuristicWins.get();
+                    double wr = total > 0
+                            ? (double) rlWins.get() / total
+                            : 0;
+                    System.out.printf(
+                            "Game %d/%d: RL win rate:"
+                            + " %.1f%% (%d/%d)%n",
+                            done, nGames, wr * 100,
+                            rlWins.get(), total);
                 }
-
-                if (!quiet && (i + 1) % 10 == 0) {
-                    int total = rlWins.get() + heuristicWins.get();
-                    double winRate = total > 0 ? (double) rlWins.get() / total : 0;
-                    System.out.printf("Game %d/%d: RL win rate: %.1f%% (%d/%d)%n",
-                            i + 1, nGames, winRate * 100, rlWins.get(), total);
-                }
-
-            } catch (Exception e) {
-                System.out.printf("Game %d FAILED: %s%n", i + 1, e.getMessage());
-            }
+            }));
         }
 
-        int totalDecisive = rlWins.get() + heuristicWins.get();
-        double winRate = totalDecisive > 0 ? (double) rlWins.get() / totalDecisive : 0;
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                f.get(timeout + 30, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                errors.incrementAndGet();
+            }
+        }
+        executor.shutdown();
+
+        int totalDecisive = rlWins.get()
+                + heuristicWins.get();
+        double winRate = totalDecisive > 0
+                ? (double) rlWins.get() / totalDecisive : 0;
         System.out.println();
         System.out.println("=== Evaluation Complete ===");
-        System.out.printf("RL Wins: %d (%.1f%%) | Heuristic Wins: %d | Draws: %d%n",
-                rlWins.get(), winRate * 100, heuristicWins.get(), draws.get());
+        System.out.printf(
+                "RL Wins: %d (%.1f%%) |"
+                + " Heuristic Wins: %d | Draws: %d%n",
+                rlWins.get(), winRate * 100,
+                heuristicWins.get(), draws.get());
     }
 
     /**
@@ -391,15 +434,16 @@ public class SimulateRLTraining {
                 rec.startGame(gameId + "_" + p.getName());
                 recorders.put(p, rec);
 
-                // Decision listener disabled — causes turn-0
-                // (likely PlayerControllerAi checkstyle issues
-                // with modified class in fat jar)
-
-                // Event-based state snapshots
-                forge.ai.rl.GameStateRecorder gsr =
-                    new forge.ai.rl.GameStateRecorder(
-                        game, p, rec, anyConfig);
-                gsr.register();
+                // Record initial game state snapshot
+                try {
+                    forge.ai.rl.GameStateRecorder gsr =
+                        new forge.ai.rl.GameStateRecorder(
+                            game, p, rec, anyConfig);
+                    gsr.register();
+                } catch (Exception e) {
+                    // EventBus may not work across jar
+                    // boundaries — fall back to post-game
+                }
             }
         }
 
@@ -418,17 +462,74 @@ public class SimulateRLTraining {
             }
         }
 
-        // Stop recording and write trajectory files
+        // Record post-game snapshots and close files
+        forge.ai.rl.features.GameStateEncoder enc =
+            new forge.ai.rl.features.GameStateEncoder(
+                anyConfig);
         for (Map.Entry<Player,
-                forge.ai.rl.training.TrajectoryRecorder> entry
-                : recorders.entrySet()) {
+                forge.ai.rl.training.TrajectoryRecorder>
+                entry : recorders.entrySet()) {
             Player p = entry.getKey();
+            forge.ai.rl.training.TrajectoryRecorder rec =
+                entry.getValue();
             RegisteredPlayer rp = p.getRegisteredPlayer();
-            boolean won = game.getOutcome() != null
-                    && !game.getOutcome().isDraw()
-                    && rp != null
-                    && game.getOutcome().isWinner(rp);
-            entry.getValue().endGame(won);
+            boolean won = false;
+            if (game.getOutcome() != null
+                    && !game.getOutcome().isDraw()) {
+                LobbyPlayer winner = game.getOutcome()
+                        .getWinningLobbyPlayer();
+                won = p.getLobbyPlayer().equals(winner);
+            }
+
+            // If no events fired, record end-game snapshot
+            if (rec.getCurrentGameDecisionCount() == 0) {
+                try {
+                    forge.ai.rl.features
+                        .GameStateFeatures gs =
+                        enc.encode(game, p);
+                    forge.ai.rl.decisions
+                        .DecisionContext ctx =
+                        new forge.ai.rl.decisions
+                            .DecisionContext(
+                            forge.ai.rl.decisions
+                                .DecisionType
+                                .PRIORITY_ACTION,
+                            gs, java.util.List.of(),
+                            0, 0,
+                            "game_end_turn_"
+                                + game.getPhaseHandler()
+                                    .getTurn());
+                    forge.ai.rl.decisions
+                        .DecisionResult res =
+                        new forge.ai.rl.decisions
+                            .DecisionResult(
+                            java.util.List.of(
+                                won ? 1 : 0),
+                            new float[0],
+                            won ? 1f : -1f, true);
+                    Player opp = null;
+                    for (Player other
+                            : lobbyToPlayer.values()) {
+                        if (other != p) {
+                            opp = other;
+                            break;
+                        }
+                    }
+                    rec.recordDecision(ctx, res,
+                        p.getLife(),
+                        opp != null ? opp.getLife() : 0,
+                        p.getCardsIn(forge.game.zone
+                            .ZoneType.Hand).size(),
+                        opp != null ? opp.getCardsIn(
+                            forge.game.zone.ZoneType.Hand)
+                            .size() : 0, 0, 0);
+                } catch (Exception e) {
+                    System.err.println(
+                        "SNAPSHOT ERR: " + e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+            rec.endGame(won);
         }
 
         // Build result

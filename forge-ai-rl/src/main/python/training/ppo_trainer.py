@@ -50,7 +50,7 @@ import threading
 
 # ── Config ───────────────────────────────────────────
 
-PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
+PROJECT_ROOT = str(Path(__file__).resolve().parents[5])
 FORGE_JAR = os.path.join(
     PROJECT_ROOT,
     'forge-gui-desktop/target/'
