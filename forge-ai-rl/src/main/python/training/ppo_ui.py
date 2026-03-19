@@ -161,9 +161,11 @@ def ppo_thread(state, args):
                 f"---")
             log(state, "  Collecting games...")
 
+            # Use 'collect' mode for data (both heuristic,
+            # recording works). Evaluate separately for WR.
             _, stdout = run_games(
                 args.games_per_round, traj_dir,
-                mode='evaluate', port=port)
+                mode='collect', port=port)
 
             attack_data, block_data, value_data = \
                 load_ppo_data(traj_dir)

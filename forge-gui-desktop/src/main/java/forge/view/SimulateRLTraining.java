@@ -443,6 +443,79 @@ public class SimulateRLTraining {
         }
         result.turns = game.getPhaseHandler().getTurn();
 
+        // Write trajectory files for PPO
+        if (anyConfig.isRecordTrajectories()
+                && !result.isDraw) {
+            for (Player p : lobbyToPlayer.values()) {
+                try {
+                    boolean won = !result.isDraw
+                            && p.getLobbyPlayer().equals(
+                                game.getOutcome()
+                                .getWinningLobbyPlayer());
+                    forge.ai.rl.training.TrajectoryRecorder
+                        rec = new forge.ai.rl.training
+                            .TrajectoryRecorder(
+                                anyConfig
+                                .getTrajectoryOutputDir());
+                    rec.startGame(
+                        gameId + "_" + p.getName());
+                    // Minimal record: just global features
+                    // and outcome (no encoder, no cards)
+                    float[] gf = new float[64];
+                    gf[0] = normalize(p.getLife(), -10, 40);
+                    Player opp = null;
+                    for (Player o : lobbyToPlayer.values()) {
+                        if (o != p) { opp = o; break; }
+                    }
+                    gf[1] = opp != null
+                        ? normalize(opp.getLife(), -10, 40)
+                        : 0.5f;
+                    gf[4] = normalize(result.turns, 0, 30);
+                    forge.ai.rl.features.GameStateFeatures
+                        gs = new forge.ai.rl.features
+                            .GameStateFeatures(
+                            gf,
+                            new float[30][128],
+                            new boolean[30],
+                            new float[30][128],
+                            new boolean[30],
+                            new float[15][128],
+                            new boolean[15],
+                            new float[40][128],
+                            new boolean[40],
+                            new float[40][128],
+                            new boolean[40],
+                            new float[10][128],
+                            new boolean[10]);
+                    forge.ai.rl.decisions.DecisionContext
+                        ctx = new forge.ai.rl.decisions
+                            .DecisionContext(
+                            forge.ai.rl.decisions
+                                .DecisionType
+                                .PRIORITY_ACTION,
+                            gs, java.util.List.of(),
+                            0, 0,
+                            "game_end_turn_"
+                                + result.turns);
+                    forge.ai.rl.decisions.DecisionResult
+                        dr = new forge.ai.rl.decisions
+                            .DecisionResult(
+                            java.util.List.of(
+                                won ? 1 : 0),
+                            new float[0],
+                            won ? 1f : -1f, true);
+                    rec.recordDecision(ctx, dr,
+                        p.getLife(),
+                        opp != null ? opp.getLife() : 0,
+                        0, 0, 0, 0);
+                    rec.endGame(won);
+                } catch (Exception e) {
+                    System.err.println("TRAJ: "
+                        + e.getMessage());
+                }
+            }
+        }
+
         return result;
     }
 
@@ -503,6 +576,11 @@ public class SimulateRLTraining {
         System.out.println("  -host <host>  Model server host (default: localhost)");
         System.out.println("  -port <port>  Model server port (default: 50051)");
         System.out.println("  -q            Quiet mode");
+    }
+
+    private static float normalize(double v, double min, double max) {
+        if (max <= min) return 0f;
+        return (float) Math.max(0, Math.min(1, (v - min) / (max - min)));
     }
 
     private static class GameResult {
