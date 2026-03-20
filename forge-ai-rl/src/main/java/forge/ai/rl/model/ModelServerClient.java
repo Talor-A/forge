@@ -87,6 +87,10 @@ public class ModelServerClient {
             request.oppBoardMask = context.getGameState().getOppBoardMask();
             request.myHandFeatures = context.getGameState().getMyHandFeatures();
             request.myHandMask = context.getGameState().getMyHandMask();
+            request.myGraveyardFeatures = context.getGameState().getMyGraveyardFeatures();
+            request.myGraveyardMask = context.getGameState().getMyGraveyardMask();
+            request.oppGraveyardFeatures = context.getGameState().getOppGraveyardFeatures();
+            request.oppGraveyardMask = context.getGameState().getOppGraveyardMask();
             request.stackFeatures = context.getGameState().getStackFeatures();
             request.stackMask = context.getGameState().getStackMask();
             request.candidateFeatures = context.getCandidateFeatures().toArray(new float[0][]);
@@ -142,6 +146,10 @@ public class ModelServerClient {
         boolean[] oppBoardMask;
         float[][] myHandFeatures;
         boolean[] myHandMask;
+        float[][] myGraveyardFeatures;
+        boolean[] myGraveyardMask;
+        float[][] oppGraveyardFeatures;
+        boolean[] oppGraveyardMask;
         float[][] stackFeatures;
         boolean[] stackMask;
         float[][] candidateFeatures;

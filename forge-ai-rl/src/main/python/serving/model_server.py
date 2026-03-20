@@ -188,12 +188,11 @@ class ModelServer:
         hand = self._to_tensor_2d(request.get('myHandFeatures', []), 15, 128)
         hand_mask = self._to_mask(request.get('myHandMask', []), 15)
 
-        # Use zero tensors for graveyard/stack to keep it simple initially
         gy_size, stack_size = 40, 10
-        my_gy = torch.zeros(1, gy_size, 128, device=self.device)
-        my_gy_mask = torch.zeros(1, gy_size, dtype=torch.bool, device=self.device)
-        opp_gy = torch.zeros(1, gy_size, 128, device=self.device)
-        opp_gy_mask = torch.zeros(1, gy_size, dtype=torch.bool, device=self.device)
+        my_gy = self._to_tensor_2d(request.get('myGraveyardFeatures', []), gy_size, 128)
+        my_gy_mask = self._to_mask(request.get('myGraveyardMask', []), gy_size)
+        opp_gy = self._to_tensor_2d(request.get('oppGraveyardFeatures', []), gy_size, 128)
+        opp_gy_mask = self._to_mask(request.get('oppGraveyardMask', []), gy_size)
         stack = self._to_tensor_2d(request.get('stackFeatures', []), stack_size, 128)
         stack_mask = self._to_mask(request.get('stackMask', []), stack_size)
 

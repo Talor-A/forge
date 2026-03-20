@@ -167,6 +167,16 @@ public class RLController {
             throw new ModelServerException(
                     "Model server unavailable for attack decision");
         }
+        // Log model output for debugging
+        StringBuilder sb = new StringBuilder("RL_MODEL_ATTACK: probs=[");
+        float[] probs = result.getActionProbabilities();
+        for (int i = 0; i < probs.length && i < possibleAttackers.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(String.format("%.2f", probs[i]));
+        }
+        sb.append("] selected=").append(result.getSelectedIndices());
+        sb.append(" value=").append(String.format("%.3f", result.getValueEstimate()));
+        System.out.println(sb.toString());
         recordDecision(context, result);
         return result.getSelectedIndices();
     }

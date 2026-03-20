@@ -65,6 +65,11 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
         List<Integer> attackerIndices = rl.decideAttackers(possibleAttackers);
 
+        // Log attack decision for debugging
+        System.out.println("RL_ATTACK: possible=" + possibleAttackers.size()
+                + " attacking=" + attackerIndices.size()
+                + " indices=" + attackerIndices);
+
         for (int idx : attackerIndices) {
             if (idx >= 0 && idx < possibleAttackers.size()) {
                 Card c = possibleAttackers.get(idx);
