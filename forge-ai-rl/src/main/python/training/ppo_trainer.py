@@ -322,9 +322,11 @@ class ModelServerError(Exception):
 
 
 def run_games(n_games, traj_dir, mode='evaluate',
-              port=50051, quiet=True):
+              port=50051, quiet=True,
+              progress_callback=None):
     """Run games via Java subprocess.
-    Raises ModelServerError if the server is detected as down."""
+    Raises ModelServerError if the server is detected as down.
+    progress_callback(completed, total) called as games complete."""
     os.makedirs(traj_dir, exist_ok=True)
     # Clean old trajectories
     for f in Path(traj_dir).glob('traj_*.jsonl'):
@@ -352,16 +354,47 @@ def run_games(n_games, traj_dir, mode='evaluate',
         '-host', 'localhost',
         '-port', str(port),
     ]
-    if quiet:
-        cmd.append('-q')
+    # Don't use -q so we can parse progress
+    # (evaluate mode prints Game N/M every 10 games)
 
     cwd = os.path.join(PROJECT_ROOT, 'forge-gui-desktop')
-    result = subprocess.run(
-        cmd, cwd=cwd, capture_output=True,
-        text=True, timeout=600)
+
+    # Stream output for progress tracking
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+
+    stdout_lines = []
+    try:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            # Parse progress from evaluate mode output
+            if progress_callback and 'Game ' in line:
+                try:
+                    # "Game 10/100: RL win rate: ..."
+                    parts = line.split('Game ')[1].split('/')
+                    done = int(parts[0])
+                    progress_callback(done, n_games)
+                except (IndexError, ValueError):
+                    pass
+            # Also count trajectory files as progress
+            elif (progress_callback
+                  and 'Wrote trajectory' in line):
+                done = len(list(
+                    Path(traj_dir).glob('traj_*.jsonl')))
+                # Each game produces ~4 files
+                est = min(done // 4, n_games)
+                if est > 0:
+                    progress_callback(est, n_games)
+
+        proc.wait(timeout=600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+    stdout = ''.join(stdout_lines)
 
     # Check for model server abort
-    if 'ABORT' in result.stdout:
+    if 'ABORT' in stdout:
         raise ModelServerError(
             "Model server is down — Java aborted the run. "
             "Check server logs.")
@@ -369,7 +402,7 @@ def run_games(n_games, traj_dir, mode='evaluate',
     # Parse win rate from output
     win_rate = None
     server_errors = 0
-    for line in result.stdout.split('\n'):
+    for line in stdout_lines:
         if 'RL Wins:' in line:
             try:
                 pct = line.split('(')[1].split('%')[0]
@@ -378,15 +411,12 @@ def run_games(n_games, traj_dir, mode='evaluate',
                 pass
         elif 'MODEL_SERVER_ERROR' in line:
             server_errors += 1
-        elif 'P1:' in line and 'P2:' in line:
-            # Collection mode
-            pass
 
     if server_errors > 0:
         print(f"  WARNING: {server_errors} model server "
               f"errors during run", flush=True)
 
-    return win_rate, result.stdout
+    return win_rate, stdout
 
 
 # ── Model server management ──────────────────────────

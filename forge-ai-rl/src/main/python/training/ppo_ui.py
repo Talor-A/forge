@@ -49,6 +49,7 @@ class PPOState:
     round: int = 0
     total_rounds: int = 20
     games_this_round: int = 0
+    games_total_this_round: int = 0
     attacks_this_round: int = 0
     blocks_this_round: int = 0
 
@@ -161,10 +162,21 @@ def ppo_thread(state, args):
                 f"---")
             log(state, "  Collecting games...")
 
+            def on_progress(done, total):
+                state.games_this_round = done
+                state.games_total_this_round = total
+                state.status = (
+                    f"Round {rnd}: game {done}/{total}")
+
+            state.games_this_round = 0
+            state.games_total_this_round = \
+                args.games_per_round
+
             try:
                 _, stdout = run_games(
                     args.games_per_round, traj_dir,
-                    mode='evaluate', port=port)
+                    mode='evaluate', port=port,
+                    progress_callback=on_progress)
             except ModelServerError as e:
                 log(state, f"  FATAL: {e}")
                 log(state, "  Stopping PPO — model server "
@@ -489,9 +501,19 @@ class PPODashboard:
 
         pct = s.round / max(s.total_rounds, 1) * 100
         self.prog['value'] = pct
-        self.prog_v.set(
-            f"Round {s.round}/{s.total_rounds} "
-            f"({s.phase})")
+        if s.phase == 'collecting' and s.games_total_this_round > 0:
+            self.prog_v.set(
+                f"Round {s.round}/{s.total_rounds} "
+                f"— game {s.games_this_round}/"
+                f"{s.games_total_this_round}")
+        elif s.phase == 'evaluating':
+            self.prog_v.set(
+                f"Round {s.round}/{s.total_rounds} "
+                f"— evaluating...")
+        else:
+            self.prog_v.set(
+                f"Round {s.round}/{s.total_rounds} "
+                f"({s.phase})")
 
         self.svars['Round'].set(
             f"{s.round}/{s.total_rounds}")
@@ -571,7 +593,7 @@ class PPODashboard:
             self.log_text.see(tk.END)
             self.log_text.config(state=tk.DISABLED)
 
-        self.root.after(1000, self._tick)
+        self.root.after(500, self._tick)
 
 
 def main():
