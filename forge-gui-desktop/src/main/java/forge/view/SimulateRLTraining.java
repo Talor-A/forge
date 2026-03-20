@@ -128,7 +128,7 @@ public class SimulateRLTraining {
                 runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads);
                 break;
             case "evaluate":
-                runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort);
+                runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort, threads);
                 break;
             case "selfplay":
                 runSelfPlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort);
@@ -253,80 +253,96 @@ public class SimulateRLTraining {
      */
     private static void runEvaluationMode(List<Deck> decks, int nGames, int timeout,
                                             String outputDir, boolean quiet,
-                                            String grpcHost, int grpcPort) {
-        System.out.println("=== RL Evaluation Mode ===");
-
-        RLConfig rlConfig = new RLConfig();
-        rlConfig.setMode(RLModelMode.GRPC);
-        rlConfig.setGrpcHost(grpcHost);
-        rlConfig.setGrpcPort(grpcPort);
-        rlConfig.setRecordTrajectories(true);
-        rlConfig.setTrajectoryOutputDir(outputDir);
-
-        RLConfig heuristicConfig = new RLConfig();
-        heuristicConfig.setMode(RLModelMode.HEURISTIC_FALLBACK);
-        heuristicConfig.setRecordTrajectories(false);
+                                            String grpcHost, int grpcPort, int threads) {
+        System.out.println("=== RL Evaluation Mode (" + threads + " threads) ===");
 
         AtomicInteger rlWins = new AtomicInteger(0);
         AtomicInteger heuristicWins = new AtomicInteger(0);
         AtomicInteger draws = new AtomicInteger(0);
+        AtomicInteger completed = new AtomicInteger(0);
         AtomicInteger serverErrors = new AtomicInteger(0);
+        AtomicInteger consecutiveErrors = new AtomicInteger(0);
         final int MAX_SERVER_ERRORS = 3;
+        long startTime = System.currentTimeMillis();
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
 
         for (int i = 0; i < nGames; i++) {
-            Deck rlDeck = decks.get(i % decks.size());
-            Deck aiDeck = decks.get((i + 1) % decks.size());
-            boolean rlFirst = (i % 2 == 0);
+            final int gameIdx = i;
+            final Deck rlDeck = decks.get(i % decks.size());
+            final Deck aiDeck = decks.get((i + 1) % decks.size());
+            final boolean rlFirst = (i % 2 == 0);
 
-            try {
-                GameResult result;
-                if (rlFirst) {
-                    result = runSingleGame(rlDeck, aiDeck, rlConfig, heuristicConfig,
-                            "RL_" + i, "Heuristic_" + i, timeout, true);
-                } else {
-                    result = runSingleGame(aiDeck, rlDeck, heuristicConfig, rlConfig,
-                            "Heuristic_" + i, "RL_" + i, timeout, true);
+            futures.add(executor.submit(() -> {
+                // Each thread gets its own RLConfig to avoid contention
+                RLConfig rlConfig = new RLConfig();
+                rlConfig.setMode(RLModelMode.GRPC);
+                rlConfig.setGrpcHost(grpcHost);
+                rlConfig.setGrpcPort(grpcPort);
+                rlConfig.setRecordTrajectories(true);
+                rlConfig.setTrajectoryOutputDir(outputDir);
+
+                RLConfig heuristicConfig = new RLConfig();
+                heuristicConfig.setMode(RLModelMode.HEURISTIC_FALLBACK);
+                heuristicConfig.setRecordTrajectories(false);
+
+                try {
+                    GameResult result;
+                    if (rlFirst) {
+                        result = runSingleGame(rlDeck, aiDeck, rlConfig, heuristicConfig,
+                                "RL_" + gameIdx, "Heuristic_" + gameIdx, timeout, true);
+                    } else {
+                        result = runSingleGame(aiDeck, rlDeck, heuristicConfig, rlConfig,
+                                "Heuristic_" + gameIdx, "RL_" + gameIdx, timeout, true);
+                    }
+
+                    consecutiveErrors.set(0);
+
+                    if (result.isDraw) {
+                        draws.incrementAndGet();
+                    } else {
+                        boolean rlWon = rlFirst ? result.player1Won : !result.player1Won;
+                        if (rlWon) rlWins.incrementAndGet();
+                        else heuristicWins.incrementAndGet();
+                    }
+                } catch (ModelServerException e) {
+                    serverErrors.incrementAndGet();
+                    int consec = consecutiveErrors.incrementAndGet();
+                    System.out.printf("Game %d MODEL_SERVER_ERROR (%d/%d): %s%n",
+                            gameIdx, consec, MAX_SERVER_ERRORS, e.getMessage());
+                } catch (Exception e) {
+                    System.out.printf("Game %d FAILED: %s%n", gameIdx, e.getMessage());
                 }
 
-                // Game completed successfully — reset consecutive error count
-                serverErrors.set(0);
-
-                if (result.isDraw) {
-                    draws.incrementAndGet();
-                } else {
-                    // Figure out if RL won
-                    boolean rlWon = rlFirst ? result.player1Won : !result.player1Won;
-                    if (rlWon) rlWins.incrementAndGet();
-                    else heuristicWins.incrementAndGet();
-                }
-
-                if (!quiet && (i + 1) % 10 == 0) {
+                int done = completed.incrementAndGet();
+                if (!quiet && (done % 10 == 0 || done == nGames)) {
                     int total = rlWins.get() + heuristicWins.get();
                     double winRate = total > 0 ? (double) rlWins.get() / total : 0;
-                    System.out.printf("Game %d/%d: RL win rate: %.1f%% (%d/%d)%n",
-                            i + 1, nGames, winRate * 100, rlWins.get(), total);
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    double gps = done * 1000.0 / elapsed;
+                    System.out.printf("Game %d/%d: RL win rate: %.1f%% (%d/%d) [%.1f games/s]%n",
+                            done, nGames, winRate * 100, rlWins.get(), total, gps);
+                    System.out.flush();
                 }
+            }));
+        }
 
-            } catch (ModelServerException e) {
-                int errCount = serverErrors.incrementAndGet();
-                System.out.printf("Game %d MODEL_SERVER_ERROR (%d/%d): %s%n",
-                        i + 1, errCount, MAX_SERVER_ERRORS, e.getMessage());
-                if (errCount >= MAX_SERVER_ERRORS) {
-                    System.out.println();
-                    System.out.println("ABORT: Model server failed " + MAX_SERVER_ERRORS
-                            + " consecutive games. Server is down or broken.");
-                    System.out.println("ABORT: Fix the model server and retry.");
-                    break;
-                }
+        // Wait for all games
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                f.get(timeout + 30, TimeUnit.SECONDS);
             } catch (Exception e) {
-                System.out.printf("Game %d FAILED: %s%n", i + 1, e.getMessage());
+                // timeout or execution error
             }
         }
+        executor.shutdown();
 
         int totalDecisive = rlWins.get() + heuristicWins.get();
         double winRate = totalDecisive > 0 ? (double) rlWins.get() / totalDecisive : 0;
         System.out.println();
-        if (serverErrors.get() >= MAX_SERVER_ERRORS) {
+        if (consecutiveErrors.get() >= MAX_SERVER_ERRORS) {
             System.out.println("=== Evaluation ABORTED (model server down) ===");
         } else {
             System.out.println("=== Evaluation Complete ===");

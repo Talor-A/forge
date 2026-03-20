@@ -4,7 +4,8 @@ set -e
 cd /home/maustin/forge/forge-ai-rl/src/main/python
 source /home/maustin/forge/forge-ai-rl/venv/bin/activate
 
-pkill -f "model_server\|ppo_ui" 2>/dev/null; sleep 1
+pkill -f "model_server\|ppo_ui" 2>/dev/null || true
+sleep 1
 
 MODEL=${1:-/home/maustin/forge/rl_data/checkpoints/model_with_decisions.pt}
 ROUNDS=${2:-10}

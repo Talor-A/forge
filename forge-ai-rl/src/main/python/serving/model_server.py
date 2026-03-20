@@ -15,6 +15,9 @@ import threading
 import logging
 import sys
 import os
+import time
+import queue
+from collections import namedtuple
 import numpy as np
 import torch
 
@@ -31,8 +34,11 @@ class ModelServer:
     TCP server for serving RL model inference to the Java game engine.
     """
 
+    # Pending request: (request_dict, result_event, result_holder)
+    _InferItem = namedtuple('_InferItem', ['request', 'event', 'result'])
+
     def __init__(self, model: MTGModel, host: str = 'localhost', port: int = 50051,
-                 device: str = 'cpu'):
+                 device: str = 'cpu', batch_wait_ms: float = 5.0, max_batch: int = 32):
         self.model = model
         self.model.eval()
         self.host = host
@@ -40,14 +46,22 @@ class ModelServer:
         self.device = device
         self.running = False
         self.request_count = 0
-        # Lock to serialize CUDA inference (not thread-safe)
-        self._inference_lock = threading.Lock()
+        self.batch_wait_ms = batch_wait_ms
+        self.max_batch = max_batch
+        # Queue for batched inference
+        self._infer_queue = queue.Queue()
         # Limit concurrent client threads to prevent OOM
-        self._client_semaphore = threading.Semaphore(32)
+        self._client_semaphore = threading.Semaphore(64)
 
     def start(self):
         """Start the server."""
         self.running = True
+
+        # Start batch inference thread
+        infer_thread = threading.Thread(
+            target=self._batch_inference_loop, daemon=True)
+        infer_thread.start()
+
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))
@@ -78,6 +92,43 @@ class ModelServer:
                 server_socket.close()
             except Exception:
                 pass
+
+    def _batch_inference_loop(self):
+        """Collect requests and process them in batches on GPU."""
+        while self.running:
+            # Wait for first item
+            try:
+                first = self._infer_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            batch = [first]
+            # Collect more items within the wait window
+            deadline = time.monotonic() + self.batch_wait_ms / 1000.0
+            while len(batch) < self.max_batch:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = self._infer_queue.get(timeout=remaining)
+                    batch.append(item)
+                except queue.Empty:
+                    break
+
+            # Process each request individually but without lock contention
+            # (this thread is the only one doing inference)
+            for item in batch:
+                try:
+                    response = self._process_request_impl(item.request)
+                    item.result.append(response)
+                except Exception as e:
+                    logger.error(f"Batch inference error: {e}")
+                    item.result.append({
+                        'selectedIndices': [0],
+                        'actionProbabilities': [],
+                        'valueEstimate': 0.0,
+                    })
+                item.event.set()
 
     def _handle_client(self, client_socket: socket.socket, addr):
         """Handle a single client connection."""
@@ -134,23 +185,23 @@ class ModelServer:
             data += chunk
         return data
 
-    @torch.no_grad()
     def _process_request(self, request: dict) -> dict:
-        """Process an inference request and return the decision.
-        Serialized via lock — CUDA is not thread-safe."""
-        try:
-            with self._inference_lock:
-                return self._process_request_impl(request)
-        except Exception as e:
-            logger.error(f"Process request error: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                'selectedIndices': [0],
-                'actionProbabilities': [],
-                'valueEstimate': 0.0,
-            }
+        """Submit request to batch inference queue and wait for result."""
+        event = threading.Event()
+        result = []  # mutable holder
+        item = self._InferItem(request=request, event=event, result=result)
+        self._infer_queue.put(item)
+        event.wait(timeout=30.0)
+        if result:
+            return result[0]
+        logger.error("Inference timeout - no result after 30s")
+        return {
+            'selectedIndices': [0],
+            'actionProbabilities': [],
+            'valueEstimate': 0.0,
+        }
 
+    @torch.no_grad()
     def _process_request_impl(self, request: dict) -> dict:
         decision_type = request.get('decisionType', 'UNKNOWN')
 
