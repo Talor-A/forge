@@ -144,6 +144,24 @@ public class AiController {
     }
 
     /**
+     * Public facade for canPlayAndPayFor — sets up targeting and validates
+     * that a spell can actually be played. Used by RL controller after the
+     * model picks a spell, to let the heuristic handle targeting.
+     * @return true if the spell is ready to play (targets configured)
+     */
+    public boolean canPlayAndPayForFacade(SpellAbility sa) {
+        sa.setActivatingPlayer(player);
+        SpellAbility root = sa.getRootAbility();
+        if (root.isSpell() || root.isTrigger() || root.isReplacementAbility()) {
+            sa.setLastStateBattlefield(game.getLastStateBattlefield());
+            sa.setLastStateGraveyard(game.getLastStateGraveyard());
+        }
+        AiPlayDecision result = canPlayAndPayFor(sa);
+        sa.clearLastState();
+        return result == AiPlayDecision.WillPlay;
+    }
+
+    /**
      * Returns spells that passed the full heuristic evaluation
      * (canPlayAndPayFor including AI strategic logic).
      * This is a subset of getLastPlayableSpellAbilities().

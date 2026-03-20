@@ -52,22 +52,28 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         if (rl.getConfig().getMode() == RLModelMode.GRPC && rl.isModelServerAvailable()) {
             // Let the heuristic build the candidate lists (lands, filtering, etc.)
             // then use the RL model to pick from the mechanically-legal set
-            super.chooseSpellAbilityToPlay();
+            List<SpellAbility> heuristicResult = super.chooseSpellAbilityToPlay();
 
-            // Get all mechanically legal spells (broader than heuristic's choices)
+            // Get all mechanically legal spells (broad candidate set)
             List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
             if (candidates == null || candidates.isEmpty()) {
-                return new ArrayList<>(); // nothing playable — pass
+                return heuristicResult; // land play or early-return — use heuristic
             }
 
             int idx = rl.decidePriorityAction(candidates);
             if (idx < 0 || idx >= candidates.size()) {
-                return new ArrayList<>(); // model chose pass
+                return null; // model chose pass — null signals "pass priority"
             }
+
+            // RL picked a spell — use heuristic to set up targeting
             SpellAbility chosen = candidates.get(idx);
-            List<SpellAbility> rlResult = new ArrayList<>();
-            rlResult.add(chosen);
-            return rlResult;
+            if (getAi().canPlayAndPayForFacade(chosen)) {
+                List<SpellAbility> rlResult = new ArrayList<>();
+                rlResult.add(chosen);
+                return rlResult;
+            }
+            // Targeting failed — fall back to pass
+            return null;
         } else {
             // Heuristic decides — record the decision
             List<SpellAbility> result = super.chooseSpellAbilityToPlay();

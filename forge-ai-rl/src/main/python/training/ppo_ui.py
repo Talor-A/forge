@@ -172,11 +172,15 @@ def ppo_thread(state, args):
             state.games_total_this_round = \
                 args.games_per_round
 
+            def on_java_log(line):
+                log(state, f"  [java] {line}")
+
             try:
                 _, stdout = run_games(
                     args.games_per_round, traj_dir,
                     mode='evaluate', port=port,
-                    progress_callback=on_progress)
+                    progress_callback=on_progress,
+                    log_callback=on_java_log)
             except ModelServerError as e:
                 log(state, f"  FATAL: {e}")
                 log(state, "  Stopping PPO — model server "
@@ -330,7 +334,8 @@ def ppo_thread(state, args):
             try:
                 eval_wr, _ = run_games(
                     args.eval_games, eval_dir,
-                    mode='evaluate', port=port)
+                    mode='evaluate', port=port,
+                    log_callback=on_java_log)
                 eval_wr = eval_wr or 0.0
             except ModelServerError as e:
                 log(state, f"  FATAL: {e}")

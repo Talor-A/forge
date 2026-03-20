@@ -472,10 +472,12 @@ class ModelServerError(Exception):
 
 def run_games(n_games, traj_dir, mode='evaluate',
               port=50051, quiet=True,
-              progress_callback=None):
+              progress_callback=None,
+              log_callback=None):
     """Run games via Java subprocess.
     Raises ModelServerError if the server is detected as down.
-    progress_callback(completed, total) called as games complete."""
+    progress_callback(completed, total) called as games complete.
+    log_callback(line) called for each stdout line from Java."""
     os.makedirs(traj_dir, exist_ok=True)
     # Clean old trajectories
     for f in Path(traj_dir).glob('traj_*.jsonl'):
@@ -498,7 +500,7 @@ def run_games(n_games, traj_dir, mode='evaluate',
         'rltrain', mode,
     ] + deck_args + [
         '-n', str(n_games),
-        '-t', '16',
+        '-t', '4',
         '-o', traj_dir,
         '-host', 'localhost',
         '-port', str(port),
@@ -517,6 +519,8 @@ def run_games(n_games, traj_dir, mode='evaluate',
     try:
         for line in proc.stdout:
             stdout_lines.append(line)
+            if log_callback:
+                log_callback(line.rstrip())
             # Parse progress from evaluate mode output
             if progress_callback and 'Game ' in line:
                 try:

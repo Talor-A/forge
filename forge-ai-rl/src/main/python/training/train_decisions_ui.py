@@ -159,7 +159,8 @@ def parse_game_state(flat, global_feats):
     return g, zdata, zmask
 
 
-def load_decisions(data_dir, state, max_files=None):
+def load_decisions(data_dir, state, max_files=None,
+                   heads=None):
     state.phase = "loading"
     state.status = "Loading trajectory files..."
 
@@ -186,6 +187,19 @@ def load_decisions(data_dir, state, max_files=None):
             for line in lines[1:]:
                 rec = json.loads(line)
                 dt = rec.get('decisionType', '')
+
+                # Skip decision types we're not training
+                if heads:
+                    if dt == 'PRIORITY_ACTION' and \
+                            'priority' not in heads:
+                        continue
+                    if dt == 'DECLARE_ATTACKERS' and \
+                            'attack' not in heads:
+                        continue
+                    if dt == 'DECLARE_BLOCKERS' and \
+                            'block' not in heads:
+                        continue
+
                 cand = rec.get('candidateFeatures', [])
                 sel = rec.get('selectedIndices', [])
 
@@ -763,10 +777,14 @@ def trainer_thread(state, args):
         state.gpu_name = profile.name
         state.total_epochs = args.epochs
 
-        # Load data
+        # Load data (only parse decision types we need)
+        heads = (args.heads.split(',')
+                 if args.heads != 'all'
+                 else None)
         attack_samples, block_samples, priority_samples = \
             load_decisions(
-                args.data_dir, state, args.max_files)
+                args.data_dir, state, args.max_files,
+                heads=heads)
 
         # Load model
         state.phase = "training"
