@@ -425,6 +425,10 @@ public class SimulateRLTraining {
         Match match = new Match(rules, players, "RL Training");
         Game game = match.createGame();
 
+        // Increase AI timeout for RL — evaluating all spell candidates
+        // takes longer than the default 5s on complex boards
+        game.AI_TIMEOUT = 15;
+
         // Store player refs before game (lost players get
         // removed from game.getPlayers() after game ends)
         Map<LobbyPlayer, Player> lobbyToPlayer = new HashMap<>();
