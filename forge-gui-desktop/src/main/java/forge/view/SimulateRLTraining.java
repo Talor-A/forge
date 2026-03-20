@@ -154,11 +154,18 @@ public class SimulateRLTraining {
         AtomicInteger p2Wins = new AtomicInteger(0);
         AtomicInteger draws = new AtomicInteger(0);
         AtomicInteger errors = new AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicLong totalTurns = new java.util.concurrent.atomic.AtomicLong(0);
+        java.util.concurrent.atomic.AtomicLong totalFiles = new java.util.concurrent.atomic.AtomicLong(0);
         long startTime = System.currentTimeMillis();
 
         java.util.concurrent.ExecutorService executor =
                 java.util.concurrent.Executors.newFixedThreadPool(threads);
         List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+
+        System.out.printf("  Game │ Done/Total │ Games/s │ P1  │ P2  │ Draw│ Err │"
+                + " Turns │  Files │ ETA%n");
+        System.out.printf("  ─────┼────────────┼─────────┼─────┼─────┼─────┼─────┼"
+                + "───────┼────────┼──────%n");
 
         for (int i = 0; i < nGames; i++) {
             final int gameIdx = i;
@@ -167,9 +174,6 @@ public class SimulateRLTraining {
             final boolean p1First = (i % 2 == 0);
 
             futures.add(executor.submit(() -> {
-                // Each thread gets its own RLConfig to avoid contention
-                // Use RECORD_HEURISTIC mode so PlayerControllerRL captures
-                // pre-decision state paired with heuristic choices
                 RLConfig config = new RLConfig();
                 config.setMode(RLModelMode.RECORD_HEURISTIC);
                 config.setRecordTrajectories(true);
@@ -188,31 +192,35 @@ public class SimulateRLTraining {
                     } else {
                         p2Wins.incrementAndGet();
                     }
+                    totalTurns.addAndGet(result.turns);
                 } catch (Exception e) {
                     errors.incrementAndGet();
                 }
 
                 int done = completed.incrementAndGet();
-                if (quiet && done % 100 == 0) {
+                // Count trajectory files
+                File dir = new File(outputDir);
+                long files = 0;
+                if (dir.isDirectory()) {
+                    File[] list = dir.listFiles((d, name) -> name.endsWith(".jsonl"));
+                    if (list != null) files = list.length;
+                }
+                totalFiles.set(files);
+
+                if (done % 10 == 0 || done == nGames) {
                     long elapsed = System.currentTimeMillis() - startTime;
                     double gps = done * 1000.0 / elapsed;
                     int remaining = nGames - done;
-                    double etaSec = remaining / gps;
+                    double etaSec = gps > 0 ? remaining / gps : 0;
+                    double avgTurns = totalTurns.get() / (double) Math.max(done, 1);
                     System.out.printf(
-                            "Progress: %d/%d (%.1f games/sec) "
-                            + "P1:%d P2:%d Draw:%d Err:%d "
-                            + "ETA:%.0fs%n",
-                            done, nGames, gps,
+                            "  %4d │ %4d/%-4d  │ %5.1f   │ %3d │ %3d │ %3d │ %3d │"
+                            + " %5.1f │ %6d │ %4.0fs%n",
+                            gameIdx, done, nGames, gps,
                             p1Wins.get(), p2Wins.get(),
-                            draws.get(), errors.get(), etaSec);
-                } else if (!quiet && done % 10 == 0) {
-                    long elapsed = System.currentTimeMillis() - startTime;
-                    double gps = done * 1000.0 / elapsed;
-                    System.out.printf(
-                            "Progress: %d/%d (%.1f games/sec) "
-                            + "P1:%d P2:%d%n",
-                            done, nGames, gps,
-                            p1Wins.get(), p2Wins.get());
+                            draws.get(), errors.get(),
+                            avgTurns, files, etaSec);
+                    System.out.flush();
                 }
             }));
         }
@@ -229,14 +237,15 @@ public class SimulateRLTraining {
 
         long totalMs = System.currentTimeMillis() - startTime;
         double gamesPerSec = nGames * 1000.0 / totalMs;
+        double avgTurns = totalTurns.get() / (double) Math.max(nGames, 1);
 
         System.out.println();
         System.out.println("=== Collection Complete ===");
         System.out.printf("Games: %d | P1: %d | P2: %d | Draw: %d | Errors: %d%n",
                 nGames, p1Wins.get(), p2Wins.get(), draws.get(), errors.get());
+        System.out.printf("Avg turns: %.1f | Files: %d%n", avgTurns, totalFiles.get());
         System.out.printf("Total time: %.1fs | %.1f games/sec (%d threads)%n",
                 totalMs / 1000.0, gamesPerSec, threads);
-        System.out.println("Trajectories saved to: " + outputDir);
     }
 
     /**
