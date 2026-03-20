@@ -369,6 +369,12 @@ class GameStateViewer:
 
         tk.Frame(nav, bg="#45475a", width=2).pack(
             side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Button(nav, text="Disagree",
+                   command=self._filter_disagree).pack(
+                       side=tk.LEFT, padx=3)
+
+        tk.Frame(nav, bg="#45475a", width=2).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
         ttk.Button(nav, text="Reload Model",
                    command=self._reload_model).pack(
                        side=tk.LEFT, padx=3)
@@ -377,8 +383,8 @@ class GameStateViewer:
                        side=tk.LEFT, padx=3)
 
         self.model_v = tk.StringVar(
-            value=os.path.basename(model_path)
-            if model_path else "no model")
+            value=os.path.basename(self.model_path)
+            if self.model_path else "no model")
         tk.Label(nav, textvariable=self.model_v,
                  bg="#1e1e2e", fg="#a6e3a1",
                  font=("Consolas", 9)).pack(
@@ -512,6 +518,110 @@ class GameStateViewer:
              and s["selected"][0] < len(
                  s["candidates"]) - 1]
         self.samples = f if f else self.all_samples
+        self.idx = 0
+        self._show()
+
+    def _get_model_pick(self, s):
+        """Get the model's chosen action for a sample.
+        Returns model's pick to compare with heuristic."""
+        if self.model is None:
+            return None
+        try:
+            gf = s["global_features"]
+            flat = s["game_state_flat"]
+            g = np.zeros(64, dtype=np.float32)
+            gl = min(len(gf), 64)
+            if gl > 0:
+                g[:gl] = gf[:gl]
+            np.clip(g, -10, 10, out=g)
+            _, zones, masks = parse_game_state(flat, g)
+
+            with torch.no_grad():
+                t = lambda x: torch.from_numpy(
+                    x).unsqueeze(0).to(self.device)
+                state = self.model.encode_state(
+                    t(g),
+                    t(zones["my_board"]),
+                    t(masks["my_board_mask"]),
+                    t(zones["opp_board"]),
+                    t(masks["opp_board_mask"]),
+                    t(zones["hand"]),
+                    t(masks["hand_mask"]),
+                    t(zones["my_gy"]),
+                    t(masks["my_gy_mask"]),
+                    t(zones["opp_gy"]),
+                    t(masks["opp_gy_mask"]),
+                    t(zones["stack"]),
+                    t(masks["stack_mask"]))
+
+                dt = s.get("type", "")
+                candidates = s.get("candidates", [])
+                if not candidates:
+                    return None
+
+                if dt == "PRIORITY_ACTION":
+                    n = len(candidates)
+                    af_t = torch.zeros(
+                        1, n, 64, device=self.device)
+                    am_t = torch.zeros(
+                        1, n, dtype=torch.bool,
+                        device=self.device)
+                    for j, cf in enumerate(candidates):
+                        cl = min(len(cf), 64)
+                        af_t[0, j, :cl] = torch.tensor(
+                            cf[:cl], dtype=torch.float32)
+                        am_t[0, j] = True
+                    logits = self.model.priority_head(
+                        state, af_t, am_t)
+                    return logits[0].argmax().item()
+
+                elif dt == "DECLARE_ATTACKERS":
+                    n = len(candidates)
+                    cf_t = torch.zeros(
+                        1, n, 128, device=self.device)
+                    cm_t = torch.ones(
+                        1, n, dtype=torch.bool,
+                        device=self.device)
+                    for j, cf in enumerate(candidates):
+                        cl = min(len(cf), 128)
+                        cf_t[0, j, :cl] = torch.tensor(
+                            cf[:cl], dtype=torch.float32)
+                    logits = self.model.attack_head(
+                        state, cf_t, cm_t)
+                    probs = torch.sigmoid(logits)
+                    return set(j for j in range(n)
+                               if probs[0, j].item() > 0.5)
+
+        except Exception:
+            return None
+        return None
+
+    def _filter_disagree(self):
+        """Show only samples where model disagrees
+        with heuristic."""
+        if self.model is None:
+            return
+        disagree = []
+        for s in self.all_samples:
+            dt = s.get("type", "")
+            pick = self._get_model_pick(s)
+            if pick is None:
+                continue
+
+            if dt == "PRIORITY_ACTION":
+                sel = s["selected"]
+                heur_pick = sel[0] if sel else -1
+                if pick != heur_pick:
+                    disagree.append(s)
+            elif dt == "DECLARE_ATTACKERS":
+                heur_pick = set(s.get("selected", []))
+                if pick != heur_pick:
+                    disagree.append(s)
+
+        if disagree:
+            self.samples = disagree
+        else:
+            self.samples = self.all_samples
         self.idx = 0
         self._show()
 
@@ -966,15 +1076,22 @@ def main():
     print("Loading samples...", flush=True)
     samples = load_samples(args.data_dir,
                            args.max_samples)
-    # Also load PPO trajectories if available
+    # Also load PPO eval trajectories if available
+    # (these are RL vs heuristic games — more interesting)
+    ppo_eval_dir = os.path.join(
+        os.path.dirname(args.data_dir),
+        'ppo_trajectories_eval')
     ppo_dir = os.path.join(
         os.path.dirname(args.data_dir),
         'ppo_trajectories')
-    if os.path.isdir(ppo_dir):
-        ppo_samples = load_samples(ppo_dir, 100)
-        samples.extend(ppo_samples)
-        print(f"  + {len(ppo_samples)} PPO samples",
-              flush=True)
+    for d, label in [(ppo_eval_dir, "PPO eval"),
+                     (ppo_dir, "PPO collect")]:
+        if os.path.isdir(d):
+            ppo_samples = load_samples(d, 100)
+            if ppo_samples:
+                samples.extend(ppo_samples)
+                print(f"  + {len(ppo_samples)} {label} "
+                      f"samples from {d}", flush=True)
 
     attacks = sum(1 for s in samples
                   if s["type"] == "DECLARE_ATTACKERS")

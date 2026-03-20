@@ -132,6 +132,12 @@ Each zone produces a (max_cards, 128) tensor with a boolean mask indicating whic
 
 ### 2.3 Neural Network Architecture
 
+The complete model architecture is shown in Figure 1. Data flows left-to-right: raw game state inputs are encoded by the shared transformer encoder into a 512-dimensional state embedding, which then fans out to the value network (critic) and seven specialized decision heads (actors). Heads shown at full opacity are trained; greyed heads are architecturally complete but currently fall through to the heuristic AI.
+
+![Model Architecture](forge-ai-rl/src/main/python/tools/mtg_model_architecture.svg)
+
+*Figure 1: MTG RL Model Architecture. The shared game state encoder (3.4M parameters) processes 7 input zones through per-zone self-attention and cross-zone attention, producing a 512-dimensional state embedding. This embedding is consumed by the value network (critic, providing PPO advantage baseline) and decision heads (actors). Each head is specialized for its decision type: the priority head uses cross-attention between game state and available spells to select which spell to play; the attack head uses self-attention among creatures for coordinated attack decisions; the block head uses cross-attention between blockers and attackers for assignment. Currently trained heads: Value, Priority (95.5% accuracy), Attack (84.4%), Block (61.0%). Untrained heads (Target, Card Select, Mulligan, Binary) fall through to the heuristic AI.*
+
 #### 2.3.1 Game State Encoder (Transformer)
 
 The encoder uses a two-level attention architecture:
