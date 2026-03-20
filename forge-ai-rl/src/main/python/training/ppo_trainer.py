@@ -141,6 +141,11 @@ def load_ppo_data(traj_dir):
                 if len(cand) < 1:
                     continue
 
+                # Old policy probabilities for PPO ratio
+                old_probs = np.array(
+                    rec.get('actionProbabilities', []),
+                    dtype=np.float32)
+
                 if dt == 'PRIORITY_ACTION':
                     # Priority: 64-dim action features,
                     # single-select
@@ -158,6 +163,13 @@ def load_ppo_data(traj_dir):
                     if selected_idx >= n:
                         selected_idx = n - 1
 
+                    # Old log prob for the selected action
+                    old_lp = 0.0
+                    if len(old_probs) > selected_idx:
+                        p = max(old_probs[selected_idx],
+                                1e-8)
+                        old_lp = float(np.log(p))
+
                     priority_samples.append({
                         'global_features': gf,
                         'game_state_flat': flat,
@@ -165,6 +177,7 @@ def load_ppo_data(traj_dir):
                         'selected_idx': selected_idx,
                         'n_actions': n,
                         'outcome': outcome,
+                        'old_log_prob': old_lp,
                     })
                     continue
 
@@ -186,6 +199,18 @@ def load_ppo_data(traj_dir):
                     if 0 <= idx < n:
                         action_mask[idx] = 1.0
 
+                # Old log prob: sum of per-creature
+                # log probs for the joint action
+                old_lp = 0.0
+                if len(old_probs) >= n:
+                    for j in range(n):
+                        p = max(old_probs[j], 1e-8)
+                        if action_mask[j] > 0.5:
+                            old_lp += float(np.log(p))
+                        else:
+                            old_lp += float(
+                                np.log(max(1-p, 1e-8)))
+
                 sample = {
                     'global_features': gf,
                     'game_state_flat': flat,
@@ -193,6 +218,7 @@ def load_ppo_data(traj_dir):
                     'action_mask': action_mask,
                     'n_creatures': n,
                     'outcome': outcome,
+                    'old_log_prob': old_lp,
                 }
                 if dt == 'DECLARE_ATTACKERS':
                     attack_samples.append(sample)
@@ -228,6 +254,7 @@ def compute_ppo_batch(model, head, samples, device,
                       device=device)
     actions = torch.zeros(bs, max_c, device=device)
     outcomes = torch.zeros(bs, device=device)
+    old_log_probs = torch.zeros(bs, device=device)
     gf = torch.zeros(bs, 64, device=device)
 
     # Zone tensors for encoder
@@ -258,6 +285,7 @@ def compute_ppo_batch(model, head, samples, device,
         actions[i, :nc] = torch.from_numpy(
             s['action_mask'])
         outcomes[i] = s['outcome']
+        old_log_probs[i] = s.get('old_log_prob', 0.0)
 
         g, zones, masks_d = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -304,18 +332,19 @@ def compute_ppo_batch(model, head, samples, device,
         # Sum per-creature log probs for total action prob
         log_probs = (log_probs * cm.float()).sum(dim=1)
 
-        # Advantage: outcome - value estimate
-        # (simplified: no GAE, just MC return - baseline)
+        # Advantage: outcome - value estimate (MC return)
         advantage = (outcomes - value.detach())
+        # Normalize advantage for stability
+        if advantage.numel() > 1:
+            advantage = (advantage - advantage.mean()) / \
+                (advantage.std() + 1e-8)
 
-        # PPO clipped objective
-        # Since we're doing on-policy (same model generated
-        # the data), ratio starts at 1.0. We still clip to
-        # stabilize early training.
-        # For true off-policy PPO we'd need old log probs
-        # from the trajectory. For now, maximize
-        # log_prob * advantage (REINFORCE with baseline).
-        policy_loss = -(log_probs * advantage).mean()
+        # PPO clipped objective with importance sampling
+        ratio = torch.exp(log_probs - old_log_probs)
+        surr1 = ratio * advantage
+        surr2 = torch.clamp(ratio, 1.0 - clip_eps,
+                            1.0 + clip_eps) * advantage
+        policy_loss = -torch.min(surr1, surr2).mean()
 
         # Value loss
         value_loss = F.mse_loss(value, outcomes)
@@ -332,7 +361,7 @@ def compute_ppo_batch(model, head, samples, device,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.1 * entropy)
+            0.01 * entropy)
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -367,6 +396,7 @@ def compute_ppo_priority_batch(model, head, samples,
     actions = torch.zeros(bs, dtype=torch.long,
                           device=device)
     outcomes = torch.zeros(bs, device=device)
+    old_log_probs = torch.zeros(bs, device=device)
     gf = torch.zeros(bs, 64, device=device)
 
     # Zone tensors for encoder
@@ -396,6 +426,7 @@ def compute_ppo_priority_batch(model, head, samples,
         am[i, :na] = True
         actions[i] = s['selected_idx']
         outcomes[i] = s['outcome']
+        old_log_probs[i] = s.get('old_log_prob', 0.0)
 
         g, zones, masks_d = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -435,11 +466,19 @@ def compute_ppo_priority_batch(model, head, samples,
             logits=logits)
         log_probs = dist.log_prob(actions)
 
-        # Advantage: outcome - value estimate
+        # Advantage: outcome - value estimate (MC return)
         advantage = (outcomes - value.detach())
+        # Normalize advantage for stability
+        if advantage.numel() > 1:
+            advantage = (advantage - advantage.mean()) / \
+                (advantage.std() + 1e-8)
 
-        # Policy loss (REINFORCE with baseline)
-        policy_loss = -(log_probs * advantage).mean()
+        # PPO clipped objective with importance sampling
+        ratio = torch.exp(log_probs - old_log_probs)
+        surr1 = ratio * advantage
+        surr2 = torch.clamp(ratio, 1.0 - clip_eps,
+                            1.0 + clip_eps) * advantage
+        policy_loss = -torch.min(surr1, surr2).mean()
 
         # Value loss
         value_loss = F.mse_loss(value, outcomes)
@@ -450,7 +489,7 @@ def compute_ppo_priority_batch(model, head, samples,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.1 * entropy)
+            0.01 * entropy)
 
     metrics = {
         'policy_loss': policy_loss.item(),
