@@ -80,7 +80,12 @@ public class GameStateRecorder {
                     event.attackersMap().values();
             for (int i = 0; i < allCreatures.size(); i++) {
                 Card c = allCreatures.get(i);
-                feats.add(CardFeatures.encode(c));
+                float[] cf = CardFeatures.encode(c);
+                // Zero out tapped flag (index 17) for attack candidates.
+                // The event fires AFTER attackers are tapped, but the
+                // model needs PRE-attack features to learn the decision.
+                cf[17] = 0f;
+                feats.add(cf);
                 CardView cv = CardView.get(c);
                 if (attackerViews.contains(cv)) {
                     attackerIndices.add(i);

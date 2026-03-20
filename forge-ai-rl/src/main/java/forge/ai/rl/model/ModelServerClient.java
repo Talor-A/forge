@@ -77,22 +77,14 @@ public class ModelServerClient {
         }
 
         try {
-            // Serialize request
+            // Serialize request — send the flat game state array
+            // (same format as trajectory files) so the Python server
+            // parses it with the exact same parse_game_state() used
+            // during training. No encoding mismatch possible.
             InferenceRequest request = new InferenceRequest();
             request.decisionType = context.getType().name();
             request.globalFeatures = context.getGameState().getGlobalFeatures();
-            request.myBoardFeatures = context.getGameState().getMyBoardFeatures();
-            request.myBoardMask = context.getGameState().getMyBoardMask();
-            request.oppBoardFeatures = context.getGameState().getOppBoardFeatures();
-            request.oppBoardMask = context.getGameState().getOppBoardMask();
-            request.myHandFeatures = context.getGameState().getMyHandFeatures();
-            request.myHandMask = context.getGameState().getMyHandMask();
-            request.myGraveyardFeatures = context.getGameState().getMyGraveyardFeatures();
-            request.myGraveyardMask = context.getGameState().getMyGraveyardMask();
-            request.oppGraveyardFeatures = context.getGameState().getOppGraveyardFeatures();
-            request.oppGraveyardMask = context.getGameState().getOppGraveyardMask();
-            request.stackFeatures = context.getGameState().getStackFeatures();
-            request.stackMask = context.getGameState().getStackMask();
+            request.gameStateFlat = context.getGameState().flatten();
             request.candidateFeatures = context.getCandidateFeatures().toArray(new float[0][]);
             request.minSelections = context.getMinSelections();
             request.maxSelections = context.getMaxSelections();
@@ -140,18 +132,7 @@ public class ModelServerClient {
     private static class InferenceRequest {
         String decisionType;
         float[] globalFeatures;
-        float[][] myBoardFeatures;
-        boolean[] myBoardMask;
-        float[][] oppBoardFeatures;
-        boolean[] oppBoardMask;
-        float[][] myHandFeatures;
-        boolean[] myHandMask;
-        float[][] myGraveyardFeatures;
-        boolean[] myGraveyardMask;
-        float[][] oppGraveyardFeatures;
-        boolean[] oppGraveyardMask;
-        float[][] stackFeatures;
-        boolean[] stackMask;
+        float[] gameStateFlat;
         float[][] candidateFeatures;
         int minSelections;
         int maxSelections;

@@ -142,6 +142,9 @@ class ModelServer:
             with self._inference_lock:
                 return self._process_request_impl(request)
         except Exception as e:
+            logger.error(f"Process request error: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 'selectedIndices': [0],
                 'actionProbabilities': [],
@@ -178,27 +181,34 @@ class ModelServer:
             return {'selectedIndices': [0], 'actionProbabilities': [], 'valueEstimate': 0.0}
 
     def _encode_game_state(self, request: dict) -> torch.Tensor:
-        """Encode game state features into a state embedding."""
-        global_features = self._to_tensor(request.get('globalFeatures', []), (1, 64))
+        """Encode game state features into a state embedding.
+        Uses the same parse_game_state() as training to guarantee
+        identical tensor layout."""
+        import numpy as np
+        from training.ppo_trainer import parse_game_state
 
-        my_board = self._to_tensor_2d(request.get('myBoardFeatures', []), 30, 128)
-        my_board_mask = self._to_mask(request.get('myBoardMask', []), 30)
-        opp_board = self._to_tensor_2d(request.get('oppBoardFeatures', []), 30, 128)
-        opp_board_mask = self._to_mask(request.get('oppBoardMask', []), 30)
-        hand = self._to_tensor_2d(request.get('myHandFeatures', []), 15, 128)
-        hand_mask = self._to_mask(request.get('myHandMask', []), 15)
+        gf = request.get('globalFeatures', [])
+        flat = request.get('gameStateFlat', [])
 
-        gy_size, stack_size = 40, 10
-        my_gy = self._to_tensor_2d(request.get('myGraveyardFeatures', []), gy_size, 128)
-        my_gy_mask = self._to_mask(request.get('myGraveyardMask', []), gy_size)
-        opp_gy = self._to_tensor_2d(request.get('oppGraveyardFeatures', []), gy_size, 128)
-        opp_gy_mask = self._to_mask(request.get('oppGraveyardMask', []), gy_size)
-        stack = self._to_tensor_2d(request.get('stackFeatures', []), stack_size, 128)
-        stack_mask = self._to_mask(request.get('stackMask', []), stack_size)
+        gf_np = np.array(gf, dtype=np.float32)
+        flat_np = np.array(flat, dtype=np.float32)
+        np.clip(gf_np, -10, 10, out=gf_np)
+        np.clip(flat_np, -10, 10, out=flat_np)
+        gf_np = np.nan_to_num(gf_np)
+        flat_np = np.nan_to_num(flat_np)
+
+        g, zones, masks = parse_game_state(flat_np, gf_np)
+
+        t = lambda x: torch.from_numpy(x).unsqueeze(0).to(self.device)
 
         return self.model.encode_state(
-            global_features, my_board, my_board_mask, opp_board, opp_board_mask,
-            hand, hand_mask, my_gy, my_gy_mask, opp_gy, opp_gy_mask, stack, stack_mask
+            t(g),
+            t(zones['my_board']), t(masks['my_board_mask']),
+            t(zones['opp_board']), t(masks['opp_board_mask']),
+            t(zones['hand']), t(masks['hand_mask']),
+            t(zones['my_gy']), t(masks['my_gy_mask']),
+            t(zones['opp_gy']), t(masks['opp_gy_mask']),
+            t(zones['stack']), t(masks['stack_mask'])
         )
 
     def _handle_priority(self, state: torch.Tensor, request: dict) -> dict:
@@ -247,7 +257,33 @@ class ModelServer:
             'valueEstimate': value,
         }
 
+    _debug_count = 0
+
     def _handle_attack(self, state: torch.Tensor, request: dict) -> dict:
+        # Dump first request to file for comparison with training data
+        if ModelServer._debug_count < 3:
+            ModelServer._debug_count += 1
+            import json as jlib
+            with open(f'/tmp/server_request_{ModelServer._debug_count}.json', 'w') as df:
+                # Save the raw request (excluding huge arrays for readability)
+                debug = {
+                    'globalFeatures': request.get('globalFeatures', []),
+                    'candidateFeatures': request.get('candidateFeatures', []),
+                    'myBoardFeatures_count': len(request.get('myBoardFeatures', [])),
+                    'myBoardFeatures_nonzero': sum(1 for r in request.get('myBoardFeatures', []) if any(v!=0 for v in r)),
+                    'oppBoardFeatures_count': len(request.get('oppBoardFeatures', [])),
+                    'oppBoardFeatures_nonzero': sum(1 for r in request.get('oppBoardFeatures', []) if any(v!=0 for v in r)),
+                    'myHandFeatures_count': len(request.get('myHandFeatures', [])),
+                    'myHandFeatures_nonzero': sum(1 for r in request.get('myHandFeatures', []) if any(v!=0 for v in r)),
+                    'myGraveyardFeatures_count': len(request.get('myGraveyardFeatures', [])),
+                    'oppGraveyardFeatures_count': len(request.get('oppGraveyardFeatures', [])),
+                    'candidate_first': request.get('candidateFeatures', [[]])[0][:20] if request.get('candidateFeatures') else [],
+                    'state_norm': state.norm().item(),
+                    'state_5': state[0,:5].tolist(),
+                }
+                jlib.dump(debug, df, indent=2)
+            logger.info(f"DEBUG: Saved request to /tmp/server_request_{ModelServer._debug_count}.json")
+
         candidates = request.get('candidateFeatures', [])
         if not candidates:
             return {'selectedIndices': [], 'actionProbabilities': [], 'valueEstimate': 0.0}
