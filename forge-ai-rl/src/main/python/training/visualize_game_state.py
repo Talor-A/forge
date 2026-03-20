@@ -330,12 +330,15 @@ def load_samples(data_dir, max_samples=200):
 # ── Main Viewer ────────────────────────────────────
 
 class GameStateViewer:
-    def __init__(self, root, samples, model, device):
+    def __init__(self, root, samples, model, device,
+                 model_path=None, data_dir=None):
         self.root = root
         self.all_samples = samples
         self.samples = samples
         self.model = model
         self.device = device
+        self.model_path = model_path
+        self.data_dir = data_dir
         self.idx = 0
         self.card_photos = []  # keep references
 
@@ -363,6 +366,23 @@ class GameStateViewer:
         ttk.Button(nav, text="Pri Pass", command=self._filter_priority_pass).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="Pri Play", command=self._filter_priority_play).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="All", command=self._filter_all).pack(side=tk.LEFT, padx=3)
+
+        tk.Frame(nav, bg="#45475a", width=2).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Button(nav, text="Reload Model",
+                   command=self._reload_model).pack(
+                       side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Reload Data",
+                   command=self._reload_data).pack(
+                       side=tk.LEFT, padx=3)
+
+        self.model_v = tk.StringVar(
+            value=os.path.basename(model_path)
+            if model_path else "no model")
+        tk.Label(nav, textvariable=self.model_v,
+                 bg="#1e1e2e", fg="#a6e3a1",
+                 font=("Consolas", 9)).pack(
+                     side=tk.RIGHT, padx=5)
 
         self.nav_v = tk.StringVar(value="0/0")
         tk.Label(nav, textvariable=self.nav_v, bg="#1e1e2e",
@@ -494,6 +514,56 @@ class GameStateViewer:
         self.samples = f if f else self.all_samples
         self.idx = 0
         self._show()
+
+    def _reload_model(self):
+        """Reload model from disk (picks up PPO updates)."""
+        if not self.model_path:
+            return
+        # Try PPO best first, then the specified path
+        candidates = [
+            os.path.join(os.path.dirname(self.model_path),
+                         'best_ppo_model.pt'),
+            self.model_path,
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    self.model = MTGModel.load(
+                        path, device=self.device)
+                    self.model.eval()
+                    self.model_v.set(
+                        os.path.basename(path) +
+                        " (reloaded)")
+                    if self.samples:
+                        self._show()
+                    return
+                except Exception as e:
+                    print(f"Reload failed: {e}")
+
+    def _reload_data(self):
+        """Reload trajectory data from disk."""
+        if not self.data_dir:
+            return
+        # Also check PPO trajectories
+        dirs = [self.data_dir]
+        ppo_dir = os.path.join(
+            os.path.dirname(self.data_dir),
+            'ppo_trajectories')
+        if os.path.isdir(ppo_dir):
+            dirs.append(ppo_dir)
+        ppo_eval = ppo_dir + '_eval'
+        if os.path.isdir(ppo_eval):
+            dirs.append(ppo_eval)
+
+        all_samples = []
+        for d in dirs:
+            all_samples.extend(
+                load_samples(d, max_samples=100))
+        if all_samples:
+            self.all_samples = all_samples
+            self.samples = all_samples
+            self.idx = 0
+            self._show()
 
     def _filter_all(self):
         self.samples = self.all_samples
@@ -882,27 +952,58 @@ class GameStateViewer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default="../../rl_data/trajectories")
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--data-dir",
+        default="../../rl_data/trajectories")
+    parser.add_argument("--model",
+        default="../../rl_data/checkpoints/"
+                "model_with_decisions.pt")
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--max-samples", type=int, default=200)
+    parser.add_argument("--max-samples", type=int,
+        default=200)
     args = parser.parse_args()
 
+    # Load data from multiple sources
     print("Loading samples...", flush=True)
-    samples = load_samples(args.data_dir, args.max_samples)
-    attacks = sum(1 for s in samples if s["type"] == "DECLARE_ATTACKERS")
-    blocks = sum(1 for s in samples if s["type"] == "DECLARE_BLOCKERS")
-    priority = sum(1 for s in samples if s["type"] == "PRIORITY_ACTION")
-    print(f"  {len(samples)} samples ({attacks} attacks, {blocks} blocks, {priority} priority)", flush=True)
+    samples = load_samples(args.data_dir,
+                           args.max_samples)
+    # Also load PPO trajectories if available
+    ppo_dir = os.path.join(
+        os.path.dirname(args.data_dir),
+        'ppo_trajectories')
+    if os.path.isdir(ppo_dir):
+        ppo_samples = load_samples(ppo_dir, 100)
+        samples.extend(ppo_samples)
+        print(f"  + {len(ppo_samples)} PPO samples",
+              flush=True)
 
+    attacks = sum(1 for s in samples
+                  if s["type"] == "DECLARE_ATTACKERS")
+    blocks = sum(1 for s in samples
+                 if s["type"] == "DECLARE_BLOCKERS")
+    priority = sum(1 for s in samples
+                   if s["type"] == "PRIORITY_ACTION")
+    print(f"  {len(samples)} total samples "
+          f"({attacks} attacks, {blocks} blocks, "
+          f"{priority} priority)", flush=True)
+
+    model_path = args.model
     model = None
-    if args.model and os.path.exists(args.model):
-        print(f"Loading model: {args.model}", flush=True)
-        model = MTGModel.load(args.model, device=args.device)
-        model.eval()
+    # Try best_ppo_model first, then specified path
+    ppo_model = os.path.join(
+        os.path.dirname(model_path),
+        'best_ppo_model.pt')
+    for p in [ppo_model, model_path]:
+        if p and os.path.exists(p):
+            print(f"Loading model: {p}", flush=True)
+            model = MTGModel.load(p, device=args.device)
+            model.eval()
+            model_path = p
+            break
 
     root = tk.Tk()
-    GameStateViewer(root, samples, model, args.device)
+    GameStateViewer(root, samples, model, args.device,
+                    model_path=model_path,
+                    data_dir=args.data_dir)
     root.mainloop()
 
 
