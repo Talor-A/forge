@@ -788,15 +788,20 @@ def trainer_thread(state, args):
 
         os.makedirs(args.save_dir, exist_ok=True)
 
+        heads = (args.heads.split(',')
+                 if args.heads != 'all'
+                 else ['priority', 'attack', 'block'])
+        log(state, f"Heads to train: {heads}")
+
         # Train priority head first (softmax CE, not BCE)
-        if priority_samples:
+        if 'priority' in heads and priority_samples:
             train_priority_head(
                 model, model.priority_head,
                 priority_samples, args, state,
                 device, use_amp)
 
         # Train attack head
-        if attack_samples:
+        if 'attack' in heads and attack_samples:
             state.epoch = 0
             state.epoch_progress = 0
             train_head(model, model.attack_head, 'attack',
@@ -804,8 +809,7 @@ def trainer_thread(state, args):
                        device, use_amp)
 
         # Train block head
-        if block_samples:
-            # Reset epoch tracking for block head
+        if 'block' in heads and block_samples:
             state.epoch = 0
             state.epoch_progress = 0
             train_head(model, model.attack_head, 'block',
@@ -976,9 +980,9 @@ class DecisionDashboard:
                 f"Blk: {s.block_samples} | "
                 f"Pri: {s.priority_samples}")
         elif s.phase == "training":
-            # Three heads: attack=0-33, block=33-66, priority=66-100
-            head_offsets = {'attack': 0, 'block': 33,
-                            'priority': 66}
+            # Three heads: priority=0-33, attack=33-66, block=66-100
+            head_offsets = {'priority': 0, 'attack': 33,
+                            'block': 66}
             head_offset = head_offsets.get(
                 s.current_head, 0)
             total_pct = head_offset + (
@@ -1114,6 +1118,9 @@ def main():
     parser.add_argument('--device', default=None)
     parser.add_argument('--max-files', type=int,
         default=None)
+    parser.add_argument('--heads', default='all',
+        help='Comma-separated heads to train: '
+             'priority,attack,block or "all"')
     args = parser.parse_args()
 
     state = TrainingState()
