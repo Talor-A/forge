@@ -118,17 +118,63 @@ public class RecordingControllerAi extends PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        // Let heuristic decide (also caches candidate list)
         List<SpellAbility> result =
                 super.chooseSpellAbilityToPlay();
+
+        // Get all mechanically legal spells as candidates
+        List<SpellAbility> candidates =
+                getAi().getLastPlayableSpellAbilities();
+        if (candidates == null || candidates.isEmpty())
+            return result;
+
+        // Don't record land plays as priority decisions
+        SpellAbility chosenSa = null;
         if (result != null && !result.isEmpty()) {
-            List<float[]> feats = new ArrayList<>();
-            for (SpellAbility sa : result) {
-                feats.add(ActionEncoder.encode(sa));
-            }
-            record(DecisionType.PRIORITY_ACTION,
-                    result.size(), List.of(0),
-                    feats, "spell_play");
+            chosenSa = result.get(0);
+            if (chosenSa != null && chosenSa.isLandAbility())
+                return result;
         }
+
+        // Build candidate features (64-dim each) + pass
+        List<float[]> feats = new ArrayList<>();
+        for (SpellAbility sa : candidates) {
+            feats.add(ActionEncoder.encode(sa));
+        }
+        feats.add(ActionEncoder.encodePassAction());
+
+        // Find heuristic's choice index
+        int selectedIdx = candidates.size(); // default=pass
+        if (chosenSa != null) {
+            for (int i = 0; i < candidates.size(); i++) {
+                if (candidates.get(i) == chosenSa) {
+                    selectedIdx = i;
+                    break;
+                }
+            }
+            if (selectedIdx == candidates.size()
+                    && chosenSa.getHostCard() != null) {
+                String name =
+                    chosenSa.getHostCard().getName();
+                Object api = chosenSa.getApi();
+                for (int i = 0; i < candidates.size(); i++) {
+                    SpellAbility sa = candidates.get(i);
+                    if (sa.getHostCard() != null
+                            && sa.getHostCard().getName()
+                                .equals(name)
+                            && sa.getApi() == api) {
+                        selectedIdx = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        record(DecisionType.PRIORITY_ACTION,
+                candidates.size() + 1,
+                List.of(selectedIdx), feats,
+                "priority_" + candidates.size()
+                    + "_options");
         return result;
     }
 

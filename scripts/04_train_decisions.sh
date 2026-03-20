@@ -1,5 +1,5 @@
 #!/bin/bash
-# Step 4: Train attack/block decision heads (imitation learning)
+# Step 4: Train attack/block/priority decision heads (imitation learning)
 set -e
 cd /home/maustin/forge/forge-ai-rl/src/main/python
 source /home/maustin/forge/forge-ai-rl/venv/bin/activate

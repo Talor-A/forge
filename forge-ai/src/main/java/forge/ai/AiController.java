@@ -99,6 +99,8 @@ public class AiController {
     private boolean useLivingEnd;
     private List<SpellAbility> skipped;
     private boolean timeoutReached;
+    private List<SpellAbility> lastPlayableSpellAbilities;
+    private List<SpellAbility> lastEvaluatedSpellAbilities;
 
     public AiController(final Player computerPlayer, final Game game0) {
         player = computerPlayer;
@@ -129,6 +131,25 @@ public class AiController {
 
     public Player getPlayer() {
         return player;
+    }
+
+    /**
+     * Returns all mechanically legal spells from the last priority evaluation.
+     * These pass timing and cost checks but NOT the AI's strategic opinion.
+     * This is the full set of actions available to the player right now.
+     * Used by RL as the candidate set (broader than heuristic's choices).
+     */
+    public List<SpellAbility> getLastPlayableSpellAbilities() {
+        return lastPlayableSpellAbilities;
+    }
+
+    /**
+     * Returns spells that passed the full heuristic evaluation
+     * (canPlayAndPayFor including AI strategic logic).
+     * This is a subset of getLastPlayableSpellAbilities().
+     */
+    public List<SpellAbility> getLastEvaluatedSpellAbilities() {
+        return lastEvaluatedSpellAbilities;
     }
 
     public AiCardMemory getCardMemory() {
@@ -1355,8 +1376,9 @@ public class AiController {
     }
 
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        // Reset cached predicted combat, as it may be stale. It will be
-        // re-created if needed and used for any AI logic that needs it.
+        // Reset cached state
+        lastPlayableSpellAbilities = null;
+        lastEvaluatedSpellAbilities = null;
         predictedCombat = null;
         // Also reset predicted combat for next turn here
         predictedCombatNextTurn = null;
@@ -1576,6 +1598,19 @@ public class AiController {
         skipped = saList.stream().filter(SpellAbility::isSkip).collect(Collectors.toList());
         if (!skipped.isEmpty())
             saList.removeAll(skipped);
+
+        // Cache all mechanically legal spells (timing + cost, no AI opinion).
+        // This is the broadest set of actions available to the player right now.
+        List<SpellAbility> mechanicallyPlayable = Lists.newArrayList();
+        for (SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(saList, player)) {
+            if (sa.isManaAbility()) continue;
+            sa.setActivatingPlayer(player);
+            if (!sa.canCastTiming(player)) continue;
+            if (!ComputerUtilCost.canPayCost(sa, player, sa.isTrigger())) continue;
+            mechanicallyPlayable.add(sa);
+        }
+        lastPlayableSpellAbilities = mechanicallyPlayable;
+
         //update LivingEndPlayer
         useLivingEnd = IterableUtil.any(player.getZone(ZoneType.Library), CardPredicates.nameEquals("Living End"));
 
@@ -1605,6 +1640,7 @@ public class AiController {
         timeoutReached = false;
 
         FutureTask<SpellAbility> future = new FutureTask<>(() -> {
+            List<SpellAbility> playable = Lists.newArrayList();
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
             for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(all, player)) {
@@ -1681,10 +1717,12 @@ public class AiController {
                 if (opinion != AiPlayDecision.WillPlay)
                     continue;
 
-                return sa;
+                playable.add(sa);
             }
 
-            return null;
+            // Cache all validated playable spells for RL recording/inference
+            lastEvaluatedSpellAbilities = playable;
+            return playable.isEmpty() ? null : playable.get(0);
         });
 
         Thread t = new Thread(future, "Game AI Eval");

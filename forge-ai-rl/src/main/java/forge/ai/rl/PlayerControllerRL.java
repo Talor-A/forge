@@ -6,6 +6,7 @@ import forge.game.card.*;
 import forge.game.combat.Combat;
 import forge.game.combat.CombatUtil;
 import forge.game.player.*;
+import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 
 import java.util.ArrayList;
@@ -42,6 +43,53 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     public RLController getRLController() {
         return rl;
+    }
+
+    // ===== PRIORITY — which spell/ability to play =====
+
+    @Override
+    public List<SpellAbility> chooseSpellAbilityToPlay() {
+        if (rl.getConfig().getMode() == RLModelMode.GRPC && rl.isModelServerAvailable()) {
+            // Let the heuristic build the candidate lists (lands, filtering, etc.)
+            // then use the RL model to pick from the mechanically-legal set
+            super.chooseSpellAbilityToPlay();
+
+            // Get all mechanically legal spells (broader than heuristic's choices)
+            List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
+            if (candidates == null || candidates.isEmpty()) {
+                return new ArrayList<>(); // nothing playable — pass
+            }
+
+            int idx = rl.decidePriorityAction(candidates);
+            if (idx < 0 || idx >= candidates.size()) {
+                return new ArrayList<>(); // model chose pass
+            }
+            SpellAbility chosen = candidates.get(idx);
+            List<SpellAbility> rlResult = new ArrayList<>();
+            rlResult.add(chosen);
+            return rlResult;
+        } else {
+            // Heuristic decides — record the decision
+            List<SpellAbility> result = super.chooseSpellAbilityToPlay();
+
+            // Get all mechanically legal spells as candidates
+            List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
+            if (candidates == null || candidates.isEmpty()) {
+                return result; // land play or early-return path — nothing to record
+            }
+
+            // Determine what the heuristic chose
+            SpellAbility chosenSa = null;
+            if (result != null && !result.isEmpty()) {
+                chosenSa = result.get(0);
+                if (chosenSa != null && chosenSa.isLandAbility()) {
+                    return result; // don't record land plays
+                }
+            }
+
+            rl.recordHeuristicPriority(candidates, chosenSa);
+            return result;
+        }
     }
 
     // ===== COMBAT — RL model or heuristic with recording =====

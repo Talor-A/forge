@@ -62,6 +62,7 @@ class TrainingState:
     files_loaded: int = 0
     attack_samples: int = 0
     block_samples: int = 0
+    priority_samples: int = 0
 
     # Config
     device: str = "cpu"
@@ -95,6 +96,16 @@ class TrainingState:
     block_val_accs: List[float] = field(
         default_factory=list)
     block_best_acc: float = 0.0
+
+    priority_train_losses: List[float] = field(
+        default_factory=list)
+    priority_train_accs: List[float] = field(
+        default_factory=list)
+    priority_val_losses: List[float] = field(
+        default_factory=list)
+    priority_val_accs: List[float] = field(
+        default_factory=list)
+    priority_best_acc: float = 0.0
 
     current_train_loss: float = 0.0
     current_train_acc: float = 0.0
@@ -160,6 +171,7 @@ def load_decisions(data_dir, state, max_files=None):
 
     attack_samples = []
     block_samples = []
+    priority_samples = []
 
     for i, filepath in enumerate(files):
         state.files_loaded = i + 1
@@ -180,21 +192,6 @@ def load_decisions(data_dir, state, max_files=None):
                 if len(cand) < 1:
                     continue
 
-                n = len(cand)
-                creatures = np.zeros(
-                    (n, 128), dtype=np.float32)
-                for j, cf in enumerate(cand):
-                    cl = min(len(cf), 128)
-                    creatures[j, :cl] = np.array(
-                        cf[:cl], dtype=np.float32)
-                np.clip(creatures, -10, 10, out=creatures)
-                creatures = np.nan_to_num(creatures)
-
-                mask = np.zeros(n, dtype=np.float32)
-                for idx in sel:
-                    if 0 <= idx < n:
-                        mask[idx] = 1.0
-
                 gf = np.array(
                     rec.get('globalFeatures', []),
                     dtype=np.float32)
@@ -210,6 +207,53 @@ def load_decisions(data_dir, state, max_files=None):
                     dtype=np.float32)
                 np.clip(flat, -10, 10, out=flat)
                 flat = np.nan_to_num(flat)
+
+                if dt == 'PRIORITY_ACTION':
+                    # Priority: 64-dim action features,
+                    # single-select (softmax CE)
+                    n = len(cand)
+                    actions = np.zeros(
+                        (n, 64), dtype=np.float32)
+                    for j, cf in enumerate(cand):
+                        cl = min(len(cf), 64)
+                        actions[j, :cl] = np.array(
+                            cf[:cl], dtype=np.float32)
+                    np.clip(actions, -10, 10, out=actions)
+                    actions = np.nan_to_num(actions)
+
+                    # Selected index (single-select)
+                    selected_idx = sel[0] if sel else n - 1
+                    if selected_idx >= n:
+                        selected_idx = n - 1
+
+                    priority_samples.append({
+                        'global_features': g,
+                        'game_state_flat': flat,
+                        'action_features': actions,
+                        'selected_idx': selected_idx,
+                        'n_actions': n,
+                        'won': 1.0 if won else 0.0,
+                    })
+                    state.priority_samples = len(
+                        priority_samples)
+                    continue
+
+                # Combat decisions: 128-dim card features,
+                # multi-select (binary BCE)
+                n = len(cand)
+                creatures = np.zeros(
+                    (n, 128), dtype=np.float32)
+                for j, cf in enumerate(cand):
+                    cl = min(len(cf), 128)
+                    creatures[j, :cl] = np.array(
+                        cf[:cl], dtype=np.float32)
+                np.clip(creatures, -10, 10, out=creatures)
+                creatures = np.nan_to_num(creatures)
+
+                mask = np.zeros(n, dtype=np.float32)
+                for idx in sel:
+                    if 0 <= idx < n:
+                        mask[idx] = 1.0
 
                 sample = {
                     'global_features': g,
@@ -233,8 +277,9 @@ def load_decisions(data_dir, state, max_files=None):
 
     state.status = (
         f"Loaded {len(attack_samples)} attack, "
-        f"{len(block_samples)} block decisions")
-    return attack_samples, block_samples
+        f"{len(block_samples)} block, "
+        f"{len(priority_samples)} priority decisions")
+    return attack_samples, block_samples, priority_samples
 
 
 # ── Batch processing ─────────────────────────────────
@@ -320,6 +365,230 @@ def make_batch(model, batch, device, use_amp, head):
         total = cm.float().sum().item()
 
     return loss, correct, total
+
+
+def make_priority_batch(model, batch, device, use_amp,
+                        head):
+    """Build a priority batch with CrossEntropyLoss
+    (single-select softmax)."""
+    max_a = max(s['n_actions'] for s in batch)
+    max_a = max(max_a, 1)
+    bs = len(batch)
+
+    af = torch.zeros(bs, max_a, 64, device=device)
+    am = torch.zeros(bs, max_a, dtype=torch.bool,
+                      device=device)
+    tgt = torch.zeros(bs, dtype=torch.long, device=device)
+    gf = torch.zeros(bs, 64, device=device)
+
+    mb = torch.zeros(bs, 30, 128, device=device)
+    mbm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    ob = torch.zeros(bs, 30, 128, device=device)
+    obm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    h = torch.zeros(bs, 15, 128, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool,
+                      device=device)
+    mg = torch.zeros(bs, 40, 128, device=device)
+    mgm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    og = torch.zeros(bs, 40, 128, device=device)
+    ogm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    st = torch.zeros(bs, 10, 128, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool,
+                       device=device)
+
+    for i, s in enumerate(batch):
+        na = s['n_actions']
+        af[i, :na] = torch.from_numpy(
+            s['action_features'])
+        am[i, :na] = True
+        tgt[i] = s['selected_idx']
+
+        g, zones, masks = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(
+            masks['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.no_grad():
+            state_emb = model.encode_state(
+                gf, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, st, stm)
+
+        logits = head(state_emb, af, am)
+
+        loss = nn.functional.cross_entropy(logits, tgt)
+
+    with torch.no_grad():
+        preds = logits.argmax(dim=1)
+        correct = (preds == tgt).sum().item()
+        total = bs
+
+    return loss, correct, total
+
+
+def train_priority_head(model, head, samples, args,
+                        state, device, use_amp):
+    """Train the priority head with CrossEntropyLoss."""
+    state.current_head = 'priority'
+    state.status = "Training priority head..."
+    log(state, f"\n=== Training priority head ===")
+    log(state, f"Samples: {len(samples)}")
+
+    for p in model.state_encoder.parameters():
+        p.requires_grad = False
+    for p in model.value_network.parameters():
+        p.requires_grad = False
+    for p in head.parameters():
+        p.requires_grad = True
+
+    state.head_params = sum(
+        p.numel() for p in head.parameters())
+    log(state, f"Head params: {state.head_params:,}")
+
+    optimizer = optim.AdamW(
+        head.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler('cuda') if use_amp \
+        else None
+
+    random.shuffle(samples)
+    n_val = max(1, int(len(samples) * 0.1))
+    train_s = samples[:-n_val]
+    val_s = samples[-n_val:]
+
+    best_acc = 0
+    save_path = os.path.join(
+        args.save_dir, 'best_priority_model.pt')
+
+    tl_list = state.priority_train_losses
+    ta_list = state.priority_train_accs
+    vl_list = state.priority_val_losses
+    va_list = state.priority_val_accs
+
+    start = time.time()
+
+    for epoch in range(1, args.epochs + 1):
+        state.epoch = epoch
+        state.status = (
+            f"Training priority head: "
+            f"epoch {epoch}/{args.epochs}")
+        t0 = time.time()
+
+        # Train
+        model.train()
+        random.shuffle(train_s)
+        tloss, tc, tt = 0, 0, 0
+
+        for bi in range(0, len(train_s), args.batch_size):
+            batch = train_s[bi:bi + args.batch_size]
+            if len(batch) < 2:
+                continue
+            state.epoch_progress = bi / max(
+                len(train_s), 1)
+
+            loss, correct, total = make_priority_batch(
+                model, batch, device, use_amp, head)
+
+            optimizer.zero_grad()
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                optimizer.step()
+
+            tloss += loss.item() * total
+            tc += correct
+            tt += total
+
+        scheduler.step()
+
+        # Val
+        model.eval()
+        vloss, vc, vt = 0, 0, 0
+        with torch.no_grad():
+            for bi in range(0, len(val_s), args.batch_size):
+                batch = val_s[bi:bi + args.batch_size]
+                if len(batch) < 2:
+                    continue
+                loss, correct, total = make_priority_batch(
+                    model, batch, device, use_amp, head)
+                vloss += loss.item() * total
+                vc += correct
+                vt += total
+
+        ta = tc / max(tt, 1)
+        va = vc / max(vt, 1)
+        tl = tloss / max(tt, 1)
+        vl = vloss / max(vt, 1)
+
+        state.current_train_loss = tl
+        state.current_train_acc = ta
+        state.current_val_loss = vl
+        state.current_val_acc = va
+        tl_list.append(tl)
+        ta_list.append(ta)
+        vl_list.append(vl)
+        va_list.append(va)
+
+        if va > best_acc:
+            best_acc = va
+            model.save(save_path)
+
+        state.priority_best_acc = best_acc
+
+        status = ' *BEST*' if va == best_acc and va > 0 \
+            else ''
+        log(state,
+            f"  Epoch {epoch:>3d}/{args.epochs} | "
+            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
+            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
+
+        if np.isnan(tl) or np.isnan(vl):
+            log(state,
+                "  NaN detected! Stopping priority training.")
+            break
+
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        state.eta = (args.epochs - epoch) * state.epoch_time
+        state.epoch_progress = 1.0
+        state.chart_dirty = True
+
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()
+            state.gpu_mem_used_mb = (
+                torch.cuda.memory_allocated() / 1024**2)
+            state.gpu_mem_total_mb = (
+                torch.cuda.get_device_properties(0)
+                .total_memory / 1024**2)
+
+        time.sleep(0.05)
+
+    return best_acc
 
 
 # ── Training thread ──────────────────────────────────
@@ -495,8 +764,9 @@ def trainer_thread(state, args):
         state.total_epochs = args.epochs
 
         # Load data
-        attack_samples, block_samples = load_decisions(
-            args.data_dir, state, args.max_files)
+        attack_samples, block_samples, priority_samples = \
+            load_decisions(
+                args.data_dir, state, args.max_files)
 
         # Load model
         state.phase = "training"
@@ -518,8 +788,17 @@ def trainer_thread(state, args):
 
         os.makedirs(args.save_dir, exist_ok=True)
 
+        # Train priority head first (softmax CE, not BCE)
+        if priority_samples:
+            train_priority_head(
+                model, model.priority_head,
+                priority_samples, args, state,
+                device, use_amp)
+
         # Train attack head
         if attack_samples:
+            state.epoch = 0
+            state.epoch_progress = 0
             train_head(model, model.attack_head, 'attack',
                        attack_samples, args, state,
                        device, use_amp)
@@ -543,6 +822,7 @@ def trainer_thread(state, args):
         log(state, f"\n=== Training Complete ===")
         log(state, f"Attack best val acc: {state.attack_best_acc:.1%}")
         log(state, f"Block best val acc: {state.block_best_acc:.1%}")
+        log(state, f"Priority best val acc: {state.priority_best_acc:.1%}")
         log(state, f"Model saved: {save_path}")
 
         state.status = "Training complete!"
@@ -628,8 +908,9 @@ class DecisionDashboard:
             ('Train Loss', '—'), ('Train Acc', '—'),
             ('Val Loss', '—'), ('Val Acc', '—'),
             ('Best Attack', '—'), ('Best Block', '—'),
-            ('Epoch Time', '—'), ('ETA', '—'),
-            ('GPU Mem', '—'), ('Head Params', '—'),
+            ('Best Priority', '—'), ('Epoch Time', '—'),
+            ('ETA', '—'), ('GPU Mem', '—'),
+            ('Head Params', '—'),
         ]
         for i, (label, default) in enumerate(stats):
             r, c = divmod(i, 4)
@@ -649,19 +930,23 @@ class DecisionDashboard:
             cf = ttk.Frame(m, style='Dark.TFrame')
             cf.pack(fill=tk.BOTH, expand=True, pady=5)
 
-            self.fig = Figure(figsize=(8.5, 4), dpi=100,
+            self.fig = Figure(figsize=(8.5, 6), dpi=100,
                 facecolor='#1e1e2e')
 
-            self.ax_atk_loss = self.fig.add_subplot(221)
-            self.ax_atk_acc = self.fig.add_subplot(222)
-            self.ax_blk_loss = self.fig.add_subplot(223)
-            self.ax_blk_acc = self.fig.add_subplot(224)
+            self.ax_atk_loss = self.fig.add_subplot(231)
+            self.ax_atk_acc = self.fig.add_subplot(234)
+            self.ax_blk_loss = self.fig.add_subplot(232)
+            self.ax_blk_acc = self.fig.add_subplot(235)
+            self.ax_pri_loss = self.fig.add_subplot(233)
+            self.ax_pri_acc = self.fig.add_subplot(236)
 
             for ax, title in [
                     (self.ax_atk_loss, 'Attack Loss'),
                     (self.ax_atk_acc, 'Attack Accuracy'),
                     (self.ax_blk_loss, 'Block Loss'),
-                    (self.ax_blk_acc, 'Block Accuracy')]:
+                    (self.ax_blk_acc, 'Block Accuracy'),
+                    (self.ax_pri_loss, 'Priority Loss'),
+                    (self.ax_pri_acc, 'Priority Accuracy')]:
                 ax.set_facecolor('#313244')
                 ax.set_title(title, color='#cdd6f4',
                     fontsize=9)
@@ -687,15 +972,18 @@ class DecisionDashboard:
             self.prog_label.set(
                 f"Loading: {s.files_loaded}/"
                 f"{s.files_total} files | "
-                f"Attack: {s.attack_samples} | "
-                f"Block: {s.block_samples}")
+                f"Atk: {s.attack_samples} | "
+                f"Blk: {s.block_samples} | "
+                f"Pri: {s.priority_samples}")
         elif s.phase == "training":
-            # Two heads: attack is first half, block second
-            head_offset = 0 if s.current_head == 'attack' \
-                else 50
+            # Three heads: attack=0-33, block=33-66, priority=66-100
+            head_offsets = {'attack': 0, 'block': 33,
+                            'priority': 66}
+            head_offset = head_offsets.get(
+                s.current_head, 0)
             total_pct = head_offset + (
                 (s.epoch - 1 + s.epoch_progress)
-                / max(s.total_epochs, 1) * 50)
+                / max(s.total_epochs, 1) * 33)
             self.progress['value'] = total_pct
             self.prog_label.set(
                 f"{s.current_head.title()} head: "
@@ -719,6 +1007,8 @@ class DecisionDashboard:
             f"{s.attack_best_acc:.1%}")
         self.stat_vars['Best Block'].set(
             f"{s.block_best_acc:.1%}")
+        self.stat_vars['Best Priority'].set(
+            f"{s.priority_best_acc:.1%}")
         self.stat_vars['Epoch Time'].set(
             f"{s.epoch_time:.1f}s")
         self.stat_vars['ETA'].set(
@@ -746,6 +1036,10 @@ class DecisionDashboard:
              s.block_train_accs, s.block_val_losses,
              s.block_val_accs,
              'Block Loss', 'Block Accuracy'),
+            (self.ax_pri_loss, s.priority_train_losses,
+             s.priority_train_accs, s.priority_val_losses,
+             s.priority_val_accs,
+             'Priority Loss', 'Priority Accuracy'),
         ]:
             # Loss chart
             ax.clear()
@@ -772,6 +1066,8 @@ class DecisionDashboard:
              s.attack_val_accs, 'Attack Accuracy'),
             (self.ax_blk_acc, s.block_train_accs,
              s.block_val_accs, 'Block Accuracy'),
+            (self.ax_pri_acc, s.priority_train_accs,
+             s.priority_val_accs, 'Priority Accuracy'),
         ]:
             ax.clear()
             ax.set_facecolor('#313244')

@@ -302,7 +302,7 @@ def collect_thread(state, args):
         log(state, "")
         log(state, f"=== Summary ===")
         log(state, f"Files: {state.traj_files}")
-        log(state, f"Attacks: {attacks}, Blocks: {blocks}")
+        log(state, f"Attacks: {attacks}, Blocks: {blocks}, Priority: {priority}")
         log(state, f"Avg candidates/attack: {total_cand/max(attacks,1):.1f}")
         log(state, f"Avg selected/attack: {total_sel/max(attacks,1):.1f}")
         log(state, f"Attack rate: {total_sel*100/max(total_cand,1):.1f}%")
@@ -371,7 +371,8 @@ class CollectDashboard:
             ('Draws', '—'), ('Errors', '—'),
             ('Avg Turns', '—'), ('ETA', '—'),
             ('Files', '—'), ('Attacks', '—'),
-            ('Blocks', '—'), ('Elapsed', '—'),
+            ('Blocks', '—'), ('Priority', '—'),
+            ('Elapsed', '—'),
         ]
         for i, (k, v) in enumerate(stats):
             r, c = divmod(i, 4)
@@ -417,6 +418,7 @@ class CollectDashboard:
         self.svars['Files'].set(str(s.traj_files))
         self.svars['Attacks'].set(str(s.attack_decisions))
         self.svars['Blocks'].set(str(s.block_decisions))
+        self.svars['Priority'].set(str(s.priority_decisions))
         self.svars['Elapsed'].set(
             f"{s.elapsed_sec:.0f}s" if s.elapsed_sec > 0 else "—")
 

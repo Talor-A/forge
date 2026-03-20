@@ -97,9 +97,79 @@ def decode_card(feats):
     }
 
 
+# ActionEncoder 64-dim feature layout
+API_TYPES = [
+    "DealDamage", "Draw", "Counter", "ChangeZone",
+    "Pump", "PumpAll", "Destroy", "DestroyAll",
+    "Sacrifice", "Discard", "GainLife", "LoseLife",
+    "Token", "Animate", "Attach", "Tap",
+    "Untap", "Mill", "Regenerate", "Protection",
+    "Fight", "Charm", "Scry", "Explore",
+    "AddOrRemoveCounter", "ManaReflected", "Mana",
+    "ChangeTargets", "Fog", "ChangeZone",
+]
+
+
+def decode_action(feats):
+    """Decode a 64-dim ActionEncoder feature vector."""
+    if len(feats) < 18:
+        return None
+
+    # Check pass action (feature[63] = 1.0)
+    if len(feats) > 63 and feats[63] > 0.5:
+        return {"label": "PASS", "is_pass": True,
+                "types": [], "colors": [], "cmc": 0,
+                "sa_type": "pass", "api": None,
+                "targets": False}
+
+    type_names = ["Creature", "Instant", "Sorcery",
+                  "Enchantment", "Artifact", "Planeswalker",
+                  "Land"]
+    types = [t for i, t in enumerate(type_names)
+             if i < len(feats) and feats[i] > 0.5]
+
+    color_chars = ["W", "U", "B", "R", "G", "C"]
+    colors = [c for i, c in enumerate(color_chars)
+              if 7+i < len(feats) and feats[7+i] > 0.5]
+
+    cmc = int(round(feats[13] * 16)) if len(feats) > 13 \
+        else 0
+
+    sa_type = "spell" if feats[14] > 0.5 \
+        else "activated" if feats[15] > 0.5 \
+        else "triggered" if feats[16] > 0.5 \
+        else "mana" if feats[17] > 0.5 \
+        else "other"
+
+    # API type [18-47]
+    api = None
+    for i, name in enumerate(API_TYPES):
+        if 18+i < len(feats) and feats[18+i] > 0.5:
+            api = name
+            break
+
+    targets = feats[48] > 0.5 if len(feats) > 48 else False
+
+    # Build label
+    color_str = "".join(colors) if colors else ""
+    type_str = "/".join(types) if types else "?"
+    label = f"{color_str} {type_str}" if color_str \
+        else type_str
+    if api:
+        label += f" ({api})"
+    label += f" [{cmc}]"
+
+    return {
+        "label": label, "is_pass": False,
+        "types": types, "colors": colors, "cmc": cmc,
+        "sa_type": sa_type, "api": api,
+        "targets": targets,
+    }
+
+
 # ── Card rendering (MTG card style) ───────────────
 
-CARD_W, CARD_H = 120, 168
+CARD_W, CARD_H = 85, 120
 
 
 def draw_card_image(info, highlight=None):
@@ -127,75 +197,75 @@ def draw_card_image(info, highlight=None):
 
     # Try to load a small font, fall back to default
     try:
-        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 10)
-        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 11)
-        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 14)
+        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 8)
+        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 8)
+        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 10)
     except (IOError, OSError):
         font_sm = ImageFont.load_default()
         font_md = font_sm
         font_lg = font_sm
 
-    y = 6
+    y = 4
 
     # Title bar: type + CMC
-    type_str = "/".join(info["types"])[:14]
-    draw.text((6, y), type_str, fill=fg_color, font=font_md)
+    type_str = "/".join(info["types"])[:12]
+    draw.text((4, y), type_str, fill=fg_color, font=font_md)
     cmc_str = f"{{{info['cmc']}}}"
-    draw.text((CARD_W - 28, y), cmc_str, fill=fg_color, font=font_md)
-    y += 16
+    draw.text((CARD_W - 22, y), cmc_str, fill=fg_color, font=font_md)
+    y += 12
 
     # Color identity
     color_str = "".join(info["colors"]) if info["colors"] else "Colorless"
-    draw.text((6, y), color_str, fill=fg_color, font=font_sm)
-    y += 14
+    draw.text((4, y), color_str, fill=fg_color, font=font_sm)
+    y += 10
 
     # Separator
-    draw.line([(6, y), (CARD_W-6, y)], fill=fg_color, width=1)
-    y += 4
+    draw.line([(4, y), (CARD_W-4, y)], fill=fg_color, width=1)
+    y += 3
 
     # Art area (just colored block)
-    art_h = 40
+    art_h = 24
     darker = _darken(bg_color, 0.8)
-    draw.rectangle([8, y, CARD_W-8, y+art_h], fill=darker)
+    draw.rectangle([4, y, CARD_W-4, y+art_h], fill=darker)
 
     # Show land name in art area for lands
     if "Land" in info["types"]:
-        draw.text((12, y+12), info["label"],
+        draw.text((6, y+6), info["label"],
                   fill=fg_color, font=font_lg)
-    y += art_h + 4
+    y += art_h + 3
 
     # Separator
-    draw.line([(6, y), (CARD_W-6, y)], fill=fg_color, width=1)
-    y += 4
+    draw.line([(4, y), (CARD_W-4, y)], fill=fg_color, width=1)
+    y += 3
 
-    # Keywords
-    for kw in info["keywords"][:3]:
-        draw.text((6, y), kw, fill=fg_color, font=font_sm)
-        y += 12
+    # Keywords (compact)
+    for kw in info["keywords"][:2]:
+        draw.text((4, y), kw, fill=fg_color, font=font_sm)
+        y += 10
 
     # +1/+1 counters
     if info["p1p1"] > 0:
-        draw.text((6, y), f"+{info['p1p1']}/+{info['p1p1']} counters",
+        draw.text((4, y), f"+{info['p1p1']}/+{info['p1p1']}",
                   fill="#ffdd00", font=font_sm)
-        y += 12
+        y += 10
 
     # State (tapped/sick)
     if info["tapped"]:
-        draw.text((6, y), "TAPPED", fill="#ff6666", font=font_sm)
-        y += 12
+        draw.text((4, y), "TAPPED", fill="#ff6666", font=font_sm)
+        y += 10
     if info["sick"]:
-        draw.text((6, y), "SUM. SICK", fill="#ffaa44", font=font_sm)
-        y += 12
+        draw.text((4, y), "SICK", fill="#ffaa44", font=font_sm)
+        y += 10
 
     # P/T box (bottom right for creatures)
     if info["power"] is not None:
         pt = f"{info['power']}/{info['toughness']}"
-        box_w = 36
-        bx = CARD_W - box_w - 6
-        by = CARD_H - 22
-        draw.rectangle([bx, by, CARD_W-6, CARD_H-6],
+        box_w = 30
+        bx = CARD_W - box_w - 4
+        by = CARD_H - 18
+        draw.rectangle([bx, by, CARD_W-4, CARD_H-4],
                        fill="#000000", outline=fg_color)
-        draw.text((bx+4, by+2), pt, fill="#ffffff", font=font_lg)
+        draw.text((bx+3, by+1), pt, fill="#ffffff", font=font_lg)
 
     return img
 
@@ -228,7 +298,9 @@ def load_samples(data_dir, max_samples=200):
             for line in lines[1:]:
                 rec = json.loads(line)
                 dt = rec.get("decisionType", "")
-                if dt not in ("DECLARE_ATTACKERS", "DECLARE_BLOCKERS"):
+                if dt not in ("DECLARE_ATTACKERS",
+                              "DECLARE_BLOCKERS",
+                              "PRIORITY_ACTION"):
                     continue
                 cand = rec.get("candidateFeatures", [])
                 if len(cand) < 1:
@@ -238,11 +310,14 @@ def load_samples(data_dir, max_samples=200):
                     "type": dt,
                     "info": rec.get("contextInfo", ""),
                     "global_features": np.array(
-                        rec.get("globalFeatures", []), dtype=np.float32),
+                        rec.get("globalFeatures", []),
+                        dtype=np.float32),
                     "game_state_flat": np.array(
-                        rec.get("gameStateFlat", []), dtype=np.float32),
+                        rec.get("gameStateFlat", []),
+                        dtype=np.float32),
                     "candidates": cand,
-                    "selected": rec.get("selectedIndices", []),
+                    "selected": rec.get(
+                        "selectedIndices", []),
                     "won": won,
                 })
                 if len(samples) >= max_samples:
@@ -282,8 +357,11 @@ class GameStateViewer:
         ttk.Button(nav, text="Random", command=self._rand).pack(side=tk.LEFT, padx=3)
 
         tk.Frame(nav, bg="#45475a", width=2).pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Button(nav, text="Attacks Only", command=self._filter_attacks).pack(side=tk.LEFT, padx=3)
-        ttk.Button(nav, text="Blocks Only", command=self._filter_blocks).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Attacks", command=self._filter_attacks).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Blocks", command=self._filter_blocks).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Priority", command=self._filter_priority).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Pri Pass", command=self._filter_priority_pass).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Pri Play", command=self._filter_priority_play).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="All", command=self._filter_all).pack(side=tk.LEFT, padx=3)
 
         self.nav_v = tk.StringVar(value="0/0")
@@ -335,10 +413,29 @@ class GameStateViewer:
 
         tk.Frame(board_col, bg="#45475a", height=2).pack(fill=tk.X, pady=3)
 
+        # Stack
+        self._make_section(board_col, "Stack", "#cba6f7")
+        self.stack_frame = tk.Frame(board_col, bg="#252535")
+        self.stack_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        tk.Frame(board_col, bg="#45475a", height=2).pack(
+            fill=tk.X, pady=3)
+
         # My hand
         self._make_section(board_col, "My Hand", "#f9e2af")
         self.hand_frame = tk.Frame(board_col, bg="#252535")
         self.hand_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        tk.Frame(board_col, bg="#45475a", height=2).pack(
+            fill=tk.X, pady=3)
+
+        # Priority candidates (shown for PRIORITY_ACTION)
+        self._make_section(board_col,
+                           "Priority Candidates", "#fab387")
+        self.priority_frame = tk.Frame(
+            board_col, bg="#252535")
+        self.priority_frame.pack(
+            fill=tk.X, padx=5, pady=(0, 5))
 
         # Right: model predictions
         pred_col = tk.Frame(main, bg="#181825", width=320)
@@ -371,6 +468,33 @@ class GameStateViewer:
         self.idx = 0
         self._show()
 
+    def _filter_priority(self):
+        f = [s for s in self.all_samples
+             if s["type"] == "PRIORITY_ACTION"]
+        self.samples = f if f else self.all_samples
+        self.idx = 0
+        self._show()
+
+    def _filter_priority_pass(self):
+        f = [s for s in self.all_samples
+             if s["type"] == "PRIORITY_ACTION"
+             and s["selected"]
+             and s["selected"][0] == len(
+                 s["candidates"]) - 1]
+        self.samples = f if f else self.all_samples
+        self.idx = 0
+        self._show()
+
+    def _filter_priority_play(self):
+        f = [s for s in self.all_samples
+             if s["type"] == "PRIORITY_ACTION"
+             and s["selected"]
+             and s["selected"][0] < len(
+                 s["candidates"]) - 1]
+        self.samples = f if f else self.all_samples
+        self.idx = 0
+        self._show()
+
     def _filter_all(self):
         self.samples = self.all_samples
         self.idx = 0
@@ -394,7 +518,12 @@ class GameStateViewer:
 
         self.nav_v.set(f"{self.idx+1}/{len(self.samples)}")
         dt = s.get("type", "?")
-        self.type_v.set("ATTACK" if dt == "DECLARE_ATTACKERS" else "BLOCK")
+        type_labels = {
+            "DECLARE_ATTACKERS": "ATTACK",
+            "DECLARE_BLOCKERS": "BLOCK",
+            "PRIORITY_ACTION": "PRIORITY",
+        }
+        self.type_v.set(type_labels.get(dt, dt))
         self.info_v.set(s["info"])
         won = s["won"]
         self.outcome_v.set("WON" if won else "LOST")
@@ -404,13 +533,34 @@ class GameStateViewer:
         flat = s["game_state_flat"]
 
         # Status
-        if len(gf) >= 31:
+        PHASE_NAMES = [
+            "Untap", "Upkeep", "Draw", "Main 1",
+            "Begin Combat", "Declare Attackers",
+            "Declare Blockers", "First Strike Dmg",
+            "Combat Damage", "End Combat",
+            "Main 2", "End of Turn", "Cleanup",
+        ]
+        if len(gf) >= 35:
+            turn = int(round(gf[4] * 30))
+            active = "My turn" if gf[5] > 0.5 \
+                else "Opp turn"
+            phase = "?"
+            for i, pn in enumerate(PHASE_NAMES):
+                if 6+i < len(gf) and gf[6+i] > 0.5:
+                    phase = pn
+                    break
+            lands_untap = int(round(gf[29] * 15))
+            stack_size = int(round(gf[32] * 10))
             self.status_v.set(
-                f"Life: {gf[0]*50-10:.0f} vs {gf[1]*50-10:.0f}  |  "
-                f"Hand: {gf[19]*15:.0f} vs {gf[20]*15:.0f}  |  "
-                f"Library: {gf[21]*60:.0f} vs {gf[22]*60:.0f}  |  "
-                f"Creatures: {gf[23]*20:.0f} vs {gf[24]*20:.0f}  |  "
-                f"Power: {gf[25]*60:.0f} vs {gf[26]*60:.0f}")
+                f"Turn {turn} | {active} | {phase}  ||  "
+                f"Life: {gf[0]*50-10:.0f} vs "
+                f"{gf[1]*50-10:.0f}  |  "
+                f"Hand: {gf[19]*15:.0f} vs "
+                f"{gf[20]*15:.0f}  |  "
+                f"Creatures: {gf[23]*20:.0f} vs "
+                f"{gf[24]*20:.0f}  |  "
+                f"Lands untapped: {lands_untap}  |  "
+                f"Stack: {stack_size}")
 
         # Parse zones
         card_dim = 128
@@ -459,6 +609,13 @@ class GameStateViewer:
 
         self._render_cards(self.hand_frame, hand)
 
+        # Stack
+        stack_cards = zones.get("stack", [])
+        self._render_cards(self.stack_frame, stack_cards)
+
+        # Priority candidates
+        self._render_priority(s)
+
         # Model prediction
         self._predict(s)
 
@@ -496,6 +653,55 @@ class GameStateViewer:
                            font=("Consolas", 8), width=14, height=5,
                            relief="raised", borderwidth=2)
             lbl.pack(side=tk.LEFT, padx=1, pady=2)
+
+    def _render_priority(self, s):
+        """Render priority action candidates as text labels."""
+        for w in self.priority_frame.winfo_children():
+            w.destroy()
+
+        if s.get("type") != "PRIORITY_ACTION":
+            tk.Label(self.priority_frame,
+                     text="(not a priority decision)",
+                     bg=self.priority_frame["bg"],
+                     fg="#585b70",
+                     font=("Consolas", 9)).pack(
+                         side=tk.LEFT, padx=10, pady=8)
+            return
+
+        candidates = s.get("candidates", [])
+        selected = s.get("selected", [])
+        sel_idx = selected[0] if selected else -1
+
+        for i, cf in enumerate(candidates):
+            info = decode_action(cf)
+            if not info:
+                continue
+
+            is_chosen = (i == sel_idx)
+            is_pass = info.get("is_pass", False)
+
+            if is_chosen:
+                bg = "#a6e3a1" if not is_pass else "#f9e2af"
+                fg = "#1e1e2e"
+            elif is_pass:
+                bg = "#45475a"
+                fg = "#a6adc8"
+            else:
+                bg = "#313244"
+                fg = "#cdd6f4"
+
+            text = info["label"]
+            if is_chosen:
+                text = f">> {text}"
+
+            lbl = tk.Label(
+                self.priority_frame, text=text,
+                bg=bg, fg=fg,
+                font=("Consolas", 9, "bold"
+                      if is_chosen else ""),
+                padx=6, pady=3, relief="raised",
+                borderwidth=1)
+            lbl.pack(side=tk.LEFT, padx=2, pady=4)
 
     def _predict(self, s):
         self.pred_text.config(state=tk.NORMAL)
@@ -578,6 +784,59 @@ class GameStateViewer:
                 else:
                     lines.append("DIFFERENT")
 
+            elif candidates and dt == "PRIORITY_ACTION":
+                n = len(candidates)
+                af_t = torch.zeros(
+                    1, n, 64, device=self.device)
+                am_t = torch.zeros(
+                    1, n, dtype=torch.bool,
+                    device=self.device)
+                for j, cf in enumerate(candidates):
+                    cl = min(len(cf), 64)
+                    af_t[0, j, :cl] = torch.tensor(
+                        cf[:cl], dtype=torch.float32)
+                    am_t[0, j] = True
+
+                logits = self.model.priority_head(
+                    state, af_t, am_t)
+                probs = torch.softmax(logits, dim=-1)
+
+                lines.append("=== Priority Decision ===")
+                lines.append("")
+                sel_idx = s["selected"][0] \
+                    if s["selected"] else -1
+                for j in range(n):
+                    p = probs[0, j].item()
+                    info = decode_action(candidates[j])
+                    sel = (j == sel_idx)
+                    marker = ">>" if sel else "  "
+                    label = info["label"] if info else "?"
+                    bar = "#" * int(p * 20)
+                    lines.append(f"{marker} {label}")
+                    lines.append(
+                        f"   [{bar:20s}] {p:.0%}")
+                    lines.append("")
+
+                model_pick = probs[0].argmax().item()
+                model_info = decode_action(
+                    candidates[model_pick])
+                model_label = model_info["label"] \
+                    if model_info else "?"
+                heur_info = decode_action(
+                    candidates[sel_idx]) if sel_idx >= 0 \
+                    else None
+                heur_label = heur_info["label"] \
+                    if heur_info else "PASS"
+                lines.append(
+                    f"Heuristic: [{sel_idx}] {heur_label}")
+                lines.append(
+                    f"Model:     [{model_pick}] "
+                    f"{model_label}")
+                if model_pick == sel_idx:
+                    lines.append("MATCH!")
+                else:
+                    lines.append("DIFFERENT")
+
             elif candidates and dt == "DECLARE_BLOCKERS":
                 n = len(candidates)
                 cf_t = torch.zeros(1, n, 128, device=self.device)
@@ -633,7 +892,8 @@ def main():
     samples = load_samples(args.data_dir, args.max_samples)
     attacks = sum(1 for s in samples if s["type"] == "DECLARE_ATTACKERS")
     blocks = sum(1 for s in samples if s["type"] == "DECLARE_BLOCKERS")
-    print(f"  {len(samples)} samples ({attacks} attacks, {blocks} blocks)", flush=True)
+    priority = sum(1 for s in samples if s["type"] == "PRIORITY_ACTION")
+    print(f"  {len(samples)} samples ({attacks} attacks, {blocks} blocks, {priority} priority)", flush=True)
 
     model = None
     if args.model and os.path.exists(args.model):

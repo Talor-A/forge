@@ -99,6 +99,7 @@ def load_ppo_data(traj_dir):
 
     attack_samples = []
     block_samples = []
+    priority_samples = []
     value_samples = []
 
     for filepath in files:
@@ -137,41 +138,71 @@ def load_ppo_data(traj_dir):
                         'outcome': outcome,
                     })
 
-                # Collect attack/block if features present
-                if len(cand) >= 1:
+                if len(cand) < 1:
+                    continue
+
+                if dt == 'PRIORITY_ACTION':
+                    # Priority: 64-dim action features,
+                    # single-select
                     n = len(cand)
-                    creatures = np.zeros(
-                        (n, 128), dtype=np.float32)
+                    actions = np.zeros(
+                        (n, 64), dtype=np.float32)
                     for j, cf in enumerate(cand):
-                        cl = min(len(cf), 128)
-                        creatures[j, :cl] = np.array(
+                        cl = min(len(cf), 64)
+                        actions[j, :cl] = np.array(
                             cf[:cl], dtype=np.float32)
-                    np.clip(creatures, -10, 10,
-                            out=creatures)
-                    creatures = np.nan_to_num(creatures)
+                    np.clip(actions, -10, 10, out=actions)
+                    actions = np.nan_to_num(actions)
 
-                    action_mask = np.zeros(
-                        n, dtype=np.float32)
-                    for idx in sel:
-                        if 0 <= idx < n:
-                            action_mask[idx] = 1.0
+                    selected_idx = sel[0] if sel else n - 1
+                    if selected_idx >= n:
+                        selected_idx = n - 1
 
-                    sample = {
+                    priority_samples.append({
                         'global_features': gf,
                         'game_state_flat': flat,
-                        'creature_features': creatures,
-                        'action_mask': action_mask,
-                        'n_creatures': n,
+                        'action_features': actions,
+                        'selected_idx': selected_idx,
+                        'n_actions': n,
                         'outcome': outcome,
-                    }
-                    if dt == 'DECLARE_ATTACKERS':
-                        attack_samples.append(sample)
-                    elif dt == 'DECLARE_BLOCKERS':
-                        block_samples.append(sample)
+                    })
+                    continue
+
+                # Combat: 128-dim card features, multi-select
+                n = len(cand)
+                creatures = np.zeros(
+                    (n, 128), dtype=np.float32)
+                for j, cf in enumerate(cand):
+                    cl = min(len(cf), 128)
+                    creatures[j, :cl] = np.array(
+                        cf[:cl], dtype=np.float32)
+                np.clip(creatures, -10, 10,
+                        out=creatures)
+                creatures = np.nan_to_num(creatures)
+
+                action_mask = np.zeros(
+                    n, dtype=np.float32)
+                for idx in sel:
+                    if 0 <= idx < n:
+                        action_mask[idx] = 1.0
+
+                sample = {
+                    'global_features': gf,
+                    'game_state_flat': flat,
+                    'creature_features': creatures,
+                    'action_mask': action_mask,
+                    'n_creatures': n,
+                    'outcome': outcome,
+                }
+                if dt == 'DECLARE_ATTACKERS':
+                    attack_samples.append(sample)
+                elif dt == 'DECLARE_BLOCKERS':
+                    block_samples.append(sample)
         except Exception:
             pass
 
-    return attack_samples, block_samples, value_samples
+    return (attack_samples, block_samples,
+            priority_samples, value_samples)
 
 
 # ── PPO batch computation ────────────────────────────
@@ -298,6 +329,124 @@ def compute_ppo_batch(model, head, samples, device,
 
         # Total loss — entropy coefficient 0.1 encourages
         # exploration (prevents sigmoid saturation)
+        total_loss = (
+            policy_loss +
+            0.5 * value_loss -
+            0.1 * entropy)
+
+    metrics = {
+        'policy_loss': policy_loss.item(),
+        'value_loss': value_loss.item(),
+        'entropy': entropy.item(),
+        'mean_advantage': advantage.mean().item(),
+        'mean_value': value.mean().item(),
+        'win_rate': (outcomes > 0).float().mean().item(),
+    }
+    return total_loss, metrics, bs
+
+
+def compute_ppo_priority_batch(model, head, samples,
+                               device, use_amp,
+                               clip_eps=0.2):
+    """
+    Compute PPO loss for a batch of priority decisions.
+
+    Uses Categorical distribution (single-select softmax)
+    instead of Bernoulli (binary per-creature).
+    """
+    if not samples:
+        return torch.tensor(0.0, device=device), {}, 0
+
+    max_a = max(s['n_actions'] for s in samples)
+    max_a = max(max_a, 1)
+    bs = len(samples)
+
+    af = torch.zeros(bs, max_a, 64, device=device)
+    am = torch.zeros(bs, max_a, dtype=torch.bool,
+                      device=device)
+    actions = torch.zeros(bs, dtype=torch.long,
+                          device=device)
+    outcomes = torch.zeros(bs, device=device)
+    gf = torch.zeros(bs, 64, device=device)
+
+    # Zone tensors for encoder
+    mb = torch.zeros(bs, 30, 128, device=device)
+    mbm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    ob = torch.zeros(bs, 30, 128, device=device)
+    obm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    h = torch.zeros(bs, 15, 128, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool,
+                      device=device)
+    mg = torch.zeros(bs, 40, 128, device=device)
+    mgm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    og = torch.zeros(bs, 40, 128, device=device)
+    ogm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    st = torch.zeros(bs, 10, 128, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool,
+                       device=device)
+
+    for i, s in enumerate(samples):
+        na = s['n_actions']
+        af[i, :na] = torch.from_numpy(
+            s['action_features'])
+        am[i, :na] = True
+        actions[i] = s['selected_idx']
+        outcomes[i] = s['outcome']
+
+        g, zones, masks_d = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(
+            masks_d['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(
+            masks_d['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks_d['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(
+            masks_d['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(
+            masks_d['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(
+            masks_d['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        # Encode state
+        state = model.encode_state(
+            gf, mb, mbm, ob, obm, h, hm,
+            mg, mgm, og, ogm, st, stm)
+
+        # Value estimate (critic)
+        value = model.get_value(state).squeeze(-1)
+
+        # Policy logits (actor) — masked softmax
+        logits = head(state, af, am)
+
+        # Categorical distribution over actions
+        dist = torch.distributions.Categorical(
+            logits=logits)
+        log_probs = dist.log_prob(actions)
+
+        # Advantage: outcome - value estimate
+        advantage = (outcomes - value.detach())
+
+        # Policy loss (REINFORCE with baseline)
+        policy_loss = -(log_probs * advantage).mean()
+
+        # Value loss
+        value_loss = F.mse_loss(value, outcomes)
+
+        # Entropy bonus
+        entropy = dist.entropy().mean()
+
         total_loss = (
             policy_loss +
             0.5 * value_loss -
@@ -556,11 +705,11 @@ def main():
 
     print(flush=True)
     print('  Round │ Games │ Attacks │ Blocks │'
-          ' Policy Loss │ Value Loss │ Entropy │'
-          ' Eval WR │ Status', flush=True)
+          ' Priority │ Policy Loss │ Value Loss │'
+          ' Entropy │ Eval WR │ Status', flush=True)
     print('  ──────┼───────┼─────────┼────────┼'
-          '─────────────┼────────────┼─────────┼'
-          '─────────┼───────', flush=True)
+          '──────────┼─────────────┼────────────┼'
+          '─────────┼─────────┼───────', flush=True)
 
     for rnd in range(1, args.rounds + 1):
         t0 = time.time()
@@ -579,12 +728,14 @@ def main():
             break
 
         # ── Step 2: Load trajectories ──
-        attack_data, block_data, value_data = load_ppo_data(
-            args.traj_dir)
+        attack_data, block_data, priority_data, \
+            value_data = load_ppo_data(args.traj_dir)
 
-        if not attack_data and not block_data:
+        if not attack_data and not block_data \
+                and not priority_data:
             print(f'  {rnd:>4d}   │ {args.games_per_round:>5d} │'
                   f'    0    │   0    │'
+                  f'     0    │'
                   f' no data     │            │'
                   f'         │         │ SKIP',
                   flush=True)
@@ -664,6 +815,41 @@ def main():
                 total_ent += metrics['entropy']
                 n_updates += 1
 
+            # Priority head updates (Categorical, not Bernoulli)
+            random.shuffle(priority_data)
+            for bi in range(0, len(priority_data),
+                            args.batch_size):
+                batch = priority_data[
+                    bi:bi + args.batch_size]
+                if len(batch) < 2:
+                    continue
+                loss, metrics, _ = \
+                    compute_ppo_priority_batch(
+                        model, model.priority_head,
+                        batch, device, use_amp)
+
+                if torch.isnan(loss):
+                    continue
+
+                optimizer.zero_grad()
+                if scaler:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), 0.5)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), 0.5)
+                    optimizer.step()
+
+                total_pl += metrics['policy_loss']
+                total_vl += metrics['value_loss']
+                total_ent += metrics['entropy']
+                n_updates += 1
+
         avg_pl = total_pl / max(n_updates, 1)
         avg_vl = total_vl / max(n_updates, 1)
         avg_ent = total_ent / max(n_updates, 1)
@@ -706,6 +892,7 @@ def main():
         print(
             f'  {rnd:>4d}   │ {args.games_per_round:>5d} │'
             f' {len(attack_data):>7d} │ {len(block_data):>6d} │'
+            f' {len(priority_data):>8d} │'
             f' {avg_pl:>11.4f} │ {avg_vl:>10.4f} │'
             f' {avg_ent:>7.3f} │'
             f' {eval_wr:>6.1%} │ {status}'

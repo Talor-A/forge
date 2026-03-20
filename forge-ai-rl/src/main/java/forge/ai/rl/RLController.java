@@ -389,6 +389,62 @@ public class RLController {
         cachedCandidateFeatures = null;
     }
 
+    /**
+     * Record the heuristic's priority decision (which spell to play, or pass).
+     *
+     * @param availableActions all playable spells/abilities (excluding lands/mana)
+     * @param chosenSa the spell the heuristic chose, or null for pass
+     */
+    public void recordHeuristicPriority(List<SpellAbility> availableActions, SpellAbility chosenSa) {
+        if (trajectoryRecorder == null) return;
+        // Only record when there's at least 1 spell option (+ pass = 2 candidates)
+        if (availableActions.isEmpty()) return;
+
+        GameStateFeatures gameState = stateEncoder.encode(game, player);
+
+        // Encode each available action + pass (same format as inference)
+        List<float[]> candidates = new ArrayList<>();
+        for (SpellAbility sa : availableActions) {
+            candidates.add(ActionEncoder.encode(sa));
+        }
+        candidates.add(ActionEncoder.encodePassAction()); // pass is always last
+
+        // Find which action the heuristic chose
+        int selectedIdx = availableActions.size(); // default = pass (last index)
+        if (chosenSa != null) {
+            // Try identity match first
+            for (int i = 0; i < availableActions.size(); i++) {
+                if (availableActions.get(i) == chosenSa) {
+                    selectedIdx = i;
+                    break;
+                }
+            }
+            // Fallback: match by card name + API type
+            if (selectedIdx == availableActions.size() && chosenSa.getHostCard() != null) {
+                String chosenName = chosenSa.getHostCard().getName();
+                Object chosenApi = chosenSa.getApi();
+                for (int i = 0; i < availableActions.size(); i++) {
+                    SpellAbility sa = availableActions.get(i);
+                    if (sa.getHostCard() != null
+                            && sa.getHostCard().getName().equals(chosenName)
+                            && sa.getApi() == chosenApi) {
+                        selectedIdx = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        DecisionContext context = DecisionContext.singleSelect(
+                DecisionType.PRIORITY_ACTION, gameState, candidates,
+                "priority_" + availableActions.size() + "_options");
+
+        DecisionResult result = new DecisionResult(
+                List.of(selectedIdx), new float[0], 0f, true);
+
+        recordDecision(context, result);
+    }
+
     // --- Internal helpers ---
 
     private DecisionResult requestDecision(DecisionContext context) {
