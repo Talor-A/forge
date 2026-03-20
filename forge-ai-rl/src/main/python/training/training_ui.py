@@ -253,33 +253,58 @@ def trainer_thread(state: TrainingState, args):
         state.batch_size = batch_size
         state.total_epochs = args.epochs
 
-        # Load data
-        samples = load_data_threaded(
-            state, args.data_dir, args.max_files)
-        if not samples:
+        # Index data (fast scan, no loading into RAM)
+        from training.chunked_loader import (
+            chunked_file_loader, load_value_samples)
+        from pathlib import Path
+        import random
+
+        state.phase = "loading"
+        state.status = "Indexing trajectory files..."
+
+        data_path = Path(args.data_dir)
+        all_files = sorted(
+            data_path.glob('traj_*.jsonl'))
+        if args.max_files:
+            all_files = all_files[:args.max_files]
+        state.files_total = len(all_files)
+
+        if not all_files:
             state.status = "ERROR: No data found"
             state.phase = "done"
             return
 
-        # Split
-        import random
-        random.shuffle(samples)
-        n_val = max(1, int(len(samples) * 0.1))
-        n_train = len(samples) - n_val
-        state.n_train = n_train
-        state.n_val = n_val
+        # Count total samples (quick scan)
+        total_samples = 0
+        for fp in all_files:
+            try:
+                with open(fp) as f:
+                    total_samples += sum(
+                        1 for _ in f) - 1  # minus header
+            except Exception:
+                pass
+        state.samples_loaded = total_samples
 
-        train_loader = torch.utils.data.DataLoader(
-            SimpleDataset(samples[:n_train]),
-            batch_size=batch_size, shuffle=True,
-            num_workers=0,
-            pin_memory=device.startswith('cuda'),
-            drop_last=True)
+        # Split files into train/val (file-level split)
+        random.shuffle(all_files)
+        n_val_files = max(1,
+            int(len(all_files) * 0.1))
+        val_files = all_files[:n_val_files]
+        train_files = all_files[n_val_files:]
+
+        # Load validation set (small, fits in RAM)
+        val_samples = load_value_samples(val_files)
         val_loader = torch.utils.data.DataLoader(
-            SimpleDataset(samples[n_train:]),
+            SimpleDataset(val_samples),
             batch_size=batch_size, shuffle=False,
             num_workers=0,
             pin_memory=device.startswith('cuda'))
+
+        state.n_val = len(val_samples)
+        state.n_train = total_samples - len(val_samples)
+
+        # Train files will be loaded in chunks
+        CHUNK_SIZE = 200  # files per chunk
 
         # Model
         model = MTGModel().to(device)
@@ -304,58 +329,85 @@ def trainer_thread(state: TrainingState, args):
             state.status = f"Training epoch {epoch}/{args.epochs}"
             t0 = time.time()
 
-            # Train
+            # Train (chunked: load CHUNK_SIZE files at a time)
             model.train()
             total_loss = 0
             correct = 0
             total = 0
-            n_batches = len(train_loader)
 
-            for bi, batch in enumerate(train_loader):
-                state.epoch_progress = bi / max(n_batches, 1)
+            random.shuffle(train_files)
+            n_chunks = max(1,
+                len(train_files) // CHUNK_SIZE)
+            for ci in range(0, len(train_files),
+                            CHUNK_SIZE):
+                chunk_files = train_files[
+                    ci:ci + CHUNK_SIZE]
+                chunk_samples = load_value_samples(
+                    chunk_files)
+                if not chunk_samples:
+                    continue
+                random.shuffle(chunk_samples)
 
-                g = batch['global_features'].to(device)
-                mb = batch['my_board'].to(device)
-                mbm = batch['my_board_mask'].to(device)
-                ob = batch['opp_board'].to(device)
-                obm = batch['opp_board_mask'].to(device)
-                h = batch['hand'].to(device)
-                hm = batch['hand_mask'].to(device)
-                mg = batch['my_gy'].to(device)
-                mgm = batch['my_gy_mask'].to(device)
-                og = batch['opp_gy'].to(device)
-                ogm = batch['opp_gy_mask'].to(device)
-                s = batch['stack'].to(device)
-                sm = batch['stack_mask'].to(device)
-                tgt = batch['value_target'].to(device)
+                chunk_loader = torch.utils.data.DataLoader(
+                    SimpleDataset(chunk_samples),
+                    batch_size=batch_size, shuffle=True,
+                    num_workers=0, drop_last=True)
 
-                optimizer.zero_grad()
-                with torch.amp.autocast(
-                        'cuda', enabled=use_amp):
-                    emb = model.encode_state(
-                        g, mb, mbm, ob, obm, h, hm,
-                        mg, mgm, og, ogm, s, sm)
-                    pred = model.get_value(emb).squeeze(-1)
-                    loss = nn.functional.mse_loss(pred, tgt)
+                chunk_idx = ci // CHUNK_SIZE
+                for bi, batch in enumerate(chunk_loader):
+                    state.epoch_progress = (
+                        (chunk_idx + bi / max(
+                            len(chunk_loader), 1))
+                        / n_chunks)
 
-                if scaler:
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), 1.0)
-                    optimizer.step()
+                    g = batch['global_features'].to(device)
+                    mb = batch['my_board'].to(device)
+                    mbm = batch['my_board_mask'].to(device)
+                    ob = batch['opp_board'].to(device)
+                    obm = batch['opp_board_mask'].to(device)
+                    h = batch['hand'].to(device)
+                    hm = batch['hand_mask'].to(device)
+                    mg = batch['my_gy'].to(device)
+                    mgm = batch['my_gy_mask'].to(device)
+                    og = batch['opp_gy'].to(device)
+                    ogm = batch['opp_gy_mask'].to(device)
+                    s = batch['stack'].to(device)
+                    sm = batch['stack_mask'].to(device)
+                    tgt = batch['value_target'].to(device)
 
-                bs = tgt.shape[0]
-                total_loss += loss.item() * bs
-                correct += (
-                    (pred > 0) == (tgt > 0)).sum().item()
-                total += bs
+                    optimizer.zero_grad()
+                    with torch.amp.autocast(
+                            'cuda', enabled=use_amp):
+                        emb = model.encode_state(
+                            g, mb, mbm, ob, obm, h, hm,
+                            mg, mgm, og, ogm, s, sm)
+                        pred = model.get_value(
+                            emb).squeeze(-1)
+                        loss = nn.functional.mse_loss(
+                            pred, tgt)
+
+                    if scaler:
+                        scaler.scale(loss).backward()
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), 1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), 1.0)
+                        optimizer.step()
+
+                    bs = tgt.shape[0]
+                    total_loss += loss.item() * bs
+                    correct += (
+                        (pred > 0) == (tgt > 0)
+                    ).sum().item()
+                    total += bs
+
+                # Free chunk memory
+                del chunk_samples, chunk_loader
 
             state.current_train_loss = (
                 total_loss / max(1, total))
