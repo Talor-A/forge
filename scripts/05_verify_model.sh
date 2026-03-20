@@ -9,13 +9,15 @@ GAMES=${2:-10}
 PORT=50051
 
 # Kill any existing server
-pkill -f "model_server" 2>/dev/null; sleep 1
+pkill -f "model_server" 2>/dev/null || true
+sleep 1
 
-# Start model server
+# Start model server in a subshell
 echo "Starting model server with $MODEL..."
-cd forge-ai-rl/src/main/python
-source /home/maustin/forge/forge-ai-rl/venv/bin/activate
-python -c "
+(
+    cd forge-ai-rl/src/main/python
+    source /home/maustin/forge/forge-ai-rl/venv/bin/activate
+    exec python -c "
 from serving.model_server import ModelServer
 from model.mtg_model import MTGModel
 import threading, time
@@ -23,11 +25,12 @@ model = MTGModel.load('/home/maustin/forge/$MODEL', device='cuda')
 server = ModelServer(model, port=$PORT, device='cuda')
 t = threading.Thread(target=server.start, daemon=True)
 t.start()
-print('Server started')
+print('Server started', flush=True)
 while True: time.sleep(1)
-" &
+"
+) &
 SERVER_PID=$!
-sleep 3
+sleep 5
 
 # Verify alive
 echo "=== SERVER CHECK ==="
