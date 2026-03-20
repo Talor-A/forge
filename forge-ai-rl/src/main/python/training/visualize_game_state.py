@@ -227,13 +227,15 @@ def load_samples(data_dir, max_samples=200):
 
             for line in lines[1:]:
                 rec = json.loads(line)
-                if rec.get("decisionType") != "DECLARE_ATTACKERS":
+                dt = rec.get("decisionType", "")
+                if dt not in ("DECLARE_ATTACKERS", "DECLARE_BLOCKERS"):
                     continue
                 cand = rec.get("candidateFeatures", [])
                 if len(cand) < 1:
                     continue
 
                 samples.append({
+                    "type": dt,
                     "info": rec.get("contextInfo", ""),
                     "global_features": np.array(
                         rec.get("globalFeatures", []), dtype=np.float32),
@@ -255,6 +257,7 @@ def load_samples(data_dir, max_samples=200):
 class GameStateViewer:
     def __init__(self, root, samples, model, device):
         self.root = root
+        self.all_samples = samples
         self.samples = samples
         self.model = model
         self.device = device
@@ -278,9 +281,18 @@ class GameStateViewer:
         ttk.Button(nav, text="Next >", command=self._next).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="Random", command=self._rand).pack(side=tk.LEFT, padx=3)
 
+        tk.Frame(nav, bg="#45475a", width=2).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Button(nav, text="Attacks Only", command=self._filter_attacks).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Blocks Only", command=self._filter_blocks).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="All", command=self._filter_all).pack(side=tk.LEFT, padx=3)
+
         self.nav_v = tk.StringVar(value="0/0")
         tk.Label(nav, textvariable=self.nav_v, bg="#1e1e2e",
                  fg="#a6adc8", font=("Consolas", 11)).pack(side=tk.LEFT, padx=15)
+
+        self.type_v = tk.StringVar()
+        tk.Label(nav, textvariable=self.type_v, bg="#1e1e2e",
+                 fg="#f9e2af", font=("Consolas", 11, "bold")).pack(side=tk.LEFT, padx=5)
 
         self.info_v = tk.StringVar()
         tk.Label(nav, textvariable=self.info_v, bg="#1e1e2e",
@@ -347,6 +359,23 @@ class GameStateViewer:
                  fg=color, font=("Consolas", 10, "bold"),
                  anchor="w").pack(fill=tk.X, padx=5)
 
+    def _filter_attacks(self):
+        self.filtered = [s for s in self.all_samples if s["type"] == "DECLARE_ATTACKERS"]
+        self.samples = self.filtered if self.filtered else self.all_samples
+        self.idx = 0
+        self._show()
+
+    def _filter_blocks(self):
+        self.filtered = [s for s in self.all_samples if s["type"] == "DECLARE_BLOCKERS"]
+        self.samples = self.filtered if self.filtered else self.all_samples
+        self.idx = 0
+        self._show()
+
+    def _filter_all(self):
+        self.samples = self.all_samples
+        self.idx = 0
+        self._show()
+
     def _prev(self):
         self.idx = max(0, self.idx - 1)
         self._show()
@@ -364,6 +393,8 @@ class GameStateViewer:
         self.card_photos = []  # clear references
 
         self.nav_v.set(f"{self.idx+1}/{len(self.samples)}")
+        dt = s.get("type", "?")
+        self.type_v.set("ATTACK" if dt == "DECLARE_ATTACKERS" else "BLOCK")
         self.info_v.set(s["info"])
         won = s["won"]
         self.outcome_v.set("WON" if won else "LOST")
@@ -511,7 +542,9 @@ class GameStateViewer:
             lines.append("")
 
             candidates = s.get("candidates", [])
-            if candidates:
+            dt = s.get("type", "")
+
+            if candidates and dt == "DECLARE_ATTACKERS":
                 n = len(candidates)
                 cf_t = torch.zeros(1, n, 128, device=self.device)
                 cm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
@@ -545,6 +578,45 @@ class GameStateViewer:
                 else:
                     lines.append("DIFFERENT")
 
+            elif candidates and dt == "DECLARE_BLOCKERS":
+                n = len(candidates)
+                cf_t = torch.zeros(1, n, 128, device=self.device)
+                cm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
+                for j, cf in enumerate(candidates):
+                    cl = min(len(cf), 128)
+                    cf_t[0, j, :cl] = torch.tensor(cf[:cl], dtype=torch.float32)
+
+                # Block head uses card_select_head (softmax)
+                logits = self.model.card_select_head(state, cf_t, cm_t)
+                probs = torch.softmax(logits, dim=-1)
+
+                lines.append("=== Block Decision ===")
+                lines.append("")
+                for j in range(n):
+                    p = probs[0, j].item()
+                    info = decode_card(candidates[j])
+                    sel = j in s["selected"]
+                    marker = ">>" if sel else "  "
+                    label = info["label"] if info else "?"
+                    if info and info["power"] is not None:
+                        label += f" {info['power']}/{info['toughness']}"
+                    bar = "#" * int(p * 20)
+                    lines.append(f"{marker} {label}")
+                    lines.append(f"   [{bar:20s}] {p:.0%}")
+                    if sel:
+                        lines.append(f"   >> BLOCKING")
+                    lines.append("")
+
+                lines.append(f"Heuristic: {list(s['selected'])}")
+                # Model picks highest prob candidates
+                model_sel = [j for j in range(n)
+                             if probs[0,j].item() > 1.0/n]
+                lines.append(f"Model:     {model_sel}")
+                if set(s["selected"]) == set(model_sel):
+                    lines.append("MATCH!")
+                else:
+                    lines.append("DIFFERENT")
+
             self.pred_text.insert("1.0", "\n".join(lines))
         self.pred_text.config(state=tk.DISABLED)
 
@@ -559,7 +631,9 @@ def main():
 
     print("Loading samples...", flush=True)
     samples = load_samples(args.data_dir, args.max_samples)
-    print(f"  {len(samples)} attack samples", flush=True)
+    attacks = sum(1 for s in samples if s["type"] == "DECLARE_ATTACKERS")
+    blocks = sum(1 for s in samples if s["type"] == "DECLARE_BLOCKERS")
+    print(f"  {len(samples)} samples ({attacks} attacks, {blocks} blocks)", flush=True)
 
     model = None
     if args.model and os.path.exists(args.model):
