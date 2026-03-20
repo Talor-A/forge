@@ -252,38 +252,67 @@ def load_decisions(data_dir, state, max_files=None,
                         priority_samples)
                     continue
 
-                # Combat decisions: 128-dim card features,
-                # multi-select (binary BCE)
-                n = len(cand)
-                creatures = np.zeros(
-                    (n, 128), dtype=np.float32)
-                for j, cf in enumerate(cand):
-                    cl = min(len(cf), 128)
-                    creatures[j, :cl] = np.array(
-                        cf[:cl], dtype=np.float32)
-                np.clip(creatures, -10, 10, out=creatures)
-                creatures = np.nan_to_num(creatures)
-
-                mask = np.zeros(n, dtype=np.float32)
-                for idx in sel:
-                    if 0 <= idx < n:
-                        mask[idx] = 1.0
-
-                sample = {
-                    'global_features': g,
-                    'game_state_flat': flat,
-                    'creature_features': creatures,
-                    'action_mask': mask,
-                    'n_creatures': n,
-                    'won': 1.0 if won else 0.0,
-                }
-
                 if dt == 'DECLARE_ATTACKERS':
-                    attack_samples.append(sample)
+                    # Attack: 128-dim card features,
+                    # multi-select (binary BCE)
+                    n = len(cand)
+                    creatures = np.zeros(
+                        (n, 128), dtype=np.float32)
+                    for j, cf in enumerate(cand):
+                        cl = min(len(cf), 128)
+                        creatures[j, :cl] = np.array(
+                            cf[:cl], dtype=np.float32)
+                    np.clip(creatures, -10, 10,
+                            out=creatures)
+                    creatures = np.nan_to_num(creatures)
+
+                    mask = np.zeros(n, dtype=np.float32)
+                    for idx in sel:
+                        if 0 <= idx < n:
+                            mask[idx] = 1.0
+
+                    attack_samples.append({
+                        'global_features': g,
+                        'game_state_flat': flat,
+                        'creature_features': creatures,
+                        'action_mask': mask,
+                        'n_creatures': n,
+                        'won': 1.0 if won else 0.0,
+                    })
                     state.attack_samples = len(
                         attack_samples)
+
                 elif dt == 'DECLARE_BLOCKERS':
-                    block_samples.append(sample)
+                    # Block: 256-dim pair features
+                    # (blocker+attacker concat),
+                    # multi-select assignment
+                    n = len(cand)
+                    feat_dim = len(cand[0]) if cand else 0
+                    if feat_dim < 200:
+                        continue  # skip old-format data
+
+                    pairs = np.zeros(
+                        (n, 256), dtype=np.float32)
+                    for j, cf in enumerate(cand):
+                        cl = min(len(cf), 256)
+                        pairs[j, :cl] = np.array(
+                            cf[:cl], dtype=np.float32)
+                    np.clip(pairs, -10, 10, out=pairs)
+                    pairs = np.nan_to_num(pairs)
+
+                    mask = np.zeros(n, dtype=np.float32)
+                    for idx in sel:
+                        if 0 <= idx < n:
+                            mask[idx] = 1.0
+
+                    block_samples.append({
+                        'global_features': g,
+                        'game_state_flat': flat,
+                        'pair_features': pairs,
+                        'action_mask': mask,
+                        'n_pairs': n,
+                        'won': 1.0 if won else 0.0,
+                    })
                     state.block_samples = len(
                         block_samples)
         except Exception:
@@ -454,6 +483,312 @@ def make_priority_batch(model, batch, device, use_amp,
         total = bs
 
     return loss, correct, total
+
+
+def make_block_batch(model, batch, device, use_amp,
+                     head):
+    """Build a block batch for the BlockHead.
+
+    Block data has (blocker,attacker) pair features (256-dim).
+    BlockHead expects separate blocker/attacker tensors.
+    We reconstruct these from the pairs: for each sample,
+    extract unique blockers and attackers from the pairs.
+    """
+    bs = len(batch)
+
+    # Find max blockers and attackers across batch
+    # Each pair is (blocker_i, attacker_j) — we need to
+    # figure out how many unique blockers/attackers
+    # Pairs are ordered: b0a0, b0a1, ..., b1a0, b1a1, ...
+    # Last pair is the "no block" zero vector
+    max_b, max_a = 0, 0
+    for s in batch:
+        n = s['n_pairs']
+        pf = s['pair_features']
+        # Count non-zero unique blocker features
+        # Pairs are b*a + no_block, so n_pairs = nb*na + 1
+        # We detect dimensions from feature patterns
+        # Simpler: extract from contextInfo if available,
+        # or infer from pair count
+        # Last pair is zero (no-block), so real pairs = n-1
+        real = n - 1
+        if real <= 0:
+            continue
+        # Find number of attackers: first blocker's pairs
+        # end when blocker features change
+        first_blocker = pf[0, :128]
+        na = 1
+        for j in range(1, real):
+            if np.allclose(pf[j, :128], first_blocker,
+                           atol=0.01):
+                na += 1
+            else:
+                break
+        nb = real // max(na, 1)
+        max_b = max(max_b, nb)
+        max_a = max(max_a, na)
+
+    max_b = max(max_b, 1)
+    max_a = max(max_a, 1)
+
+    bf = torch.zeros(bs, max_b, 128, device=device)
+    bm = torch.zeros(bs, max_b, dtype=torch.bool,
+                      device=device)
+    af = torch.zeros(bs, max_a, 128, device=device)
+    am_t = torch.zeros(bs, max_a, dtype=torch.bool,
+                       device=device)
+    # Target: for each blocker, which attacker (or no-block)
+    tgt = torch.full((bs, max_b), max_a, dtype=torch.long,
+                     device=device)  # default = no block
+    gf = torch.zeros(bs, 64, device=device)
+
+    mb = torch.zeros(bs, 30, 128, device=device)
+    mbm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    ob = torch.zeros(bs, 30, 128, device=device)
+    obm = torch.zeros(bs, 30, dtype=torch.bool,
+                       device=device)
+    h = torch.zeros(bs, 15, 128, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool,
+                      device=device)
+    mg = torch.zeros(bs, 40, 128, device=device)
+    mgm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    og = torch.zeros(bs, 40, 128, device=device)
+    ogm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    st = torch.zeros(bs, 10, 128, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool,
+                       device=device)
+
+    for i, s in enumerate(batch):
+        n = s['n_pairs']
+        pf_np = s['pair_features']
+        sel = s['action_mask']
+        real = n - 1
+        if real <= 0:
+            continue
+
+        # Infer nb, na from pair structure
+        first_blocker = pf_np[0, :128]
+        na = 1
+        for j in range(1, real):
+            if np.allclose(pf_np[j, :128], first_blocker,
+                           atol=0.01):
+                na += 1
+            else:
+                break
+        nb = real // max(na, 1)
+
+        # Extract unique blockers and attackers
+        for b_idx in range(min(nb, max_b)):
+            bf[i, b_idx] = torch.from_numpy(
+                pf_np[b_idx * na, :128])
+            bm[i, b_idx] = True
+        for a_idx in range(min(na, max_a)):
+            af[i, a_idx] = torch.from_numpy(
+                pf_np[a_idx, 128:256])
+            am_t[i, a_idx] = True
+
+        # Build assignment target from selected pairs
+        for pair_idx in range(real):
+            if sel[pair_idx] > 0.5:
+                b_idx = pair_idx // na
+                a_idx = pair_idx % na
+                if b_idx < max_b and a_idx < max_a:
+                    tgt[i, b_idx] = a_idx
+
+        g, zones, masks = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(
+            masks['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.no_grad():
+            state_emb = model.encode_state(
+                gf, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, st, stm)
+
+        # BlockHead: (batch, max_b, max_a+1) logits
+        logits = head(state_emb, bf, bm, af, am_t)
+
+        # CE loss per blocker
+        # logits: (bs, max_b, max_a+1), tgt: (bs, max_b)
+        loss = nn.functional.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            tgt.reshape(-1),
+            reduction='none')
+        # Mask to real blockers only
+        loss = (loss.reshape(bs, max_b)
+                * bm.float()).sum() / \
+               bm.float().sum().clamp(min=1)
+
+    with torch.no_grad():
+        preds = logits.argmax(dim=-1)
+        correct = ((preds == tgt)
+                   * bm).sum().item()
+        total = bm.sum().item()
+
+    return loss, correct, total
+
+
+def train_block_head(model, head, samples, args,
+                     state, device, use_amp):
+    """Train the block head with per-blocker CE loss."""
+    state.current_head = 'block'
+    state.status = "Training block head..."
+    log(state, f"\n=== Training block head ===")
+    log(state, f"Samples: {len(samples)}")
+
+    for p in model.state_encoder.parameters():
+        p.requires_grad = False
+    for p in model.value_network.parameters():
+        p.requires_grad = False
+    for p in head.parameters():
+        p.requires_grad = True
+
+    state.head_params = sum(
+        p.numel() for p in head.parameters())
+    log(state, f"Head params: {state.head_params:,}")
+
+    optimizer = optim.AdamW(
+        head.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler('cuda') if use_amp \
+        else None
+
+    random.shuffle(samples)
+    n_val = max(1, int(len(samples) * 0.1))
+    train_s = samples[:-n_val]
+    val_s = samples[-n_val:]
+
+    best_acc = 0
+    save_path = os.path.join(
+        args.save_dir, 'best_block_model.pt')
+
+    tl_list = state.block_train_losses
+    ta_list = state.block_train_accs
+    vl_list = state.block_val_losses
+    va_list = state.block_val_accs
+
+    start = time.time()
+
+    for epoch in range(1, args.epochs + 1):
+        state.epoch = epoch
+        state.status = (
+            f"Training block head: "
+            f"epoch {epoch}/{args.epochs}")
+        t0 = time.time()
+
+        model.train()
+        random.shuffle(train_s)
+        tloss, tc, tt = 0, 0, 0
+
+        for bi in range(0, len(train_s), args.batch_size):
+            batch = train_s[bi:bi + args.batch_size]
+            if len(batch) < 2:
+                continue
+            state.epoch_progress = bi / max(
+                len(train_s), 1)
+
+            loss, correct, total = make_block_batch(
+                model, batch, device, use_amp, head)
+
+            optimizer.zero_grad()
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                optimizer.step()
+
+            tloss += loss.item() * max(total, 1)
+            tc += correct
+            tt += total
+
+        scheduler.step()
+
+        model.eval()
+        vloss, vc, vt = 0, 0, 0
+        with torch.no_grad():
+            for bi in range(0, len(val_s), args.batch_size):
+                batch = val_s[bi:bi + args.batch_size]
+                if len(batch) < 2:
+                    continue
+                loss, correct, total = make_block_batch(
+                    model, batch, device, use_amp, head)
+                vloss += loss.item() * max(total, 1)
+                vc += correct
+                vt += total
+
+        ta = tc / max(tt, 1)
+        va = vc / max(vt, 1)
+        tl = tloss / max(tt, 1)
+        vl = vloss / max(vt, 1)
+
+        state.current_train_loss = tl
+        state.current_train_acc = ta
+        state.current_val_loss = vl
+        state.current_val_acc = va
+        tl_list.append(tl)
+        ta_list.append(ta)
+        vl_list.append(vl)
+        va_list.append(va)
+
+        if va > best_acc:
+            best_acc = va
+            model.save(save_path)
+
+        state.block_best_acc = best_acc
+
+        status = ' *BEST*' if va == best_acc and va > 0 \
+            else ''
+        log(state,
+            f"  Epoch {epoch:>3d}/{args.epochs} | "
+            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
+            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
+
+        if np.isnan(tl) or np.isnan(vl):
+            log(state,
+                "  NaN detected! Stopping block training.")
+            break
+
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        state.eta = (args.epochs - epoch) * state.epoch_time
+        state.epoch_progress = 1.0
+        state.chart_dirty = True
+
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()
+            state.gpu_mem_used_mb = (
+                torch.cuda.memory_allocated() / 1024**2)
+            state.gpu_mem_total_mb = (
+                torch.cuda.get_device_properties(0)
+                .total_memory / 1024**2)
+
+        time.sleep(0.05)
+
+    return best_acc
 
 
 def train_priority_head(model, head, samples, args,
@@ -826,13 +1161,14 @@ def trainer_thread(state, args):
                        attack_samples, args, state,
                        device, use_amp)
 
-        # Train block head
+        # Train block head (pair-based assignment)
         if 'block' in heads and block_samples:
             state.epoch = 0
             state.epoch_progress = 0
-            train_head(model, model.block_head, 'block',
-                       block_samples, args, state,
-                       device, use_amp)
+            train_block_head(
+                model, model.block_head,
+                block_samples, args, state,
+                device, use_amp)
 
         # Save combined model
         save_path = os.path.join(
