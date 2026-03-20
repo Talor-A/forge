@@ -1,0 +1,462 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5 Z" fill="#666"/>
+    </marker>
+    <marker id="arr-b" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <path d="M0,0 L7,2.5 L0,5 Z" fill="#3b7dd8"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="900" fill="#fff"/>
+
+  <!-- Title -->
+  <text x="700" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">MTG RL Model Architecture — 11M Parameters</text>
+
+  <!-- ========== ROW 1: MAIN ENCODER PIPELINE ========== -->
+
+  <!-- Input tensors (stacked, height = relative size) -->
+  <g transform="translate(30, 70)">
+    <text x="55" y="-4" text-anchor="middle" font-size="9" font-weight="bold" fill="#555">Input Zones</text>
+
+    <!-- Global features - small -->
+    <rect x="0" y="0" width="20" height="18" rx="2" fill="#b8c9e0" stroke="#7a9ec4" stroke-width="1"/>
+    <text x="25" y="12" font-size="7" fill="#444">Global 64</text>
+
+    <!-- My board - tall -->
+    <rect x="0" y="22" width="20" height="85" rx="2" fill="#a8d5a2" stroke="#6db06a" stroke-width="1"/>
+    <text x="25" y="68" font-size="7" fill="#444">My Board 30×128</text>
+
+    <!-- Opp board -->
+    <rect x="0" y="111" width="20" height="85" rx="2" fill="#f5a8a8" stroke="#d07070" stroke-width="1"/>
+    <text x="25" y="157" font-size="7" fill="#444">Opp Board 30×128</text>
+
+    <!-- Hand -->
+    <rect x="0" y="200" width="20" height="42" rx="2" fill="#f5e6a8" stroke="#d0c070" stroke-width="1"/>
+    <text x="25" y="224" font-size="7" fill="#444">Hand 15×128</text>
+
+    <!-- Graveyards -->
+    <rect x="0" y="246" width="20" height="56" rx="2" fill="#d4d4d4" stroke="#aaa" stroke-width="1"/>
+    <text x="25" y="278" font-size="7" fill="#444">GYs 2×40×128</text>
+
+    <!-- Stack -->
+    <rect x="0" y="306" width="20" height="28" rx="2" fill="#c8b8e8" stroke="#9080c0" stroke-width="1"/>
+    <text x="25" y="324" font-size="7" fill="#444">Stack 10×128</text>
+
+    <text x="55" y="350" text-anchor="middle" font-size="8" fill="#999">21,184 floats</text>
+  </g>
+
+  <!-- Arrow to per-zone encoders -->
+  <line x1="120" y1="255" x2="150" y2="255" stroke="#666" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Per-Zone CardSetEncoders -->
+  <g transform="translate(155, 70)">
+    <rect x="0" y="-12" width="130" height="376" rx="5" fill="#eef3fc" stroke="#3b7dd8" stroke-width="1.5"/>
+    <text x="65" y="4" text-anchor="middle" font-size="9" font-weight="bold" fill="#2c5ea0">6× CardSetEncoder</text>
+
+    <!-- Linear -->
+    <rect x="10" y="14" width="110" height="22" rx="3" fill="#d4e3f7" stroke="#7aadeb" stroke-width="1"/>
+    <text x="65" y="29" text-anchor="middle" font-size="8" fill="#333">Linear 128→128</text>
+
+    <!-- Self-attention -->
+    <rect x="10" y="42" width="110" height="36" rx="3" fill="#c0d6f0" stroke="#5a90d0" stroke-width="1"/>
+    <text x="65" y="57" text-anchor="middle" font-size="8" fill="#333">Self-Attention ×2</text>
+    <text x="65" y="69" text-anchor="middle" font-size="7" fill="#666">4 heads, d=128, ff=512</text>
+
+    <!-- Pool -->
+    <rect x="10" y="84" width="110" height="22" rx="3" fill="#d4e3f7" stroke="#7aadeb" stroke-width="1"/>
+    <text x="65" y="99" text-anchor="middle" font-size="8" fill="#333">Masked Mean Pool</text>
+
+    <!-- Output blocks showing 7 zone embeddings -->
+    <text x="65" y="124" text-anchor="middle" font-size="8" fill="#2c5ea0">7 zone embeddings:</text>
+
+    <rect x="15" y="132" width="100" height="10" rx="2" fill="#b8c9e0" stroke="#7a9ec4" stroke-width="0.8"/>
+    <text x="65" y="140" text-anchor="middle" font-size="6" fill="#333">global → 128</text>
+
+    <rect x="15" y="146" width="100" height="10" rx="2" fill="#a8d5a2" stroke="#6db06a" stroke-width="0.8"/>
+    <text x="65" y="154" text-anchor="middle" font-size="6" fill="#333">my_board → 128</text>
+
+    <rect x="15" y="160" width="100" height="10" rx="2" fill="#f5a8a8" stroke="#d07070" stroke-width="0.8"/>
+    <text x="65" y="168" text-anchor="middle" font-size="6" fill="#333">opp_board → 128</text>
+
+    <rect x="15" y="174" width="100" height="10" rx="2" fill="#f5e6a8" stroke="#d0c070" stroke-width="0.8"/>
+    <text x="65" y="182" text-anchor="middle" font-size="6" fill="#333">hand → 128</text>
+
+    <rect x="15" y="188" width="100" height="10" rx="2" fill="#d4d4d4" stroke="#aaa" stroke-width="0.8"/>
+    <text x="65" y="196" text-anchor="middle" font-size="6" fill="#333">my_gy → 128</text>
+
+    <rect x="15" y="202" width="100" height="10" rx="2" fill="#d4d4d4" stroke="#aaa" stroke-width="0.8"/>
+    <text x="65" y="210" text-anchor="middle" font-size="6" fill="#333">opp_gy → 128</text>
+
+    <rect x="15" y="216" width="100" height="10" rx="2" fill="#c8b8e8" stroke="#9080c0" stroke-width="0.8"/>
+    <text x="65" y="224" text-anchor="middle" font-size="6" fill="#333">stack → 128</text>
+
+    <!-- Cross-zone attention -->
+    <rect x="10" y="236" width="110" height="36" rx="3" fill="#a8c8f0" stroke="#4880c0" stroke-width="1"/>
+    <text x="65" y="251" text-anchor="middle" font-size="8" fill="#333">Cross-Zone Attn ×1</text>
+    <text x="65" y="263" text-anchor="middle" font-size="7" fill="#666">4 heads, (B,7,128)</text>
+
+    <!-- Concat + project -->
+    <rect x="10" y="278" width="110" height="22" rx="3" fill="#d4e3f7" stroke="#7aadeb" stroke-width="1"/>
+    <text x="65" y="293" text-anchor="middle" font-size="8" fill="#333">Concat 7×128 = 896</text>
+
+    <rect x="10" y="306" width="110" height="36" rx="3" fill="#90b8e8" stroke="#4070b0" stroke-width="1"/>
+    <text x="65" y="321" text-anchor="middle" font-size="8" fill="#fff">MLP 896→512→512</text>
+    <text x="65" y="333" text-anchor="middle" font-size="7" fill="#ddd">GELU, LayerNorm</text>
+
+    <text x="65" y="358" text-anchor="middle" font-size="8" font-weight="bold" fill="#2c5ea0">3.4M params</text>
+  </g>
+
+  <!-- Arrow to state embedding -->
+  <line x1="290" y1="380" x2="320" y2="380" stroke="#3b7dd8" stroke-width="2" marker-end="url(#arr-b)"/>
+
+  <!-- State Embedding (the central hub) -->
+  <g transform="translate(325, 355)">
+    <rect x="0" y="0" width="80" height="50" rx="8" fill="#3b7dd8" stroke="#2050a0" stroke-width="2"/>
+    <text x="40" y="22" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">512-dim</text>
+    <text x="40" y="36" text-anchor="middle" font-size="8" fill="#cde">State Emb.</text>
+  </g>
+
+  <!-- ========== FAN-OUT TO HEADS ========== -->
+  <!-- Main horizontal line from hub -->
+  <line x1="405" y1="380" x2="440" y2="380" stroke="#3b7dd8" stroke-width="2"/>
+
+  <!-- Vertical distribution line -->
+  <line x1="440" y1="95" x2="440" y2="800" stroke="#bbb" stroke-width="1.2"/>
+
+  <!-- ========== HEAD 1: VALUE NETWORK (top) ========== -->
+  <g transform="translate(460, 60)">
+    <!-- Horizontal connector -->
+    <line x1="-20" y1="35" x2="0" y2="35" stroke="#8b5cf6" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="35" r="3" fill="#8b5cf6"/>
+
+    <rect x="0" y="0" width="340" height="70" rx="5" fill="#f8f5ff" stroke="#8b5cf6" stroke-width="1.5"/>
+    <text x="10" y="18" font-size="10" font-weight="bold" fill="#6d3fc7">Value Network (Critic)</text>
+    <text x="290" y="18" font-size="8" fill="#999">198K params</text>
+
+    <!-- Pipeline blocks -->
+    <rect x="10" y="26" width="60" height="34" rx="3" fill="#ede5ff" stroke="#b09ef0" stroke-width="1"/>
+    <text x="40" y="40" text-anchor="middle" font-size="7" fill="#444">Linear</text>
+    <text x="40" y="50" text-anchor="middle" font-size="7" fill="#444">512→256</text>
+
+    <line x1="72" y1="43" x2="82" y2="43" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="84" y="26" width="50" height="34" rx="3" fill="#ede5ff" stroke="#b09ef0" stroke-width="1"/>
+    <text x="109" y="40" text-anchor="middle" font-size="7" fill="#444">GELU</text>
+    <text x="109" y="50" text-anchor="middle" font-size="7" fill="#444">LN</text>
+
+    <line x1="136" y1="43" x2="146" y2="43" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="148" y="26" width="60" height="34" rx="3" fill="#ede5ff" stroke="#b09ef0" stroke-width="1"/>
+    <text x="178" y="40" text-anchor="middle" font-size="7" fill="#444">Linear</text>
+    <text x="178" y="50" text-anchor="middle" font-size="7" fill="#444">256→256</text>
+
+    <line x1="210" y1="43" x2="220" y2="43" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="222" y="26" width="50" height="34" rx="3" fill="#ede5ff" stroke="#b09ef0" stroke-width="1"/>
+    <text x="247" y="40" text-anchor="middle" font-size="7" fill="#444">Linear</text>
+    <text x="247" y="50" text-anchor="middle" font-size="7" fill="#444">256→1</text>
+
+    <line x1="274" y1="43" x2="284" y2="43" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="286" y="26" width="40" height="34" rx="3" fill="#8b5cf6" stroke="#6d3fc7" stroke-width="1"/>
+    <text x="306" y="40" text-anchor="middle" font-size="7" fill="#fff">Tanh</text>
+    <text x="306" y="50" text-anchor="middle" font-size="7" fill="#ddd">[-1,1]</text>
+
+    <text x="340" y="40" font-size="7" fill="#6d3fc7">→ win prob estimate</text>
+    <text x="340" y="52" font-size="7" fill="#999">PPO advantage baseline</text>
+  </g>
+
+  <!-- ========== HEAD 2: PRIORITY ========== -->
+  <g transform="translate(460, 155)">
+    <line x1="-20" y1="40" x2="0" y2="40" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="40" r="3" fill="#f59e0b"/>
+
+    <rect x="0" y="0" width="500" height="80" rx="5" fill="#fffbf0" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="10" y="18" font-size="10" font-weight="bold" fill="#b45309">Priority Head</text>
+    <text x="430" y="18" font-size="8" fill="#999">543K params</text>
+
+    <!-- Action input (from side) -->
+    <rect x="10" y="26" width="55" height="44" rx="3" fill="#fff4db" stroke="#fbbf24" stroke-width="1"/>
+    <text x="37" y="40" text-anchor="middle" font-size="7" fill="#444">Actions</text>
+    <text x="37" y="50" text-anchor="middle" font-size="7" fill="#888">N×64</text>
+    <text x="37" y="62" text-anchor="middle" font-size="6" fill="#aaa">+ pass</text>
+
+    <line x1="67" y1="48" x2="77" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="79" y="26" width="65" height="44" rx="3" fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+    <text x="111" y="40" text-anchor="middle" font-size="7" fill="#444">Proj 64→256</text>
+    <text x="111" y="50" text-anchor="middle" font-size="7" fill="#444">Proj 512→256</text>
+
+    <line x1="146" y1="48" x2="156" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="158" y="26" width="100" height="44" rx="3" fill="#fde68a" stroke="#f59e0b" stroke-width="1"/>
+    <text x="208" y="42" text-anchor="middle" font-size="8" fill="#444">Cross-Attention</text>
+    <text x="208" y="54" text-anchor="middle" font-size="7" fill="#666">actions→state, 4 heads</text>
+
+    <line x1="260" y1="48" x2="270" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="272" y="26" width="80" height="44" rx="3" fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+    <text x="312" y="42" text-anchor="middle" font-size="7" fill="#444">Score MLP</text>
+    <text x="312" y="54" text-anchor="middle" font-size="7" fill="#666">512→256→1</text>
+
+    <line x1="354" y1="48" x2="364" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="366" y="26" width="55" height="44" rx="3" fill="#f59e0b" stroke="#b45309" stroke-width="1"/>
+    <text x="393" y="42" text-anchor="middle" font-size="7" fill="#fff">Softmax</text>
+    <text x="393" y="54" text-anchor="middle" font-size="7" fill="#fef3c7">N+1 probs</text>
+
+    <!-- Label: which spell or pass -->
+    <text x="440" y="55" font-size="7" fill="#b45309">→ spell choice</text>
+    <text x="440" y="66" font-size="7" fill="#b45309">   or pass</text>
+  </g>
+
+  <!-- ========== HEAD 3: ATTACK ========== -->
+  <g transform="translate(460, 260)">
+    <line x1="-20" y1="40" x2="0" y2="40" stroke="#10b981" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="40" r="3" fill="#10b981"/>
+
+    <rect x="0" y="0" width="500" height="80" rx="5" fill="#f0fdf4" stroke="#10b981" stroke-width="1.5"/>
+    <text x="10" y="18" font-size="10" font-weight="bold" fill="#047857">Attack Head</text>
+    <text x="430" y="18" font-size="8" fill="#999">1.9M params</text>
+
+    <rect x="10" y="26" width="55" height="44" rx="3" fill="#d1fae5" stroke="#6ee7b7" stroke-width="1"/>
+    <text x="37" y="42" text-anchor="middle" font-size="7" fill="#444">Creatures</text>
+    <text x="37" y="54" text-anchor="middle" font-size="7" fill="#888">N×128</text>
+
+    <line x1="67" y1="48" x2="77" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="79" y="26" width="65" height="44" rx="3" fill="#d1fae5" stroke="#10b981" stroke-width="1"/>
+    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj 128→256</text>
+    <text x="111" y="54" text-anchor="middle" font-size="7" fill="#444">Proj 512→256</text>
+
+    <line x1="146" y1="48" x2="156" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="158" y="26" width="100" height="44" rx="3" fill="#a7f3d0" stroke="#10b981" stroke-width="1"/>
+    <text x="208" y="42" text-anchor="middle" font-size="8" fill="#444">Self-Attention ×2</text>
+    <text x="208" y="54" text-anchor="middle" font-size="7" fill="#666">4 heads, d=256, ff=1024</text>
+
+    <line x1="260" y1="48" x2="270" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="272" y="26" width="80" height="44" rx="3" fill="#d1fae5" stroke="#10b981" stroke-width="1"/>
+    <text x="312" y="42" text-anchor="middle" font-size="7" fill="#444">Classifier MLP</text>
+    <text x="312" y="54" text-anchor="middle" font-size="7" fill="#666">512→256→1</text>
+
+    <line x1="354" y1="48" x2="364" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="366" y="26" width="55" height="44" rx="3" fill="#10b981" stroke="#047857" stroke-width="1"/>
+    <text x="393" y="42" text-anchor="middle" font-size="7" fill="#fff">Sigmoid</text>
+    <text x="393" y="54" text-anchor="middle" font-size="7" fill="#d1fae5">per-creature</text>
+
+    <text x="440" y="55" font-size="7" fill="#047857">→ attack/hold</text>
+    <text x="440" y="66" font-size="7" fill="#047857">   per creature</text>
+  </g>
+
+  <!-- ========== HEAD 4: BLOCK ========== -->
+  <g transform="translate(460, 365)">
+    <line x1="-20" y1="40" x2="0" y2="40" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="40" r="3" fill="#3b82f6"/>
+
+    <rect x="0" y="0" width="500" height="80" rx="5" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="10" y="18" font-size="10" font-weight="bold" fill="#1d4ed8">Block Head</text>
+    <text x="430" y="18" font-size="8" fill="#999">658K params</text>
+
+    <rect x="10" y="26" width="55" height="44" rx="3" fill="#dbeafe" stroke="#93c5fd" stroke-width="1"/>
+    <text x="37" y="38" text-anchor="middle" font-size="7" fill="#444">Blockers</text>
+    <text x="37" y="48" text-anchor="middle" font-size="7" fill="#888">B×128</text>
+    <text x="37" y="58" text-anchor="middle" font-size="7" fill="#888">Atk A×128</text>
+
+    <line x1="67" y1="48" x2="77" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="79" y="26" width="65" height="44" rx="3" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj B→256</text>
+    <text x="111" y="54" text-anchor="middle" font-size="7" fill="#444">Proj A→256</text>
+
+    <line x1="146" y1="48" x2="156" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="158" y="26" width="100" height="44" rx="3" fill="#bfdbfe" stroke="#3b82f6" stroke-width="1"/>
+    <text x="208" y="42" text-anchor="middle" font-size="8" fill="#444">Cross-Attention</text>
+    <text x="208" y="54" text-anchor="middle" font-size="7" fill="#666">blockers→attackers, 4h</text>
+
+    <line x1="260" y1="48" x2="270" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="272" y="26" width="80" height="44" rx="3" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+    <text x="312" y="42" text-anchor="middle" font-size="7" fill="#444">Pairwise Score</text>
+    <text x="312" y="54" text-anchor="middle" font-size="7" fill="#666">768→256→1</text>
+
+    <line x1="354" y1="48" x2="364" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="366" y="26" width="55" height="44" rx="3" fill="#3b82f6" stroke="#1d4ed8" stroke-width="1"/>
+    <text x="393" y="42" text-anchor="middle" font-size="7" fill="#fff">Softmax</text>
+    <text x="393" y="54" text-anchor="middle" font-size="7" fill="#dbeafe">B×(A+1)</text>
+
+    <text x="440" y="55" font-size="7" fill="#1d4ed8">→ blocker→attacker</text>
+    <text x="440" y="66" font-size="7" fill="#1d4ed8">   assignment</text>
+  </g>
+
+  <!-- ========== HEAD 5: CARD SELECT (not yet trained) ========== -->
+  <g transform="translate(460, 470)" opacity="0.35">
+    <line x1="-20" y1="35" x2="0" y2="35" stroke="#0ea5e9" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="35" r="3" fill="#0ea5e9"/>
+
+    <rect x="0" y="0" width="500" height="70" rx="5" fill="#f0f9ff" stroke="#0ea5e9" stroke-width="1.5"/>
+    <text x="10" y="16" font-size="10" font-weight="bold" fill="#0369a1">Card Select Head</text>
+    <text x="350" y="16" font-size="8" fill="#c00">NOT YET TRAINED</text>
+    <text x="430" y="16" font-size="8" fill="#999">1.5M params</text>
+
+    <rect x="10" y="24" width="55" height="36" rx="3" fill="#e0f2fe" stroke="#7dd3fc" stroke-width="1"/>
+    <text x="37" y="38" text-anchor="middle" font-size="7" fill="#444">Cards</text>
+    <text x="37" y="50" text-anchor="middle" font-size="7" fill="#888">N×128</text>
+
+    <line x1="67" y1="42" x2="77" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="79" y="24" width="65" height="36" rx="3" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="1"/>
+    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj + Self-Attn ×1</text>
+
+    <line x1="146" y1="42" x2="156" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="158" y="24" width="80" height="36" rx="3" fill="#e0f2fe" stroke="#0ea5e9" stroke-width="1"/>
+    <text x="198" y="38" text-anchor="middle" font-size="7" fill="#444">Score 512→256→1</text>
+    <text x="198" y="50" text-anchor="middle" font-size="7" fill="#666">+ GRU multi-select</text>
+
+    <line x1="240" y1="42" x2="250" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="252" y="24" width="55" height="36" rx="3" fill="#0ea5e9" stroke="#0369a1" stroke-width="1"/>
+    <text x="279" y="42" text-anchor="middle" font-size="7" fill="#fff">Per-card prob</text>
+
+    <text x="320" y="48" font-size="7" fill="#0369a1">→ discard, sacrifice, scry</text>
+  </g>
+
+  <!-- ========== HEAD 6: TARGET (not yet trained) ========== -->
+  <g transform="translate(460, 560)" opacity="0.35">
+    <line x1="-20" y1="35" x2="0" y2="35" stroke="#a855f7" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="35" r="3" fill="#a855f7"/>
+
+    <rect x="0" y="0" width="500" height="70" rx="5" fill="#faf5ff" stroke="#a855f7" stroke-width="1.5"/>
+    <text x="10" y="16" font-size="10" font-weight="bold" fill="#7e22ce">Target Head</text>
+    <text x="350" y="16" font-size="8" fill="#c00">NOT YET TRAINED</text>
+    <text x="430" y="16" font-size="8" fill="#999">674K params</text>
+
+    <rect x="10" y="24" width="55" height="36" rx="3" fill="#f3e8ff" stroke="#d8b4fe" stroke-width="1"/>
+    <text x="37" y="38" text-anchor="middle" font-size="7" fill="#444">Targets</text>
+    <text x="37" y="50" text-anchor="middle" font-size="7" fill="#888">N×64</text>
+
+    <line x1="67" y1="42" x2="77" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="79" y="24" width="65" height="36" rx="3" fill="#f3e8ff" stroke="#a855f7" stroke-width="1"/>
+    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj + Pointer Attn</text>
+
+    <line x1="146" y1="42" x2="156" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="158" y="24" width="80" height="36" rx="3" fill="#f3e8ff" stroke="#a855f7" stroke-width="1"/>
+    <text x="198" y="38" text-anchor="middle" font-size="7" fill="#444">Scaled Dot-Product</text>
+    <text x="198" y="50" text-anchor="middle" font-size="7" fill="#666">+ GRU multi-target</text>
+
+    <line x1="240" y1="42" x2="250" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="252" y="24" width="55" height="36" rx="3" fill="#a855f7" stroke="#7e22ce" stroke-width="1"/>
+    <text x="279" y="42" text-anchor="middle" font-size="7" fill="#fff">Target prob</text>
+
+    <text x="320" y="48" font-size="7" fill="#7e22ce">→ spell target selection</text>
+  </g>
+
+  <!-- ========== HEAD 7: MULLIGAN (not yet trained) ========== -->
+  <g transform="translate(460, 650)" opacity="0.35">
+    <line x1="-20" y1="35" x2="0" y2="35" stroke="#ec4899" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="35" r="3" fill="#ec4899"/>
+
+    <rect x="0" y="0" width="340" height="70" rx="5" fill="#fdf2f8" stroke="#ec4899" stroke-width="1.5"/>
+    <text x="10" y="16" font-size="10" font-weight="bold" fill="#be185d">Mulligan Head</text>
+    <text x="195" y="16" font-size="8" fill="#c00">NOT YET TRAINED</text>
+    <text x="280" y="16" font-size="8" fill="#999">2.0M params</text>
+
+    <rect x="10" y="24" width="45" height="36" rx="3" fill="#fce7f3" stroke="#f9a8d4" stroke-width="1"/>
+    <text x="32" y="38" text-anchor="middle" font-size="7" fill="#444">Hand</text>
+    <text x="32" y="50" text-anchor="middle" font-size="7" fill="#888">7×128</text>
+
+    <line x1="57" y1="42" x2="67" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="69" y="24" width="80" height="36" rx="3" fill="#fce7f3" stroke="#ec4899" stroke-width="1"/>
+    <text x="109" y="38" text-anchor="middle" font-size="7" fill="#444">Self-Attn ×2 (4h)</text>
+    <text x="109" y="50" text-anchor="middle" font-size="7" fill="#666">d=256, ff=1024</text>
+
+    <line x1="151" y1="42" x2="161" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="163" y="24" width="65" height="36" rx="3" fill="#fce7f3" stroke="#ec4899" stroke-width="1"/>
+    <text x="195" y="38" text-anchor="middle" font-size="7" fill="#444">Keep/Mull MLP</text>
+    <text x="195" y="50" text-anchor="middle" font-size="7" fill="#666">+ bottom scores</text>
+
+    <line x1="230" y1="42" x2="240" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="242" y="24" width="82" height="36" rx="3" fill="#ec4899" stroke="#be185d" stroke-width="1"/>
+    <text x="283" y="38" text-anchor="middle" font-size="7" fill="#fff">Keep logit +</text>
+    <text x="283" y="50" text-anchor="middle" font-size="7" fill="#fce7f3">per-card bottom</text>
+  </g>
+
+  <!-- ========== HEAD 8: BINARY (not yet trained) ========== -->
+  <g transform="translate(460, 740)" opacity="0.35">
+    <line x1="-20" y1="30" x2="0" y2="30" stroke="#f97316" stroke-width="1.5" marker-end="url(#arr)"/>
+    <circle cx="-20" cy="30" r="3" fill="#f97316"/>
+
+    <rect x="0" y="0" width="280" height="60" rx="5" fill="#fff7ed" stroke="#f97316" stroke-width="1.5"/>
+    <text x="10" y="16" font-size="10" font-weight="bold" fill="#c2410c">Binary Head</text>
+    <text x="145" y="16" font-size="8" fill="#c00">NOT YET TRAINED</text>
+    <text x="220" y="16" font-size="8" fill="#999">198K params</text>
+
+    <rect x="10" y="24" width="70" height="28" rx="3" fill="#fed7aa" stroke="#f97316" stroke-width="1"/>
+    <text x="45" y="42" text-anchor="middle" font-size="7" fill="#444">MLP 512→256→256</text>
+
+    <line x1="82" y1="38" x2="92" y2="38" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="94" y="24" width="50" height="28" rx="3" fill="#fed7aa" stroke="#f97316" stroke-width="1"/>
+    <text x="119" y="42" text-anchor="middle" font-size="7" fill="#444">Linear 256→1</text>
+
+    <line x1="146" y1="38" x2="156" y2="38" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
+
+    <rect x="158" y="24" width="50" height="28" rx="3" fill="#f97316" stroke="#c2410c" stroke-width="1"/>
+    <text x="183" y="42" text-anchor="middle" font-size="7" fill="#fff">Yes/No</text>
+
+    <text x="220" y="44" font-size="7" fill="#c2410c">→ confirm triggers</text>
+  </g>
+
+  <!-- ========== LOSS LABELS (far right) ========== -->
+  <g transform="translate(990, 65)" font-size="8">
+    <text x="0" y="0" font-size="10" font-weight="bold" fill="#555">Loss Functions</text>
+
+    <rect x="0" y="10" width="12" height="12" rx="2" fill="#8b5cf6"/>
+    <text x="18" y="20" fill="#444">Value: MSE(pred, ±1)</text>
+
+    <rect x="0" y="28" width="12" height="12" rx="2" fill="#f59e0b"/>
+    <text x="18" y="38" fill="#444">Priority: CrossEntropy (softmax)</text>
+
+    <rect x="0" y="46" width="12" height="12" rx="2" fill="#10b981"/>
+    <text x="18" y="56" fill="#444">Attack: BCE (per-creature sigmoid)</text>
+
+    <rect x="0" y="64" width="12" height="12" rx="2" fill="#3b82f6"/>
+    <text x="18" y="74" fill="#444">Block: CE per-blocker (assignment)</text>
+
+    <rect x="0" y="82" width="12" height="12" rx="2" fill="#0ea5e9"/>
+    <text x="18" y="92" fill="#444">Card Select: Score + GRU</text>
+
+    <rect x="0" y="100" width="12" height="12" rx="2" fill="#a855f7"/>
+    <text x="18" y="110" fill="#444">Target: Pointer attention</text>
+
+    <rect x="0" y="118" width="12" height="12" rx="2" fill="#ec4899"/>
+    <text x="18" y="128" fill="#444">Mulligan: BCE + bottom scores</text>
+
+    <rect x="0" y="136" width="12" height="12" rx="2" fill="#f97316"/>
+    <text x="18" y="146" fill="#444">Binary: BCE logit</text>
+  </g>
+
+  <!-- Annotation: frozen encoder during head training -->
+  <g transform="translate(155, 460)">
+    <rect x="0" y="0" width="130" height="30" rx="4" fill="#fff8dc" stroke="#daa520" stroke-width="1" stroke-dasharray="3,2"/>
+    <text x="65" y="13" text-anchor="middle" font-size="7" fill="#8b6914">Frozen during head</text>
+    <text x="65" y="24" text-anchor="middle" font-size="7" fill="#8b6914">training (Phase 2)</text>
+  </g>
+
+  <!-- Bottom credits -->
+  <text x="700" y="856" text-anchor="middle" font-size="9" fill="#888">Trained heads shown at full opacity. Greyed heads are architecturally complete but not yet trained — decisions fall through to heuristic AI.</text>
+  <text x="700" y="872" text-anchor="middle" font-size="9" fill="#888">Value network provides advantage baseline for PPO: advantage = game_outcome - value_estimate. All heads share the 512-dim state embedding.</text>
+  <text x="700" y="888" text-anchor="middle" font-size="9" fill="#bbb">RTX 3080 (10GB) | AMP fp16 | 42MB model | ~51MB VRAM inference | 1,000 games training data | ~153K decision records</text>
+</svg>

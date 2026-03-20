@@ -1657,8 +1657,10 @@ public class AiController {
         // in case of infinite loop reset below would not be reached
         timeoutReached = false;
 
+        // Use field so partial results survive timeout
+        lastEvaluatedSpellAbilities = Lists.newArrayList();
         FutureTask<SpellAbility> future = new FutureTask<>(() -> {
-            List<SpellAbility> playable = Lists.newArrayList();
+            List<SpellAbility> playable = lastEvaluatedSpellAbilities;
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
             for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(all, player)) {
@@ -1738,8 +1740,6 @@ public class AiController {
                 playable.add(sa);
             }
 
-            // Cache all validated playable spells for RL recording/inference
-            lastEvaluatedSpellAbilities = playable;
             return playable.isEmpty() ? null : playable.get(0);
         });
 
