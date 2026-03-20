@@ -235,18 +235,17 @@ Games are run headlessly using the Forge engine's `SimulateRLTraining` runner, w
 - Runs the game with a configurable timeout (180 seconds)
 - Captures decision data via the Guava EventBus subscriber pattern
 
-The `GameStateRecorder` subscribes to key game events:
-- `GameEventAttackersDeclared`: captures which creatures attacked, with per-creature 128-dim feature vectors and selection indices
-- `GameEventBlockersDeclared`: captures blocking assignments with creature features
-- `GameEventSpellResolved`: captures spell resolution with game state snapshot
-- `GameEventLandPlayed`: captures land drop decisions
-- `GameEventTurnPhase`: captures board state at main phase transitions
+The `PlayerControllerRL` class extends `PlayerControllerAi` and overrides key decision methods to capture training data:
 
-Each game produces two trajectory files (one per player perspective), containing 10-40 decision records depending on game length. Each record includes the full 21,184-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and the eventual game outcome.
+- **`declareAttackers`**: Captures pre-decision creature features (128-dim per creature), delegates to heuristic, reads back which creatures were selected as attackers from the combat object.
+- **`declareBlockers`**: Same pattern — pre-decision capture, heuristic execution, post-decision readback of blocking assignments.
+- **`chooseSpellAbilityToPlay`**: Leverages a modified `AiController.chooseSpellAbilityToPlayFromList` that evaluates ALL candidates through the engine's full `canPlayAndPayFor()` validation (timing, cost, targeting, AI logic) rather than short-circuiting at the first playable spell. The mechanically-legal candidate list (spells passing timing + cost checks) is cached separately from the heuristic-approved list (spells the AI considers worth playing). This gives the RL model visibility into options the heuristic would reject — enabling it to discover unconventional plays.
 
-Data is collected in parallel across 16 threads, achieving 1.6 games/second on a 16-core machine. A batch of 1,000 games produces approximately 2,000 trajectory files with 28,828 decision records totaling 2.4GB.
+Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 21,184-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and the eventual game outcome.
 
-We note a critical implementation constraint discovered during development: the Forge game engine performs class identity checks on the `LobbyPlayerAi` class that prevent subclassing, and modifications to the `PlayerControllerAi` class break the fat-jar class resolution at runtime. All recording is therefore implemented exclusively through the event bus pattern, without modifying any core game engine classes.
+Data is collected in parallel across 16 threads, achieving 1.3 games/second on a 16-core machine. A batch of 1,000 games produces approximately 2,000 trajectory files with ~153,000 decision records.
+
+We note a critical implementation constraint discovered during development: the Forge game engine performs class identity checks on the `LobbyPlayerAi` class that prevent subclassing, and modifications to the `PlayerControllerAi` class break the fat-jar class resolution at runtime. Recording is implemented via `PlayerControllerRL` (which extends `PlayerControllerAi`, not `LobbyPlayerAi`) and a minimal caching addition to `AiController` — the only core engine modification is caching the validated candidate list during spell evaluation.
 
 #### 3.1.2 Value Network Training
 
@@ -268,7 +267,7 @@ After the value network converges, we freeze the encoder weights and train each 
 
 **Block Head.** Same architecture and loss as the attack head, trained on 6,546 blocking decisions.
 
-**Priority Head.** Cross-entropy loss over available actions, trained on spell-casting decisions. (Requires extending the event recording to capture the full set of available spells at each priority window — currently captured as resolved spells only.)
+**Priority Head.** Cross-entropy loss over available actions (softmax single-select, distinct from combat's binary BCE). Trained on 140,603 priority decisions captured with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority 88.8% of the time even with playable spells available, providing rich timing data — the model learns both *what* to play and *when* to wait.
 
 ### 3.2 Phase 2: Reinforcement Learning via Self-Play
 
@@ -391,16 +390,18 @@ Data collection at 1.6 games/second produces sufficient training data in minutes
 
 ### 5.1 Data Collection
 
-We collected 1,000 games between four constructed decks (Red Aggro, Green Stompy, White Weenie, Blue Tempo) using 16-thread parallel execution in 627.8 seconds (10.5 minutes). This produced:
+We collected 1,000 games between four constructed decks (Red Aggro, Green Stompy, White Weenie, Blue Tempo) using 16-thread parallel execution in 776 seconds (13 minutes). This produced:
 
 | Metric | Value |
 |--------|-------|
-| Trajectory files | 2,000 (1,002 wins, 998 losses) |
-| Total decision records | 28,828 |
-| Attack decisions (with features) | 13,918 |
-| Block decisions (with features) | 6,546 |
-| Spell/land/phase decisions | 8,364 |
-| Data size | 2.4 GB |
+| Trajectory files | 1,998 (475 P1 wins, 525 P2 wins) |
+| Total decision records | ~153,000 |
+| Attack decisions | 9,750 |
+| Block decisions | 2,830 |
+| Priority decisions | 140,603 |
+| Priority: play a spell | 15,679 (11.2%) |
+| Priority: pass with options | 124,924 (88.8%) |
+| Candidate distribution | 1-7 options per decision |
 
 ### 5.2 Value Network Performance
 
@@ -418,9 +419,15 @@ Qualitative evaluation confirms the model has learned meaningful board evaluatio
 
 The high accuracy on this task suggests the current model capacity (11M parameters) is sufficient for the four-deck environment. We anticipate accuracy will decrease as the card pool expands, necessitating the progressive scaling described in Section 3.3.
 
-### 5.3 Decision Head Training (In Progress)
+### 5.3 Combat Decision Head Training
 
-The attack head training script has been developed and validated. Training on 13,918 attack decisions with per-creature feature vectors and the heuristic AI's selection labels is in progress.
+The attack head was trained on 9,750 attack decisions and the block head on 2,830 blocking decisions, both using binary cross-entropy loss per creature. PPO self-play training with these heads achieved a 53% win rate vs the heuristic AI baseline.
+
+### 5.4 Priority Decision Head Training (In Progress)
+
+The priority head is being trained on 140,603 priority decisions using cross-entropy loss (softmax over candidate spells + pass). This represents a fundamentally different decision type from combat — single-select with variable candidate count and a significant class imbalance toward passing. The training pipeline processes priority first, followed by combat heads, all sharing the frozen encoder weights.
+
+The priority data reveals that the heuristic AI frequently passes even with mechanically-legal spells available (88.8% pass rate). This creates a rich signal for the RL model to learn timing — when the heuristic's pass was correct (holding mana for a potential response) versus suboptimal (missing a tempo-positive play window).
 
 ---
 
@@ -442,7 +449,7 @@ Our approach aims to match and eventually exceed this performance through learne
 
 **Current scope.** Our preliminary results use only four simple constructed decks. Real MTG involves thousands of viable decks with complex synergies and interactions that our current training data does not cover.
 
-**Action granularity.** The event-based recording captures combat decisions with full action features but does not yet capture the full set of available spells at each priority window. This limits imitation learning for the priority head to observing what was played, not what could have been played.
+**Action granularity.** Priority decisions now capture the full mechanically-legal candidate set by caching validated spells during the engine's own `canPlayAndPayFor()` evaluation. However, the mechanical check (timing + cost) is broader than the AI's strategic evaluation — some candidates pass the mechanical check but would be strategically poor (e.g., bouncing your own creature). This means the RL model sees options the heuristic wouldn't consider, which is both an opportunity (discovering unconventional plays) and a risk (learning from noisy candidates).
 
 **Hidden information.** Our current feature encoding does not model uncertainty over the opponent's hidden hand. The model receives what a legal player would see (hand size, not contents), but has no explicit mechanism for probabilistic reasoning about hidden cards.
 
@@ -450,7 +457,7 @@ Our approach aims to match and eventually exceed this performance through learne
 
 ### 6.3 Future Work
 
-**Priority head with full action context.** Extending the event recording to capture all legal actions at each priority window, not just the chosen action. This requires either instrumenting the game's `SpellAbilityPicker` or running the AI's legal-move generator in the event listener.
+**Priority head refinement.** The priority candidate set currently uses the engine's mechanical validation (timing + cost). Future work could split this into a "strategically reasonable" tier (candidates passing AI heuristic checks) versus a "creative play" tier (mechanically legal but heuristic-rejected), allowing the model to explore unconventional lines while still grounding training in reasonable play.
 
 **Opponent modeling.** Adding a recurrent component that maintains a hidden state across the game, enabling the model to build beliefs about the opponent's hand based on observed play patterns.
 
