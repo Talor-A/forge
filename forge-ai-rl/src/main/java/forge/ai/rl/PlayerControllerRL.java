@@ -17,8 +17,10 @@ import java.util.List;
  * Extends PlayerControllerAi so ALL non-combat decisions use the proven
  * heuristic AI (ComputerUtil, AiController, etc.) without ClassCastException.
  *
- * Only declareAttackers and declareBlockers are overridden to use the RL model.
- * When the model server is unavailable, combat also falls back to heuristic.
+ * declareAttackers and declareBlockers are overridden to either:
+ * - Use the RL model (GRPC mode, server available)
+ * - Or delegate to heuristic AND record the decision with pre-decision
+ *   state for training data collection
  */
 public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
@@ -42,74 +44,102 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         return rl;
     }
 
-    // ===== COMBAT — RL model decisions =====
+    // ===== COMBAT — RL model or heuristic with recording =====
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
-        if (rl.getConfig().getMode() != RLModelMode.GRPC || !rl.isModelServerAvailable()) {
-            super.declareAttackers(attacker, combat);
-            return;
-        }
-
         GameEntity defender = attacker.getWeakestOpponent();
         if (defender == null) return;
 
+        // Build candidate list (creatures that can legally attack)
         CardCollection possibleAttackers = new CardCollection();
         for (Card c : attacker.getCreaturesInPlay()) {
             if (CombatUtil.canAttack(c, defender)) {
                 possibleAttackers.add(c);
             }
         }
-
         if (possibleAttackers.isEmpty()) return;
 
-        List<Integer> attackerIndices = rl.decideAttackers(possibleAttackers);
-
-        // Log attack decision for debugging
-        System.out.println("RL_ATTACK: possible=" + possibleAttackers.size()
-                + " attacking=" + attackerIndices.size()
-                + " indices=" + attackerIndices);
-
-        for (int idx : attackerIndices) {
-            if (idx >= 0 && idx < possibleAttackers.size()) {
-                Card c = possibleAttackers.get(idx);
-                if (CombatUtil.canAttack(c, defender)) {
-                    combat.addAttacker(c, defender);
+        if (rl.getConfig().getMode() == RLModelMode.GRPC && rl.isModelServerAvailable()) {
+            // RL model makes the decision
+            List<Integer> attackerIndices = rl.decideAttackers(possibleAttackers);
+            for (int idx : attackerIndices) {
+                if (idx >= 0 && idx < possibleAttackers.size()) {
+                    Card c = possibleAttackers.get(idx);
+                    if (CombatUtil.canAttack(c, defender)) {
+                        combat.addAttacker(c, defender);
+                    }
                 }
             }
+        } else {
+            // Heuristic decides — but we record the decision
+            // 1. Capture pre-decision state (creatures untapped, no combat)
+            rl.capturePreDecisionState(possibleAttackers);
+
+            // 2. Let heuristic make the decision (modifies combat object)
+            super.declareAttackers(attacker, combat);
+
+            // 3. Read back what the heuristic chose from the combat object
+            CardCollection actualAttackers = combat.getAttackers();
+            List<Integer> selectedIndices = new ArrayList<>();
+            for (int i = 0; i < possibleAttackers.size(); i++) {
+                if (actualAttackers.contains(possibleAttackers.get(i))) {
+                    selectedIndices.add(i);
+                }
+            }
+
+            // 4. Record: pre-decision state + heuristic's choice
+            rl.recordHeuristicAttack(possibleAttackers, selectedIndices);
         }
     }
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        if (rl.getConfig().getMode() != RLModelMode.GRPC || !rl.isModelServerAvailable()) {
-            super.declareBlockers(defender, combat);
-            return;
-        }
-
+        // Build candidate list (untapped creatures that can block)
         List<Card> possibleBlockers = new ArrayList<>();
         for (Card c : defender.getCreaturesInPlay()) {
             if (!c.isTapped() && !c.hasKeyword("CARDNAME can't block.")) {
                 possibleBlockers.add(c);
             }
         }
-
         CardCollection attackers = combat.getAttackers();
         if (possibleBlockers.isEmpty() || attackers.isEmpty()) return;
 
-        List<int[]> assignments = rl.decideBlockers(possibleBlockers, attackers);
-
-        for (int[] pair : assignments) {
-            int blockerIdx = pair[0];
-            int attackerIdx = pair[1];
-            if (blockerIdx >= 0 && blockerIdx < possibleBlockers.size()
-                    && attackerIdx >= 0 && attackerIdx < attackers.size()) {
-                Card blocker = possibleBlockers.get(blockerIdx);
-                Card attacker = attackers.get(attackerIdx);
-                if (CombatUtil.canBlock(attacker, blocker, combat)) {
-                    combat.addBlocker(attacker, blocker);
+        if (rl.getConfig().getMode() == RLModelMode.GRPC && rl.isModelServerAvailable()) {
+            // RL model makes the decision
+            List<int[]> assignments = rl.decideBlockers(possibleBlockers, attackers);
+            for (int[] pair : assignments) {
+                int blockerIdx = pair[0];
+                int attackerIdx = pair[1];
+                if (blockerIdx >= 0 && blockerIdx < possibleBlockers.size()
+                        && attackerIdx >= 0 && attackerIdx < attackers.size()) {
+                    Card blocker = possibleBlockers.get(blockerIdx);
+                    Card att = attackers.get(attackerIdx);
+                    if (CombatUtil.canBlock(att, blocker, combat)) {
+                        combat.addBlocker(att, blocker);
+                    }
                 }
             }
+        } else {
+            // Heuristic decides — record with pre-decision state
+            rl.capturePreDecisionState(possibleBlockers);
+
+            super.declareBlockers(defender, combat);
+
+            // Read back which creatures blocked
+            List<Integer> selectedIndices = new ArrayList<>();
+            for (int i = 0; i < possibleBlockers.size(); i++) {
+                Card blocker = possibleBlockers.get(i);
+                // Check if this creature is blocking anything
+                for (Card att : attackers) {
+                    if (combat.getBlockers(att).contains(blocker)) {
+                        selectedIndices.add(i);
+                        break;
+                    }
+                }
+            }
+
+            rl.recordHeuristicBlock(possibleBlockers, selectedIndices);
         }
     }
 }

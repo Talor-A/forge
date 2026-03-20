@@ -69,33 +69,48 @@ public class GameStateRecorder {
             if (!event.player().equals(playerView)) {
                 return;
             }
-            // Get all creatures that could attack
+            // Get all creatures and identify which attacked
             List<Card> allCreatures = new ArrayList<>(
                     player.getCreaturesInPlay());
-            List<float[]> feats = new ArrayList<>();
-            List<Integer> attackerIndices = new ArrayList<>();
-
-            // Build feature vectors and find which attacked
             Collection<CardView> attackerViews =
                     event.attackersMap().values();
+
+            List<Card> attackingCards = new ArrayList<>();
+            List<Integer> attackerIndices = new ArrayList<>();
             for (int i = 0; i < allCreatures.size(); i++) {
-                Card c = allCreatures.get(i);
-                float[] cf = CardFeatures.encode(c);
-                // Zero out tapped flag (index 17) for attack candidates.
-                // The event fires AFTER attackers are tapped, but the
-                // model needs PRE-attack features to learn the decision.
-                cf[17] = 0f;
-                feats.add(cf);
-                CardView cv = CardView.get(c);
+                CardView cv = CardView.get(allCreatures.get(i));
                 if (attackerViews.contains(cv)) {
                     attackerIndices.add(i);
+                    attackingCards.add(allCreatures.get(i));
                 }
             }
+
+            // Temporarily untap attacking creatures so the
+            // game state and card features reflect PRE-attack
+            // state. The event fires AFTER tapping, but the
+            // model must learn from pre-decision features.
+            for (Card c : attackingCards) {
+                c.setTapped(false);
+            }
+
+            // Now encode — game state and candidates will
+            // show creatures as untapped (matching inference)
+            List<float[]> feats = new ArrayList<>();
+            for (Card c : allCreatures) {
+                feats.add(CardFeatures.encode(c));
+            }
+
+            // Record with pre-attack state
             recordWithAction(
                     DecisionType.DECLARE_ATTACKERS,
                     feats, attackerIndices,
                     "attack_" + attackerIndices.size()
                         + "_of_" + allCreatures.size());
+
+            // Re-tap attacking creatures to restore game state
+            for (Card c : attackingCards) {
+                c.setTapped(true);
+            }
         } catch (Exception e) {
             org.tinylog.Logger.warn("GameStateRecorder error: {}", e.getMessage());
         }

@@ -328,6 +328,67 @@ public class RLController {
         return min + result.getSelectedIndex();
     }
 
+    // --- Pre-decision capture for heuristic recording ---
+
+    // Cached pre-decision state for recording heuristic choices
+    private GameStateFeatures cachedPreDecisionState;
+    private List<float[]> cachedCandidateFeatures;
+
+    /**
+     * Capture the game state and candidate features BEFORE the heuristic
+     * makes a combat decision. Called from PlayerControllerRL before
+     * delegating to super.declareAttackers/declareBlockers.
+     */
+    public void capturePreDecisionState(List<Card> candidates) {
+        cachedPreDecisionState = stateEncoder.encode(game, player);
+        cachedCandidateFeatures = new ArrayList<>();
+        for (Card c : candidates) {
+            cachedCandidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c));
+        }
+    }
+
+    /**
+     * Record the heuristic's attack decision paired with the pre-decision
+     * state captured earlier. This ensures training data has the same
+     * state representation as live inference.
+     */
+    public void recordHeuristicAttack(List<Card> possibleAttackers, List<Integer> selectedIndices) {
+        if (trajectoryRecorder == null || cachedPreDecisionState == null) return;
+
+        DecisionContext context = DecisionContext.multiSelect(
+                DecisionType.DECLARE_ATTACKERS, cachedPreDecisionState,
+                cachedCandidateFeatures,
+                0, possibleAttackers.size(),
+                "attack_" + selectedIndices.size() + "_of_" + possibleAttackers.size());
+
+        DecisionResult result = new DecisionResult(
+                selectedIndices, new float[0], 0f, true);
+
+        recordDecision(context, result);
+        cachedPreDecisionState = null;
+        cachedCandidateFeatures = null;
+    }
+
+    /**
+     * Record the heuristic's block decision paired with the pre-decision state.
+     */
+    public void recordHeuristicBlock(List<Card> possibleBlockers, List<Integer> selectedIndices) {
+        if (trajectoryRecorder == null || cachedPreDecisionState == null) return;
+
+        DecisionContext context = DecisionContext.multiSelect(
+                DecisionType.DECLARE_BLOCKERS, cachedPreDecisionState,
+                cachedCandidateFeatures,
+                0, possibleBlockers.size(),
+                "block_" + selectedIndices.size());
+
+        DecisionResult result = new DecisionResult(
+                selectedIndices, new float[0], 0f, true);
+
+        recordDecision(context, result);
+        cachedPreDecisionState = null;
+        cachedCandidateFeatures = null;
+    }
+
     // --- Internal helpers ---
 
     private DecisionResult requestDecision(DecisionContext context) {
