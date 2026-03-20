@@ -390,6 +390,66 @@ public class RLController {
     }
 
     /**
+     * Record the heuristic's block decision with full (blocker, attacker) pair assignment.
+     * Matches the format used at inference time in decideBlockers().
+     *
+     * Each candidate is a concatenated (blocker_features, attacker_features) = 256 dims.
+     * selectedIndices marks which (blocker, attacker) pairs are active assignments.
+     */
+    public void recordHeuristicBlockAssignment(
+            List<Card> possibleBlockers, List<Card> attackers,
+            forge.game.combat.Combat combat) {
+        if (trajectoryRecorder == null || cachedPreDecisionState == null) return;
+
+        // Build (blocker, attacker) pair candidates — same as decideBlockers()
+        List<float[]> candidates = new ArrayList<>();
+        List<int[]> pairIndices = new ArrayList<>();
+
+        for (int b = 0; b < possibleBlockers.size(); b++) {
+            for (int a = 0; a < attackers.size(); a++) {
+                float[] blockerFeats = forge.ai.rl.features.CardFeatures.encode(possibleBlockers.get(b));
+                float[] attackerFeats = forge.ai.rl.features.CardFeatures.encode(attackers.get(a));
+                float[] combined = new float[blockerFeats.length + attackerFeats.length];
+                System.arraycopy(blockerFeats, 0, combined, 0, blockerFeats.length);
+                System.arraycopy(attackerFeats, 0, combined, blockerFeats.length, attackerFeats.length);
+                candidates.add(combined);
+                pairIndices.add(new int[]{b, a});
+            }
+        }
+        // Add "no block" option (zero vector)
+        if (!candidates.isEmpty()) {
+            candidates.add(new float[candidates.get(0).length]);
+        }
+
+        // Find which pairs are active in the heuristic's assignment
+        List<Integer> selectedIndices = new ArrayList<>();
+        for (int pairIdx = 0; pairIdx < pairIndices.size(); pairIdx++) {
+            int b = pairIndices.get(pairIdx)[0];
+            int a = pairIndices.get(pairIdx)[1];
+            Card blocker = possibleBlockers.get(b);
+            Card attacker = attackers.get(a);
+            if (combat.getBlockers(attacker).contains(blocker)) {
+                selectedIndices.add(pairIdx);
+            }
+        }
+
+        DecisionContext context = DecisionContext.multiSelect(
+                DecisionType.DECLARE_BLOCKERS, cachedPreDecisionState,
+                candidates.isEmpty() ? cachedCandidateFeatures : candidates,
+                0, possibleBlockers.size(),
+                "block_assign_" + selectedIndices.size()
+                    + "_of_" + possibleBlockers.size()
+                    + "x" + attackers.size());
+
+        DecisionResult result = new DecisionResult(
+                selectedIndices, new float[0], 0f, true);
+
+        recordDecision(context, result);
+        cachedPreDecisionState = null;
+        cachedCandidateFeatures = null;
+    }
+
+    /**
      * Record the heuristic's priority decision (which spell to play, or pass).
      *
      * @param availableActions all playable spells/abilities (excluding lands/mana)

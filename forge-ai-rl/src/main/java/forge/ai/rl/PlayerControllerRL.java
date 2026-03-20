@@ -176,24 +176,15 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
         } else {
             // Heuristic decides — record with pre-decision state
+            // Capture state BEFORE the heuristic modifies combat
             rl.capturePreDecisionState(possibleBlockers);
 
             super.declareBlockers(defender, combat);
 
-            // Read back which creatures blocked
-            List<Integer> selectedIndices = new ArrayList<>();
-            for (int i = 0; i < possibleBlockers.size(); i++) {
-                Card blocker = possibleBlockers.get(i);
-                // Check if this creature is blocking anything
-                for (Card att : attackers) {
-                    if (combat.getBlockers(att).contains(blocker)) {
-                        selectedIndices.add(i);
-                        break;
-                    }
-                }
-            }
-
-            rl.recordHeuristicBlock(possibleBlockers, selectedIndices);
+            // Read back the full assignment: which blocker blocks which attacker
+            // Record as (blocker, attacker) pairs matching inference format
+            rl.recordHeuristicBlockAssignment(
+                    possibleBlockers, attackers, combat);
         }
     }
 }
