@@ -84,14 +84,18 @@ public class PlayerControllerRL extends PlayerController {
      * is unreachable in GRPC mode. This prevents the RL agent from making
      * broken decisions when the server is down.
      */
+    /**
+     * Check if we should use the heuristic fallback for this decision.
+     *
+     * Currently returns true for ALL non-combat decisions.
+     * Only declareAttackers and declareBlockers bypass this to use
+     * the RL model — all other decisions (priority, binary, target,
+     * mulligan, etc.) use heuristic because the RL model isn't
+     * trained for them and returns bad answers that prevent creatures
+     * from being played.
+     */
     private boolean shouldUseFallback() {
-        if (rl.getConfig().getMode() == RLModelMode.HEURISTIC_FALLBACK) {
-            return true;
-        }
-        if (rl.getConfig().getMode() == RLModelMode.GRPC && !rl.isModelServerAvailable()) {
-            return true;
-        }
-        return false;
+        return true;
     }
 
     // ===== PRIORITY / SPELL ABILITY DECISIONS =====
@@ -166,7 +170,8 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
-        if (shouldUseFallback()) {
+        // Attack decisions use RL model when available, heuristic otherwise
+        if (rl.getConfig().getMode() != RLModelMode.GRPC || !rl.isModelServerAvailable()) {
             fallbackAi.declareAttackers(attacker, combat);
             return;
         }
@@ -200,7 +205,8 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        if (shouldUseFallback()) {
+        // Block decisions use RL model when available, heuristic otherwise
+        if (rl.getConfig().getMode() != RLModelMode.GRPC || !rl.isModelServerAvailable()) {
             fallbackAi.declareBlockers(defender, combat);
             return;
         }
@@ -469,8 +475,16 @@ public class PlayerControllerRL extends PlayerController {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn) {
+        // Cannot delegate to fallbackAi.mulliganKeepHand() because
+        // ComputerUtil.scoreHand() casts player.getController() to
+        // PlayerControllerAi which fails for our PlayerControllerRL.
+        // Use simple heuristic: keep hands with 2-5 lands.
         if (shouldUseFallback()) {
-            return fallbackAi.mulliganKeepHand(firstPlayer, cardsToReturn);
+            int lands = 0;
+            for (forge.game.card.Card c : player.getCardsIn(ZoneType.Hand)) {
+                if (c.isLand()) lands++;
+            }
+            return lands >= 2 && lands <= 5;
         }
 
         CardCollectionView hand = player.getCardsIn(ZoneType.Hand);

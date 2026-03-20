@@ -477,6 +477,20 @@ public class SimulateRLTraining {
             entry.getValue().endGame(won);
         }
 
+        // Finalize RLController trajectory recorders (records RL model decisions)
+        for (Player p : lobbyToPlayer.values()) {
+            if (p.getController() instanceof PlayerControllerRL) {
+                RegisteredPlayer rp = p.getRegisteredPlayer();
+                boolean won = game.getOutcome() != null
+                        && !game.getOutcome().isDraw()
+                        && rp != null
+                        && game.getOutcome().isWinner(rp);
+                ((PlayerControllerRL) p.getController())
+                    .getRLController()
+                    .onGameEnd(won);
+            }
+        }
+
         // Build result
         GameResult result = new GameResult();
         if (game.getOutcome() == null || game.getOutcome().isDraw()) {

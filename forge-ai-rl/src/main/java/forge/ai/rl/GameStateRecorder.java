@@ -189,7 +189,6 @@ public class GameStateRecorder {
     @Subscribe
     public void onTurnPhase(GameEventTurnPhase event) {
         try {
-            System.out.println("GSR_EVENT: onTurnPhase phase=" + event.phase());
             PhaseType phase = event.phase();
 
             // Record at main phase 1 (key decision point)
