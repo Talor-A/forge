@@ -830,11 +830,9 @@ def trainer_thread(state, args):
         if 'block' in heads and block_samples:
             state.epoch = 0
             state.epoch_progress = 0
-            train_head(model, model.attack_head, 'block',
+            train_head(model, model.block_head, 'block',
                        block_samples, args, state,
                        device, use_amp)
-            # Note: using attack_head architecture for blocks
-            # too since it's the same binary-per-creature task
 
         # Save combined model
         save_path = os.path.join(

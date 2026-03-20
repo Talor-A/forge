@@ -92,6 +92,7 @@ def ppo_thread(state, args):
     try:
         from training.ppo_trainer import (
             load_ppo_data, compute_ppo_batch,
+            compute_ppo_priority_batch,
             run_games, start_model_server,
             find_free_port, parse_game_state,
             ModelServerError, PROJECT_ROOT)
@@ -189,13 +190,14 @@ def ppo_thread(state, args):
                 state.phase = "done"
                 break
 
-            attack_data, block_data, value_data = \
-                load_ppo_data(traj_dir)
+            attack_data, block_data, priority_data, \
+                value_data = load_ppo_data(traj_dir)
             state.attacks_this_round = len(attack_data)
             state.blocks_this_round = len(block_data)
             log(state,
                 f"  Data: {len(attack_data)} attacks, "
                 f"{len(block_data)} blocks, "
+                f"{len(priority_data)} priority, "
                 f"{len(value_data)} value samples")
 
             if not value_data:
@@ -227,6 +229,44 @@ def ppo_thread(state, args):
                         loss, metrics, _ = \
                             compute_ppo_batch(
                                 model, model.attack_head,
+                                batch, device, use_amp)
+
+                        if torch.isnan(loss):
+                            continue
+
+                        optimizer.zero_grad()
+                        if scaler:
+                            scaler.scale(loss).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            optimizer.step()
+
+                        total_pl += metrics['policy_loss']
+                        total_vl += metrics['value_loss']
+                        total_ent += metrics['entropy']
+                        n_updates += 1
+
+                # Priority head (Categorical, not Bernoulli)
+                if priority_data:
+                    random.shuffle(priority_data)
+                    for bi in range(0, len(priority_data),
+                                    args.batch_size):
+                        batch = priority_data[
+                            bi:bi + args.batch_size]
+                        if len(batch) < 2:
+                            continue
+
+                        loss, metrics, _ = \
+                            compute_ppo_priority_batch(
+                                model,
+                                model.priority_head,
                                 batch, device, use_amp)
 
                         if torch.isnan(loss):
