@@ -1,40 +1,63 @@
 package forge.ai.rl.features;
 
+import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CounterEnumType;
 import forge.game.keyword.Keyword;
+import forge.game.spellability.SpellAbility;
+import forge.game.trigger.Trigger;
+import forge.game.trigger.TriggerType;
 import forge.game.zone.ZoneType;
 
 /**
- * Extracts a fixed-size feature vector from a Card object.
- * This captures the card's current in-game state, not just its printed attributes.
+ * Extracts a 256-dimension feature vector from a Card object.
+ * Captures the card's current in-game state including what its abilities DO.
  *
- * Feature vector layout (128 floats):
- * [0-4]   : card type flags (creature, instant, sorcery, enchantment, artifact, planeswalker, land)
- * [5-10]  : color identity (W, U, B, R, G, colorless)
- * [11]    : converted mana cost (normalized)
- * [12]    : power (normalized, 0 if not creature)
- * [13]    : toughness (normalized, 0 if not creature)
- * [14]    : loyalty (normalized, 0 if not planeswalker)
- * [15]    : tapped (0 or 1)
- * [16]    : summoning sick (0 or 1)
- * [17]    : attacking (0 or 1)
- * [18]    : blocking (0 or 1)
- * [19]    : face down (0 or 1)
- * [20-24] : +1/+1 counters, -1/-1 counters, loyalty counters, charge counters, other counters (normalized)
- * [25]    : number of attachments (normalized)
- * [26]    : damage marked (normalized)
- * [27-56] : keyword flags (30 common keywords)
- * [57-66] : zone encoding (one-hot)
- * [67-96] : ability type flags (up to 30 ApiTypes present on card)
- * [97-127]: reserved for learned card embedding lookup index and padding
+ * Feature vector layout (256 floats):
+ *
+ * === BASIC CARD INFO [0-68] ===
+ * [0-6]    : card type flags (creature, instant, sorcery, enchantment, artifact, planeswalker, land)
+ * [7-12]   : color identity (W, U, B, R, G, colorless)
+ * [13]     : converted mana cost (normalized)
+ * [14-15]  : power/toughness (normalized)
+ * [16]     : loyalty (normalized)
+ * [17-21]  : state flags (tapped, summoning sick, attacking, blocking, face down)
+ * [22-26]  : counters (+1/+1, -1/-1, loyalty, charge, other)
+ * [27]     : number of attachments (normalized)
+ * [28]     : damage marked (normalized)
+ * [29-58]  : keyword flags (30 common keywords — set 1)
+ * [59-68]  : zone encoding (one-hot)
+ *
+ * === PRIMARY ABILITY [69-108] ===
+ * [69-98]  : ApiType one-hot for primary spell/ability (30 types)
+ * [99-102] : ability summary (has_activated, has_triggered, has_mana_ability, n_abilities)
+ * [103-106]: effect magnitude (est_damage, est_draw, est_life, est_tokens)
+ * [107-108]: targeting (requires_target, targets_creatures)
+ *
+ * === SECOND ABILITY [109-138] ===
+ * [109-138]: ApiType one-hot for second spell/ability (30 types)
+ *
+ * === EXTENDED KEYWORDS [139-168] ===
+ * [139-168]: keyword flags (30 more keywords — set 2)
+ *
+ * === MANA + SPEED + TRIGGERS [169-199] ===
+ * [169-173]: mana production (produces W, U, B, R, G)
+ * [174-177]: spell speed (is_instant_speed, has_flash, is_modal, has_kicker)
+ * [178-181]: trigger summary (has_etb, has_death, has_combat, has_upkeep)
+ * [182-185]: cost info (mana_cost_W, mana_cost_U, mana_cost_B, mana_cost_R)
+ * [186-189]: cost info (mana_cost_G, mana_cost_generic, mana_cost_total, has_X)
+ * [190-199]: reserved
+ *
+ * === RESERVED + HASH [200-255] ===
+ * [200-251]: reserved for future
+ * [252-255]: card identity hash (4 bytes, normalized)
  */
 public class CardFeatures {
 
-    public static final int FEATURE_SIZE = 128;
+    public static final int FEATURE_SIZE = 256;
 
-    // Common keywords to encode as binary features
-    private static final Keyword[] TRACKED_KEYWORDS = {
+    // Common keywords — set 1 (30)
+    private static final Keyword[] KEYWORDS_SET1 = {
         Keyword.FLYING, Keyword.FIRST_STRIKE, Keyword.DOUBLE_STRIKE,
         Keyword.TRAMPLE, Keyword.HASTE, Keyword.VIGILANCE,
         Keyword.DEATHTOUCH, Keyword.LIFELINK, Keyword.REACH,
@@ -47,21 +70,45 @@ public class CardFeatures {
         Keyword.EQUIP, Keyword.ENCHANT, Keyword.FLANKING
     };
 
-    /**
-     * Extract feature vector from a card in play or in hand.
-     */
+    // Extended keywords — set 2 (30)
+    private static final Keyword[] KEYWORDS_SET2 = {
+        Keyword.HORSEMANSHIP, Keyword.INTIMIDATE, Keyword.SKULK,
+        Keyword.ANNIHILATOR, Keyword.ABSORB, Keyword.BUSHIDO,
+        Keyword.EXALTED, Keyword.BATTLE_CRY, Keyword.MODULAR,
+        Keyword.TOXIC, Keyword.AFFLICT, Keyword.PHASING,
+        Keyword.CUMULATIVE_UPKEEP, Keyword.ECHO, Keyword.FADING,
+        Keyword.VANISHING, Keyword.STORM, Keyword.AFFINITY,
+        Keyword.CHANGELING, Keyword.DEVOID, Keyword.EMERGE,
+        Keyword.IMPROVISE, Keyword.SPECTACLE, Keyword.RIOT,
+        Keyword.COMPANION, Keyword.FORETELL, Keyword.ENTWINE,
+        Keyword.DISTURB, Keyword.DAYBOUND, Keyword.NIGHTBOUND
+    };
+
+    // Top 30 ApiTypes — same as ActionEncoder
+    private static final ApiType[] TOP_API_TYPES = {
+        ApiType.DealDamage, ApiType.Draw, ApiType.Counter, ApiType.ChangeZone,
+        ApiType.Pump, ApiType.PumpAll, ApiType.Destroy, ApiType.DestroyAll,
+        ApiType.Sacrifice, ApiType.Discard, ApiType.GainLife, ApiType.LoseLife,
+        ApiType.Token, ApiType.Animate, ApiType.Attach, ApiType.Tap,
+        ApiType.Untap, ApiType.Mill, ApiType.Regenerate, ApiType.Protection,
+        ApiType.Fight, ApiType.Charm, ApiType.Scry, ApiType.Explore,
+        ApiType.AddOrRemoveCounter, ApiType.ManaReflected, ApiType.Mana,
+        ApiType.ChangeTargets, ApiType.Fog, ApiType.ChangeZone
+    };
+
     public static float[] encode(Card card) {
         float[] features = new float[FEATURE_SIZE];
         if (card == null) return features;
         try {
             return encodeImpl(card, features);
         } catch (Exception e) {
-            // Return partial/zeroed features rather than crashing
             return features;
         }
     }
 
     private static float[] encodeImpl(Card card, float[] features) {
+
+        // === BASIC CARD INFO [0-68] ===
 
         int idx = 0;
 
@@ -103,13 +150,10 @@ public class CardFeatures {
         // In-game state [17-21]
         features[idx++] = card.isTapped() ? 1f : 0f;
         features[idx++] = card.hasSickness() ? 1f : 0f;
-        // card.isAttacking() calls game.getCombat() which is null outside combat
         boolean attacking = false;
-        try { attacking = card.isAttacking(); } catch (NullPointerException ignored) {}
+        try { attacking = card.isAttacking(); } catch (Exception ignored) {}
         features[idx++] = attacking ? 1f : 0f;
-        // Blocking status is tracked on the Combat object, not the Card directly
-        // We approximate by checking if untapped and in combat phase context
-        features[idx++] = 0f; // populated externally when combat context is available
+        features[idx++] = 0f; // blocking — populated externally
         features[idx++] = card.isFaceDown() ? 1f : 0f;
 
         // Counters [22-26]
@@ -117,7 +161,6 @@ public class CardFeatures {
         features[idx++] = normalizeValue(card.getCounters(CounterEnumType.M1M1), 0, 10);
         features[idx++] = normalizeValue(card.getCounters(CounterEnumType.LOYALTY), 0, 10);
         features[idx++] = normalizeValue(card.getCounters(CounterEnumType.CHARGE), 0, 10);
-        // Sum of all other counter types
         int otherCounters = 0;
         for (var entry : card.getCounters().entrySet()) {
             CounterEnumType type = entry.getKey() instanceof CounterEnumType ? (CounterEnumType) entry.getKey() : null;
@@ -134,12 +177,12 @@ public class CardFeatures {
         // Damage marked [28]
         features[idx++] = normalizeValue(card.getDamage(), 0, 20);
 
-        // Keywords [29-58]
-        for (Keyword kw : TRACKED_KEYWORDS) {
+        // Keywords set 1 [29-58]
+        for (Keyword kw : KEYWORDS_SET1) {
             features[idx++] = card.hasKeyword(kw) ? 1f : 0f;
         }
 
-        // Zone encoding [59-68] (one-hot)
+        // Zone encoding [59-68]
         ZoneType zone = card.getZone() != null ? card.getZone().getZoneType() : null;
         ZoneType[] zones = {ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library,
                 ZoneType.Graveyard, ZoneType.Exile, ZoneType.Stack,
@@ -147,30 +190,208 @@ public class CardFeatures {
         for (ZoneType z : zones) {
             features[idx++] = (zone == z) ? 1f : 0f;
         }
+        // idx = 69
 
-        // Remaining indices [69-127] reserved for ability type encoding and card embedding ID
-        // Ability types will be populated by ActionEncoder which has access to SpellAbility info
-        // The last 4 floats store a card name hash for the learned embedding lookup
+        // === PRIMARY ABILITY [69-108] ===
+
+        // Find primary non-mana spell ability
+        SpellAbility primarySA = null;
+        SpellAbility secondSA = null;
+        int saCount = 0;
+        boolean hasActivated = false;
+        boolean hasTriggered = false;
+        boolean hasManaAbility = !card.getManaAbilities().isEmpty();
+
+        for (SpellAbility sa : card.getSpellAbilities()) {
+            if (sa.isManaAbility()) continue;
+            saCount++;
+            if (sa.isActivatedAbility()) hasActivated = true;
+            if (sa.isTrigger()) hasTriggered = true;
+            if (primarySA == null) {
+                primarySA = sa;
+            } else if (secondSA == null) {
+                secondSA = sa;
+            }
+        }
+
+        // Primary ApiType one-hot [69-98]
+        if (primarySA != null && primarySA.getApi() != null) {
+            ApiType api = primarySA.getApi();
+            for (ApiType at : TOP_API_TYPES) {
+                features[idx++] = (api == at) ? 1f : 0f;
+            }
+        } else {
+            idx += 30;
+        }
+        // idx = 99
+
+        // Ability summary [99-102]
+        features[idx++] = hasActivated ? 1f : 0f;
+        features[idx++] = hasTriggered ? 1f : 0f;
+        features[idx++] = hasManaAbility ? 1f : 0f;
+        features[idx++] = normalizeValue(saCount, 0, 10);
+        // idx = 103
+
+        // Effect magnitude from primary ability [103-106]
+        if (primarySA != null) {
+            // Estimated damage
+            if (primarySA.hasParam("NumDmg")) {
+                try {
+                    features[idx] = normalizeValue(
+                            Integer.parseInt(primarySA.getParam("NumDmg")), 0, 20);
+                } catch (NumberFormatException e) {
+                    features[idx] = 0.3f;
+                }
+            }
+            idx++;
+            // Estimated cards drawn
+            if (primarySA.hasParam("NumCards")) {
+                try {
+                    features[idx] = normalizeValue(
+                            Integer.parseInt(primarySA.getParam("NumCards")), 0, 10);
+                } catch (NumberFormatException e) {
+                    features[idx] = 0.2f;
+                }
+            }
+            idx++;
+            // Life gain
+            if (primarySA.hasParam("LifeAmount")) {
+                try {
+                    features[idx] = normalizeValue(
+                            Integer.parseInt(primarySA.getParam("LifeAmount")), 0, 20);
+                } catch (NumberFormatException e) {
+                    features[idx] = 0.2f;
+                }
+            }
+            idx++;
+            // Token count
+            if (primarySA.hasParam("TokenAmount")) {
+                try {
+                    features[idx] = normalizeValue(
+                            Integer.parseInt(primarySA.getParam("TokenAmount")), 0, 5);
+                } catch (NumberFormatException e) {
+                    features[idx] = 0.2f;
+                }
+            }
+            idx++;
+        } else {
+            idx += 4;
+        }
+        // idx = 107
+
+        // Targeting [107-108]
+        if (primarySA != null && primarySA.usesTargeting()) {
+            features[idx++] = 1f;
+            String validTgts = primarySA.getTargetRestrictions() != null
+                    && primarySA.getTargetRestrictions().getValidTgts() != null
+                    ? String.join(" ", primarySA.getTargetRestrictions().getValidTgts()) : "";
+            features[idx++] = validTgts.contains("Creature") ? 1f : 0f;
+        } else {
+            idx += 2;
+        }
+        // idx = 109
+
+        // === SECOND ABILITY [109-138] ===
+
+        if (secondSA != null && secondSA.getApi() != null) {
+            ApiType api = secondSA.getApi();
+            for (ApiType at : TOP_API_TYPES) {
+                features[idx++] = (api == at) ? 1f : 0f;
+            }
+        } else {
+            idx += 30;
+        }
+        // idx = 139
+
+        // === EXTENDED KEYWORDS [139-168] ===
+
+        for (Keyword kw : KEYWORDS_SET2) {
+            features[idx++] = card.hasKeyword(kw) ? 1f : 0f;
+        }
+        // idx = 169
+
+        // === MANA + SPEED + TRIGGERS [169-199] ===
+
+        // Mana production [169-173]
+        for (SpellAbility mana : card.getManaAbilities()) {
+            String produced = mana.getParam("Produced");
+            if (produced != null) {
+                if (produced.contains("W")) features[169] = 1f;
+                if (produced.contains("U")) features[170] = 1f;
+                if (produced.contains("B")) features[171] = 1f;
+                if (produced.contains("R")) features[172] = 1f;
+                if (produced.contains("G")) features[173] = 1f;
+            }
+        }
+        idx = 174;
+
+        // Spell speed [174-177]
+        features[idx++] = card.isInstant() || card.hasKeyword(Keyword.FLASH) ? 1f : 0f;
+        features[idx++] = card.hasKeyword(Keyword.FLASH) ? 1f : 0f;
+        // Is modal (charm-like)
+        boolean isModal = false;
+        if (primarySA != null && primarySA.getApi() == ApiType.Charm) isModal = true;
+        features[idx++] = isModal ? 1f : 0f;
+        // Has kicker
+        features[idx++] = card.hasKeyword(Keyword.KICKER) ? 1f : 0f;
+        // idx = 178
+
+        // Trigger summary [178-181]
+        boolean hasETB = false, hasDeath = false, hasCombat = false, hasUpkeep = false;
+        for (Trigger t : card.getTriggers()) {
+            TriggerType mode = t.getMode();
+            if (mode == TriggerType.ChangesZone) {
+                // ETB or LTB depending on destination
+                String dest = t.getParam("Destination");
+                if ("Battlefield".equals(dest)) hasETB = true;
+                String origin = t.getParam("Origin");
+                if ("Battlefield".equals(origin)) hasDeath = true;
+            }
+            if (mode == TriggerType.Attacks || mode == TriggerType.AttackersDeclared
+                    || mode == TriggerType.Blocks || mode == TriggerType.DamageDone) {
+                hasCombat = true;
+            }
+            if (mode == TriggerType.Phase) {
+                String phase = t.getParam("Phase");
+                if ("Upkeep".equals(phase)) hasUpkeep = true;
+            }
+        }
+        features[idx++] = hasETB ? 1f : 0f;
+        features[idx++] = hasDeath ? 1f : 0f;
+        features[idx++] = hasCombat ? 1f : 0f;
+        features[idx++] = hasUpkeep ? 1f : 0f;
+        // idx = 182
+
+        // Mana cost breakdown [182-189]
+        if (card.getManaCost() != null) {
+            features[idx++] = normalizeValue(card.getManaCost().getShardCount(forge.card.mana.ManaCostShard.WHITE), 0, 5);
+            features[idx++] = normalizeValue(card.getManaCost().getShardCount(forge.card.mana.ManaCostShard.BLUE), 0, 5);
+            features[idx++] = normalizeValue(card.getManaCost().getShardCount(forge.card.mana.ManaCostShard.BLACK), 0, 5);
+            features[idx++] = normalizeValue(card.getManaCost().getShardCount(forge.card.mana.ManaCostShard.RED), 0, 5);
+            features[idx++] = normalizeValue(card.getManaCost().getShardCount(forge.card.mana.ManaCostShard.GREEN), 0, 5);
+            features[idx++] = normalizeValue(card.getManaCost().getGenericCost(), 0, 10);
+            features[idx++] = normalizeValue(card.getCMC(), 0, 16);
+            features[idx++] = card.getManaCost().countX() > 0 ? 1f : 0f;
+        } else {
+            idx += 8;
+        }
+        // idx = 190
+
+        // Reserved [190-251]
+        // idx stays at 190, skip to hash
+
+        // === CARD HASH [252-255] ===
         if (card.getPaperCard() != null) {
             int hash = card.getPaperCard().getName().hashCode();
-            // Encode hash as normalized floats (never NaN/Inf)
-            features[FEATURE_SIZE - 4] = normalizeValue(
-                    (hash & 0xFF), 0, 256);
-            features[FEATURE_SIZE - 3] = normalizeValue(
-                    ((hash >> 8) & 0xFF), 0, 256);
-            features[FEATURE_SIZE - 2] = normalizeValue(
-                    ((hash >> 16) & 0xFF), 0, 256);
-            features[FEATURE_SIZE - 1] = normalizeValue(
-                    ((hash >> 24) & 0xFF), 0, 256);
+            features[252] = normalizeValue((hash & 0xFF), 0, 256);
+            features[253] = normalizeValue(((hash >> 8) & 0xFF), 0, 256);
+            features[254] = normalizeValue(((hash >> 16) & 0xFF), 0, 256);
+            features[255] = normalizeValue(((hash >> 24) & 0xFF), 0, 256);
         }
 
         return features;
     }
 
-    /**
-     * Normalize a value to [0, 1] range given expected min/max.
-     * Clamps to [0, 1] if value is outside range.
-     */
     private static float normalizeValue(double value, double min, double max) {
         if (max <= min) return 0f;
         return (float) Math.max(0, Math.min(1, (value - min) / (max - min)));

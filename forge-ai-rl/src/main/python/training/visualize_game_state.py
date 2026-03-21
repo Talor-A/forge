@@ -613,9 +613,14 @@ def draw_action_card_image(info, is_chosen=False,
 
 # ── Data loading ───────────────────────────────────
 
-def load_samples(data_dir, max_samples=200):
+def load_samples(data_dir, max_samples=200,
+                  rl_only=False):
     path = Path(data_dir)
     files = sorted(path.glob("traj_*.jsonl"))
+    if rl_only:
+        # Only load RL player trajectories
+        files = [f for f in files
+                 if '_RL_' in f.name]
     random.shuffle(files)
 
     samples = []
@@ -1001,8 +1006,10 @@ class GameStateViewer:
 
         all_samples = []
         for d in dirs:
+            is_ppo = 'ppo' in d
             all_samples.extend(
-                load_samples(d, max_samples=100))
+                load_samples(d, max_samples=100,
+                             rl_only=is_ppo))
         if all_samples:
             self.all_samples = all_samples
             self.samples = all_samples
@@ -1423,26 +1430,31 @@ def main():
         default=200)
     args = parser.parse_args()
 
-    # Load data from multiple sources
+    # Load PPO data first (RL player only), fall back
+    # to base trajectories if no PPO data exists
     print("Loading samples...", flush=True)
-    samples = load_samples(args.data_dir,
-                           args.max_samples)
-    # Also load PPO eval trajectories if available
-    # (these are RL vs heuristic games — more interesting)
+    samples = []
+    base_dir = os.path.dirname(args.data_dir)
     ppo_eval_dir = os.path.join(
-        os.path.dirname(args.data_dir),
-        'ppo_trajectories_eval')
+        base_dir, 'ppo_trajectories_eval')
     ppo_dir = os.path.join(
-        os.path.dirname(args.data_dir),
-        'ppo_trajectories')
+        base_dir, 'ppo_trajectories')
     for d, label in [(ppo_eval_dir, "PPO eval"),
                      (ppo_dir, "PPO collect")]:
         if os.path.isdir(d):
-            ppo_samples = load_samples(d, 100)
+            ppo_samples = load_samples(
+                d, args.max_samples, rl_only=True)
             if ppo_samples:
                 samples.extend(ppo_samples)
                 print(f"  + {len(ppo_samples)} {label} "
-                      f"samples from {d}", flush=True)
+                      f"samples (RL only)", flush=True)
+
+    # Fall back to base trajectories if no PPO data
+    if not samples:
+        print("  No PPO data — loading base "
+              "trajectories", flush=True)
+        samples = load_samples(args.data_dir,
+                               args.max_samples)
 
     attacks = sum(1 for s in samples
                   if s["type"] == "DECLARE_ATTACKERS")
@@ -1456,11 +1468,22 @@ def main():
 
     model_path = args.model
     model = None
-    # Try best_ppo_model first, then specified path
-    ppo_model = os.path.join(
-        os.path.dirname(model_path),
-        'best_ppo_model.pt')
-    for p in [ppo_model, model_path]:
+    default_model = ('../../rl_data/checkpoints/'
+                     'model_with_decisions.pt')
+    explicitly_set = (
+        args.model != default_model and
+        not args.model.endswith(
+            'model_with_decisions.pt'))
+    if explicitly_set:
+        # User specified a model — use exactly that
+        candidates = [model_path]
+    else:
+        # Auto-detect: try PPO best, then default
+        ppo_model = os.path.join(
+            os.path.dirname(model_path),
+            'best_ppo_model.pt')
+        candidates = [ppo_model, model_path]
+    for p in candidates:
         if p and os.path.exists(p):
             print(f"Loading model: {p}", flush=True)
             model = MTGModel.load(p, device=args.device)
