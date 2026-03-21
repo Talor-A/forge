@@ -437,6 +437,10 @@ def ppo_thread(state, args):
                 model.save(os.path.join(
                     save_dir, 'best_ppo_model.pt'))
 
+            # Always save latest (for resume)
+            model.save(os.path.join(
+                save_dir, 'ppo_model_latest.pt'))
+
             if rnd % 5 == 0:
                 model.save(os.path.join(
                     save_dir,
