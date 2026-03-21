@@ -20,7 +20,7 @@ python training/ppo_ui.py \
     --device cuda \
     --rounds "$ROUNDS" \
     --games-per-round "$GAMES" \
-    --eval-games 30 \
+    --eval-games 50 \
     --ppo-epochs 4 \
     --batch-size 32 \
     --lr 1e-5 \

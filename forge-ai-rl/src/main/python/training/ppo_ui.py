@@ -291,59 +291,90 @@ def ppo_thread(state, args):
                         total_ent += metrics['entropy']
                         n_updates += 1
 
-                # Always train value network on outcomes
+                # Train value network on outcomes
+                # with FULL game state (not zeros!)
                 random.shuffle(value_data)
-                for bi in range(0, min(len(value_data),
-                                       500),
+                for bi in range(0, len(value_data),
                                 args.batch_size):
                     batch = value_data[
                         bi:bi + args.batch_size]
                     if len(batch) < 2:
                         continue
                     try:
-                        # Value-only update
                         bs = len(batch)
                         gf = torch.zeros(bs, 64,
                             device=device)
                         tgt = torch.zeros(bs,
                             device=device)
-                        for i, s in enumerate(batch):
-                            g = s['global_features']
-                            gl = min(len(g), 64)
-                            if gl > 0:
-                                gf[i, :gl] = \
-                                    torch.from_numpy(
-                                        g[:gl])
-                            tgt[i] = s['outcome']
+                        mb = torch.zeros(bs, 30, 128,
+                            device=device)
+                        mbm = torch.zeros(bs, 30,
+                            dtype=torch.bool,
+                            device=device)
+                        ob = torch.zeros(bs, 30, 128,
+                            device=device)
+                        obm = torch.zeros(bs, 30,
+                            dtype=torch.bool,
+                            device=device)
+                        h = torch.zeros(bs, 15, 128,
+                            device=device)
+                        hm = torch.zeros(bs, 15,
+                            dtype=torch.bool,
+                            device=device)
+                        mg = torch.zeros(bs, 40, 128,
+                            device=device)
+                        mgm = torch.zeros(bs, 40,
+                            dtype=torch.bool,
+                            device=device)
+                        og = torch.zeros(bs, 40, 128,
+                            device=device)
+                        ogm = torch.zeros(bs, 40,
+                            dtype=torch.bool,
+                            device=device)
+                        st = torch.zeros(bs, 10, 128,
+                            device=device)
+                        stm = torch.zeros(bs, 10,
+                            dtype=torch.bool,
+                            device=device)
 
-                        # Minimal encoder input
-                        z30 = torch.zeros(bs, 30, 128,
-                            device=device)
-                        zm30 = torch.zeros(bs, 30,
-                            dtype=torch.bool,
-                            device=device)
-                        z15 = torch.zeros(bs, 15, 128,
-                            device=device)
-                        zm15 = torch.zeros(bs, 15,
-                            dtype=torch.bool,
-                            device=device)
-                        z40 = torch.zeros(bs, 40, 128,
-                            device=device)
-                        zm40 = torch.zeros(bs, 40,
-                            dtype=torch.bool,
-                            device=device)
-                        z10 = torch.zeros(bs, 10, 128,
-                            device=device)
-                        zm10 = torch.zeros(bs, 10,
-                            dtype=torch.bool,
-                            device=device)
+                        for i, s in enumerate(batch):
+                            g_np, zones, masks = \
+                                parse_game_state(
+                                    s['game_state_flat'],
+                                    s['global_features'])
+                            gf[i] = torch.from_numpy(g_np)
+                            tgt[i] = s['outcome']
+                            mb[i] = torch.from_numpy(
+                                zones['my_board'])
+                            mbm[i] = torch.from_numpy(
+                                masks['my_board_mask'])
+                            ob[i] = torch.from_numpy(
+                                zones['opp_board'])
+                            obm[i] = torch.from_numpy(
+                                masks['opp_board_mask'])
+                            h[i] = torch.from_numpy(
+                                zones['hand'])
+                            hm[i] = torch.from_numpy(
+                                masks['hand_mask'])
+                            mg[i] = torch.from_numpy(
+                                zones['my_gy'])
+                            mgm[i] = torch.from_numpy(
+                                masks['my_gy_mask'])
+                            og[i] = torch.from_numpy(
+                                zones['opp_gy'])
+                            ogm[i] = torch.from_numpy(
+                                masks['opp_gy_mask'])
+                            st[i] = torch.from_numpy(
+                                zones['stack'])
+                            stm[i] = torch.from_numpy(
+                                masks['stack_mask'])
 
                         with torch.amp.autocast('cuda',
                                 enabled=use_amp):
                             emb = model.encode_state(
-                                gf, z30, zm30, z30, zm30,
-                                z15, zm15, z40, zm40,
-                                z40, zm40, z10, zm10)
+                                gf, mb, mbm, ob, obm,
+                                h, hm, mg, mgm,
+                                og, ogm, st, stm)
                             val = model.get_value(
                                 emb).squeeze(-1)
                             vl = F.mse_loss(val, tgt)
@@ -351,10 +382,15 @@ def ppo_thread(state, args):
                         optimizer.zero_grad()
                         if scaler:
                             scaler.scale(vl).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
                             scaler.step(optimizer)
                             scaler.update()
                         else:
                             vl.backward()
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
                             optimizer.step()
                         total_vl += vl.item()
                         n_updates += 1
