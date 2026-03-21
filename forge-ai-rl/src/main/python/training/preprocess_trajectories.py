@@ -94,6 +94,8 @@ def scan_files(files):
     return counts, max_cand
 
 
+GAMMA = 0.95  # discount factor for value returns
+
 def sanitize(arr):
     """Clip and replace NaN — matches training code."""
     np.clip(arr, -10, 10, out=arr)
@@ -208,9 +210,6 @@ def preprocess(files, output_dir, counts, max_cand):
     pi = 0  # priority index
     ai = 0  # attack index
     bi = 0  # block index
-
-    GAMMA = 0.95  # discount factor — turn-1 in a
-    # 40-decision game gets ~0.13, not ±1.0
 
     for fi, filepath in enumerate(files):
         if (fi + 1) % 200 == 0:
