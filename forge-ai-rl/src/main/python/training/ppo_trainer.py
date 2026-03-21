@@ -314,53 +314,50 @@ def compute_ppo_batch(model, head, samples, device,
             gf, mb, mbm, ob, obm, h, hm,
             mg, mgm, og, ogm, st, stm)
 
-        # Value estimate (critic)
-        value = model.get_value(state).squeeze(-1)
+        # Value estimate (critic) — detach state so value
+        # gradients don't flow through shared encoder (PPG)
+        value = model.get_value(
+            state.detach()).squeeze(-1)
 
-        # Policy logits (actor)
+        # Policy logits (actor) — gradients DO flow to encoder
         logits = head(state, cf, cm)
 
         # Compute log probs for chosen actions
-        # Binary: log P(attack) = log_sigmoid(logit)
-        #         log P(not attack) = log_sigmoid(-logit)
         safe_logits = logits.clone()
         safe_logits[~cm] = 0.0
 
         log_probs = (
             F.logsigmoid(safe_logits) * actions +
             F.logsigmoid(-safe_logits) * (1 - actions))
-        # Sum per-creature log probs for total action prob
         log_probs = (log_probs * cm.float()).sum(dim=1)
 
-        # Advantage: outcome - value estimate (MC return)
+        # Advantage: outcome - value estimate
         advantage = (outcomes - value.detach())
-        # Normalize advantage for stability
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
 
-        # PPO clipped objective with importance sampling
+        # PPO clipped objective
         ratio = torch.exp(log_probs - old_log_probs)
         surr1 = ratio * advantage
         surr2 = torch.clamp(ratio, 1.0 - clip_eps,
                             1.0 + clip_eps) * advantage
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        # Value loss
+        # Value loss (encoder detached — only updates
+        # value network MLP weights)
         value_loss = F.mse_loss(value, outcomes)
 
-        # Entropy bonus (encourage exploration)
+        # Entropy bonus
         probs = torch.sigmoid(safe_logits)
         entropy = -(
             probs * F.logsigmoid(safe_logits) +
             (1 - probs) * F.logsigmoid(-safe_logits))
         entropy = (entropy * cm.float()).sum(dim=1).mean()
 
-        # Total loss — entropy coefficient 0.1 encourages
-        # exploration (prevents sigmoid saturation)
         total_loss = (
             policy_loss +
-            0.5 * value_loss -
+            0.25 * value_loss -
             0.01 * entropy)
 
     metrics = {
@@ -455,10 +452,12 @@ def compute_ppo_priority_batch(model, head, samples,
             gf, mb, mbm, ob, obm, h, hm,
             mg, mgm, og, ogm, st, stm)
 
-        # Value estimate (critic)
-        value = model.get_value(state).squeeze(-1)
+        # Value estimate (critic) — detach state so value
+        # gradients don't flow through shared encoder (PPG)
+        value = model.get_value(
+            state.detach()).squeeze(-1)
 
-        # Policy logits (actor) — masked softmax
+        # Policy logits (actor) — gradients DO flow to encoder
         logits = head(state, af, am)
 
         # Categorical distribution over actions
@@ -466,21 +465,20 @@ def compute_ppo_priority_batch(model, head, samples,
             logits=logits)
         log_probs = dist.log_prob(actions)
 
-        # Advantage: outcome - value estimate (MC return)
+        # Advantage
         advantage = (outcomes - value.detach())
-        # Normalize advantage for stability
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
 
-        # PPO clipped objective with importance sampling
+        # PPO clipped objective
         ratio = torch.exp(log_probs - old_log_probs)
         surr1 = ratio * advantage
         surr2 = torch.clamp(ratio, 1.0 - clip_eps,
                             1.0 + clip_eps) * advantage
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        # Value loss
+        # Value loss (encoder detached)
         value_loss = F.mse_loss(value, outcomes)
 
         # Entropy bonus
@@ -488,7 +486,7 @@ def compute_ppo_priority_batch(model, head, samples,
 
         total_loss = (
             policy_loss +
-            0.5 * value_loss -
+            0.25 * value_loss -
             0.01 * entropy)
 
     metrics = {
@@ -833,7 +831,7 @@ def main():
                 if len(batch) < 2:
                     continue
                 loss, metrics, _ = compute_ppo_batch(
-                    model, model.attack_head, batch,
+                    model, model.block_head, batch,
                     device, use_amp)
 
                 if torch.isnan(loss):

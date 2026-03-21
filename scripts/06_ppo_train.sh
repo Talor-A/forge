@@ -21,7 +21,7 @@ python training/ppo_ui.py \
     --rounds "$ROUNDS" \
     --games-per-round "$GAMES" \
     --eval-games 50 \
-    --ppo-epochs 4 \
+    --ppo-epochs 1 \
     --batch-size 32 \
     --lr 1e-5 \
     --port 0
