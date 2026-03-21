@@ -137,6 +137,36 @@ def ppo_thread(state, args):
         scaler = (torch.amp.GradScaler('cuda')
                   if use_amp else None)
 
+        # Resume training state if available
+        import json as json_mod
+        state_path = os.path.join(
+            save_dir, 'ppo_training_state.json')
+        start_round = 0
+        if os.path.exists(state_path):
+            try:
+                with open(state_path) as f:
+                    saved = json_mod.load(f)
+                start_round = saved.get(
+                    'completed_rounds', 0)
+                state.best_win_rate = saved.get(
+                    'best_win_rate', 0.0)
+                state.best_round = saved.get(
+                    'best_round', 0)
+                state.win_rates = saved.get(
+                    'win_rates', [])
+                state.policy_losses = saved.get(
+                    'policy_losses', [])
+                state.value_losses = saved.get(
+                    'value_losses', [])
+                state.entropies = saved.get(
+                    'entropies', [])
+                log(state,
+                    f"Resumed from round {start_round}, "
+                    f"best WR: "
+                    f"{state.best_win_rate:.1%}")
+            except Exception:
+                pass
+
         # Start server
         log(state, f"Starting model server on :{port}")
         server = start_model_server(model, device, port)
@@ -150,8 +180,11 @@ def ppo_thread(state, args):
 
         start_time = time.time()
 
-        for rnd in range(1, args.rounds + 1):
+        total_rounds = start_round + args.rounds
+        for rnd in range(start_round + 1,
+                         total_rounds + 1):
             state.round = rnd
+            state.total_rounds = total_rounds
             t0 = time.time()
 
             # Collect
@@ -159,7 +192,7 @@ def ppo_thread(state, args):
             state.status = (
                 f"Round {rnd}: collecting "
                 f"{args.games_per_round} games...")
-            log(state, f"\n--- Round {rnd}/{args.rounds} "
+            log(state, f"\n--- Round {rnd}/{total_rounds} "
                 f"---")
             log(state, "  Collecting games...")
 
@@ -440,6 +473,21 @@ def ppo_thread(state, args):
             # Always save latest (for resume)
             model.save(os.path.join(
                 save_dir, 'ppo_model_latest.pt'))
+
+            # Save training state for resume
+            training_state = {
+                'completed_rounds': rnd,
+                'best_win_rate': state.best_win_rate,
+                'best_round': state.best_round,
+                'win_rates': state.win_rates,
+                'policy_losses': state.policy_losses,
+                'value_losses': state.value_losses,
+                'entropies': state.entropies,
+            }
+            with open(os.path.join(
+                    save_dir,
+                    'ppo_training_state.json'), 'w') as f:
+                json_mod.dump(training_state, f, indent=2)
 
             if rnd % 5 == 0:
                 model.save(os.path.join(
