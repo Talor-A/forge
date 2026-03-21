@@ -356,8 +356,113 @@ class ModelServer:
         }
 
     def _handle_block(self, state: torch.Tensor, request: dict) -> dict:
-        # Simplified: treat as card selection
-        return self._handle_card_select(state, request)
+        """Handle blocking using the proper BlockHead.
+
+        Input: (blocker, attacker) pair candidates (256-dim each)
+        + a "no block" zero vector as the last candidate.
+
+        The BlockHead needs separate blocker and attacker tensors.
+        We reconstruct these from the pairs, then sample one
+        attacker assignment per blocker (or "don't block").
+        """
+        candidates = request.get('candidateFeatures', [])
+        if not candidates or len(candidates) < 2:
+            return {'selectedIndices': [],
+                    'actionProbabilities': [],
+                    'valueEstimate': 0.0}
+
+        # Last candidate is "no block" (zero vector) — skip it
+        real_pairs = candidates[:-1]
+        n_pairs = len(real_pairs)
+        if n_pairs == 0:
+            value = self.model.get_value(state).item()
+            return {'selectedIndices': [],
+                    'actionProbabilities': [],
+                    'valueEstimate': value}
+
+        # Infer number of attackers from pair structure:
+        # pairs are ordered b0a0, b0a1, ..., b1a0, b1a1, ...
+        # First blocker's features are in pairs[0][:128]
+        import numpy as np
+        first_blocker = np.array(real_pairs[0][:128])
+        n_attackers = 1
+        for j in range(1, n_pairs):
+            other = np.array(real_pairs[j][:128])
+            if np.allclose(first_blocker, other, atol=0.01):
+                n_attackers += 1
+            else:
+                break
+        n_blockers = n_pairs // max(n_attackers, 1)
+
+        if n_blockers == 0 or n_attackers == 0:
+            value = self.model.get_value(state).item()
+            return {'selectedIndices': [],
+                    'actionProbabilities': [],
+                    'valueEstimate': value}
+
+        # Extract unique blocker and attacker features
+        bf = torch.zeros(1, n_blockers, 128,
+                         device=self.device)
+        bm = torch.ones(1, n_blockers, dtype=torch.bool,
+                        device=self.device)
+        af = torch.zeros(1, n_attackers, 128,
+                         device=self.device)
+        am = torch.ones(1, n_attackers, dtype=torch.bool,
+                        device=self.device)
+
+        for b in range(n_blockers):
+            pair_idx = b * n_attackers
+            if pair_idx < n_pairs:
+                feats = real_pairs[pair_idx]
+                bf[0, b, :min(128, len(feats))] = \
+                    torch.tensor(feats[:128],
+                                 dtype=torch.float32,
+                                 device=self.device)
+        for a in range(n_attackers):
+            if a < n_pairs:
+                feats = real_pairs[a]
+                af[0, a, :min(128, len(feats)-128)] = \
+                    torch.tensor(feats[128:256],
+                                 dtype=torch.float32,
+                                 device=self.device)
+
+        # BlockHead: (batch, n_blockers, n_attackers+1)
+        logits = self.model.block_head(
+            state, bf, bm, af, am)
+
+        # Sample one assignment per blocker
+        selected_pairs = []
+        all_probs = torch.zeros(n_pairs + 1,
+                                device=self.device)
+
+        for b in range(n_blockers):
+            dist = torch.distributions.Categorical(
+                logits=logits[0, b])
+            action = dist.sample().item()
+            probs_b = torch.softmax(logits[0, b], dim=-1)
+
+            if action < n_attackers:
+                # This blocker blocks attacker 'action'
+                pair_idx = b * n_attackers + action
+                if pair_idx < n_pairs:
+                    selected_pairs.append(pair_idx)
+
+            # Store probs for the pairs belonging to
+            # this blocker
+            for a in range(n_attackers):
+                pidx = b * n_attackers + a
+                if pidx < n_pairs:
+                    all_probs[pidx] = probs_b[a]
+            # "no block" prob contributes to last entry
+            all_probs[-1] += probs_b[-1] / n_blockers
+
+        value = self.model.get_value(state).item()
+        return {
+            'selectedIndices': selected_pairs,
+            'actionProbabilities':
+                all_probs.cpu().numpy().tolist(),
+            'valueEstimate': value,
+        }
 
     def _handle_card_select(self, state: torch.Tensor, request: dict) -> dict:
         candidates = request.get('candidateFeatures', [])
