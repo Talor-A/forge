@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(
 
 from model.mtg_model import MTGModel
 from model.gpu_config import auto_detect_profile
+from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
 from pathlib import Path
 
 logging.basicConfig(
@@ -58,7 +59,7 @@ def load_attack_decisions(data_dir, max_files=None):
     Returns list of dicts with:
     - game_state_flat: full game state
     - global_features: 64 global features
-    - creature_features: (N, 128) features per creature
+    - creature_features: (N, CARD_DIM) features per creature
     - attack_mask: (N,) bool — which creatures attacked
     - won: whether this player won
     """
@@ -104,9 +105,9 @@ def load_attack_decisions(data_dir, max_files=None):
                 # Parse features
                 n_creatures = len(cand_feats)
                 creatures = np.zeros(
-                    (n_creatures, 128), dtype=np.float32)
+                    (n_creatures, CARD_DIM), dtype=np.float32)
                 for j, cf in enumerate(cand_feats):
-                    cl = min(len(cf), 128)
+                    cl = min(len(cf), CARD_DIM)
                     creatures[j, :cl] = np.array(
                         cf[:cl], dtype=np.float32)
 
@@ -201,10 +202,11 @@ def load_block_decisions(data_dir, max_files=None):
                     continue
 
                 n = len(cand_feats)
+                pair_dim = CARD_DIM * 2  # blocker + attacker
                 creatures = np.zeros(
-                    (n, 128), dtype=np.float32)
+                    (n, pair_dim), dtype=np.float32)
                 for j, cf in enumerate(cand_feats):
-                    cl = min(len(cf), 128)
+                    cl = min(len(cf), pair_dim)
                     creatures[j, :cl] = np.array(
                         cf[:cl], dtype=np.float32)
                 np.clip(creatures, -10, 10, out=creatures)
@@ -247,41 +249,7 @@ def load_block_decisions(data_dir, max_files=None):
     return samples
 
 
-# ── Parse game state into zone tensors ───────────────
-
-def parse_game_state(flat, global_feats):
-    """Parse flat game state into zone tensors."""
-    card_dim = 128
-    zones_config = [
-        ('my_board', 30), ('opp_board', 30),
-        ('hand', 15), ('my_gy', 40),
-        ('opp_gy', 40), ('stack', 10),
-    ]
-
-    g = np.zeros(64, dtype=np.float32)
-    gl = min(len(global_feats), 64)
-    if gl > 0:
-        g[:gl] = global_feats[:gl]
-
-    zones = {}
-    masks = {}
-    offset = 64
-    for name, count in zones_config:
-        zs = count * card_dim
-        zd = np.zeros((count, card_dim), dtype=np.float32)
-        zm = np.zeros(count, dtype=np.bool_)
-        if offset + zs <= len(flat):
-            raw = flat[offset:offset + zs].reshape(
-                count, card_dim)
-            for j in range(count):
-                if np.any(raw[j] != 0):
-                    zd[j] = raw[j]
-                    zm[j] = True
-        offset += zs
-        zones[name] = zd
-        masks[name + '_mask'] = zm
-
-    return g, zones, masks
+## parse_game_state imported from mmap_dataset
 
 
 # ── Training ─────────────────────────────────────────
@@ -410,31 +378,32 @@ def _attack_batch(model, batch, device, use_amp):
     max_c = max(max_c, 1)
     bs = len(batch)
 
-    creature_feats = torch.zeros(bs, max_c, 128,
+    cd = CARD_DIM
+    creature_feats = torch.zeros(bs, max_c, cd,
                                   device=device)
     creature_mask = torch.zeros(bs, max_c,
                                  dtype=torch.bool,
                                  device=device)
     targets = torch.zeros(bs, max_c, device=device)
-    global_feats = torch.zeros(bs, 64, device=device)
+    global_feats = torch.zeros(bs, GLOBAL_DIM, device=device)
 
     # Parse game states for encoder
-    my_board = torch.zeros(bs, 30, 128, device=device)
-    my_board_m = torch.zeros(bs, 30, dtype=torch.bool,
+    my_board = torch.zeros(bs, 40, cd, device=device)
+    my_board_m = torch.zeros(bs, 40, dtype=torch.bool,
                               device=device)
-    opp_board = torch.zeros(bs, 30, 128, device=device)
-    opp_board_m = torch.zeros(bs, 30, dtype=torch.bool,
+    opp_board = torch.zeros(bs, 40, cd, device=device)
+    opp_board_m = torch.zeros(bs, 40, dtype=torch.bool,
                                device=device)
-    hand = torch.zeros(bs, 15, 128, device=device)
+    hand = torch.zeros(bs, 15, cd, device=device)
     hand_m = torch.zeros(bs, 15, dtype=torch.bool,
                           device=device)
-    my_gy = torch.zeros(bs, 40, 128, device=device)
-    my_gy_m = torch.zeros(bs, 40, dtype=torch.bool,
+    my_gy = torch.zeros(bs, 20, cd, device=device)
+    my_gy_m = torch.zeros(bs, 20, dtype=torch.bool,
                            device=device)
-    opp_gy = torch.zeros(bs, 40, 128, device=device)
-    opp_gy_m = torch.zeros(bs, 40, dtype=torch.bool,
+    opp_gy = torch.zeros(bs, 20, cd, device=device)
+    opp_gy_m = torch.zeros(bs, 20, dtype=torch.bool,
                             device=device)
-    stack = torch.zeros(bs, 10, 128, device=device)
+    stack = torch.zeros(bs, 10, cd, device=device)
     stack_m = torch.zeros(bs, 10, dtype=torch.bool,
                            device=device)
 
@@ -621,31 +590,32 @@ def _block_batch(model, batch, device, use_amp):
     max_c = max(s['n_creatures'] for s in batch)
     max_c = max(max_c, 1)
     bs = len(batch)
+    cd = CARD_DIM
 
-    creature_feats = torch.zeros(bs, max_c, 128,
+    creature_feats = torch.zeros(bs, max_c, cd,
                                   device=device)
     creature_mask = torch.zeros(bs, max_c,
                                  dtype=torch.bool,
                                  device=device)
     targets = torch.zeros(bs, max_c, device=device)
-    global_feats = torch.zeros(bs, 64, device=device)
+    global_feats = torch.zeros(bs, GLOBAL_DIM, device=device)
 
-    my_board = torch.zeros(bs, 30, 128, device=device)
-    my_board_m = torch.zeros(bs, 30, dtype=torch.bool,
+    my_board = torch.zeros(bs, 40, cd, device=device)
+    my_board_m = torch.zeros(bs, 40, dtype=torch.bool,
                               device=device)
-    opp_board = torch.zeros(bs, 30, 128, device=device)
-    opp_board_m = torch.zeros(bs, 30, dtype=torch.bool,
+    opp_board = torch.zeros(bs, 40, cd, device=device)
+    opp_board_m = torch.zeros(bs, 40, dtype=torch.bool,
                                device=device)
-    hand = torch.zeros(bs, 15, 128, device=device)
+    hand = torch.zeros(bs, 15, cd, device=device)
     hand_m = torch.zeros(bs, 15, dtype=torch.bool,
                           device=device)
-    my_gy = torch.zeros(bs, 40, 128, device=device)
-    my_gy_m = torch.zeros(bs, 40, dtype=torch.bool,
+    my_gy = torch.zeros(bs, 20, cd, device=device)
+    my_gy_m = torch.zeros(bs, 20, dtype=torch.bool,
                            device=device)
-    opp_gy = torch.zeros(bs, 40, 128, device=device)
-    opp_gy_m = torch.zeros(bs, 40, dtype=torch.bool,
+    opp_gy = torch.zeros(bs, 20, cd, device=device)
+    opp_gy_m = torch.zeros(bs, 20, dtype=torch.bool,
                             device=device)
-    stack = torch.zeros(bs, 10, 128, device=device)
+    stack = torch.zeros(bs, 10, cd, device=device)
     stack_m = torch.zeros(bs, 10, dtype=torch.bool,
                            device=device)
 

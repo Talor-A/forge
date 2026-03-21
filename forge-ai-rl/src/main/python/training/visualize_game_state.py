@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
 from model.mtg_model import MTGModel
-from training.ppo_trainer import parse_game_state
+from training.mmap_dataset import parse_game_state, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
 
 import tkinter as tk
 from tkinter import ttk
@@ -55,7 +55,7 @@ LAND_COLORS = {
 
 
 def decode_card(feats):
-    """Decode a 128-dim CardFeatures vector.
+    """Decode a 256-dim CardFeatures vector.
 
     Layout (from CardFeatures.java):
     [0-6]   card types
@@ -917,12 +917,12 @@ class GameStateViewer:
                 elif dt == "DECLARE_ATTACKERS":
                     n = len(candidates)
                     cf_t = torch.zeros(
-                        1, n, 128, device=self.device)
+                        1, n, CARD_DIM, device=self.device)
                     cm_t = torch.ones(
                         1, n, dtype=torch.bool,
                         device=self.device)
                     for j, cf in enumerate(candidates):
-                        cl = min(len(cf), 128)
+                        cl = min(len(cf), CARD_DIM)
                         cf_t[0, j, :cl] = torch.tensor(
                             cf[:cl], dtype=torch.float32)
                     logits = self.model.attack_head(
@@ -1084,12 +1084,12 @@ class GameStateViewer:
                 f"Stack: {stack_size}")
 
         # Parse zones
-        card_dim = 128
+        card_dim = CARD_DIM
         zones = {}
-        offset = 64
-        for zname, count in [("my_board", 30), ("opp_board", 30),
-                              ("my_hand", 15), ("my_gy", 40),
-                              ("opp_gy", 40), ("stack", 10)]:
+        offset = GLOBAL_DIM
+        for zname, count in [("my_board", 40), ("opp_board", 40),
+                              ("my_hand", 15), ("my_gy", 20),
+                              ("opp_gy", 20), ("stack", 10)]:
             cards = []
             for j in range(count):
                 start = offset + j * card_dim
@@ -1290,10 +1290,10 @@ class GameStateViewer:
 
             if candidates and dt == "DECLARE_ATTACKERS":
                 n = len(candidates)
-                cf_t = torch.zeros(1, n, 128, device=self.device)
+                cf_t = torch.zeros(1, n, CARD_DIM, device=self.device)
                 cm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
                 for j, cf in enumerate(candidates):
-                    cl = min(len(cf), 128)
+                    cl = min(len(cf), CARD_DIM)
                     cf_t[0, j, :cl] = torch.tensor(cf[:cl], dtype=torch.float32)
 
                 logits = self.model.attack_head(state, cf_t, cm_t)
@@ -1377,10 +1377,10 @@ class GameStateViewer:
 
             elif candidates and dt == "DECLARE_BLOCKERS":
                 n = len(candidates)
-                cf_t = torch.zeros(1, n, 128, device=self.device)
+                cf_t = torch.zeros(1, n, CARD_DIM, device=self.device)
                 cm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
                 for j, cf in enumerate(candidates):
-                    cl = min(len(cf), 128)
+                    cl = min(len(cf), CARD_DIM)
                     cf_t[0, j, :cl] = torch.tensor(cf[:cl], dtype=torch.float32)
 
                 # Block head uses card_select_head (softmax)

@@ -15,7 +15,7 @@ class CardSelectHead(nn.Module):
     context about why the selection is happening.
     """
 
-    def __init__(self, state_dim: int = 512, card_feature_dim: int = 128,
+    def __init__(self, state_dim: int = 512, card_feature_dim: int = 256,
                  hidden_dim: int = 256, num_heads: int = 4, dropout: float = 0.1):
         super().__init__()
 

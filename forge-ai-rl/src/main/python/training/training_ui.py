@@ -119,14 +119,14 @@ def load_data_threaded(state: TrainingState, data_dir: str,
         files = files[:max_files]
     state.files_total = len(files)
 
-    global_dim = 64
-    card_dim = 128
+    global_dim = 96
+    card_dim = 256
     zones_config = [
-        ('my_board', 30, card_dim),
-        ('opp_board', 30, card_dim),
+        ('my_board', 40, card_dim),
+        ('opp_board', 40, card_dim),
         ('hand', 15, card_dim),
-        ('my_gy', 40, card_dim),
-        ('opp_gy', 40, card_dim),
+        ('my_gy', 20, card_dim),
+        ('opp_gy', 20, card_dim),
         ('stack', 10, card_dim),
     ]
 

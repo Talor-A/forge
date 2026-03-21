@@ -45,6 +45,7 @@ except ImportError:
 
 from model.mtg_model import MTGModel
 from model.gpu_config import auto_detect_profile
+from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
 
 
 # ── Shared state ─────────────────────────────────────
@@ -130,33 +131,7 @@ def log(state, msg):
 
 # ── Data loading ─────────────────────────────────────
 
-def parse_game_state(flat, global_feats):
-    card_dim = 128
-    zones = [('my_board', 30), ('opp_board', 30),
-             ('hand', 15), ('my_gy', 40),
-             ('opp_gy', 40), ('stack', 10)]
-    g = np.zeros(64, dtype=np.float32)
-    gl = min(len(global_feats), 64)
-    if gl > 0:
-        g[:gl] = global_feats[:gl]
-    zdata = {}
-    zmask = {}
-    offset = 64
-    for name, count in zones:
-        zs = count * card_dim
-        zd = np.zeros((count, card_dim), dtype=np.float32)
-        zm = np.zeros(count, dtype=np.bool_)
-        if offset + zs <= len(flat):
-            raw = flat[offset:offset + zs].reshape(
-                count, card_dim)
-            for j in range(count):
-                if np.any(raw[j] != 0):
-                    zd[j] = raw[j]
-                    zm[j] = True
-        offset += zs
-        zdata[name] = zd
-        zmask[name + '_mask'] = zm
-    return g, zdata, zmask
+## parse_game_state imported from mmap_dataset
 
 
 def load_decisions(data_dir, state, max_files=None,
@@ -298,13 +273,13 @@ def load_decisions_old(data_dir, state, max_files=None,
                     continue
 
                 if dt == 'DECLARE_ATTACKERS':
-                    # Attack: 128-dim card features,
+                    # Attack: card features,
                     # multi-select (binary BCE)
                     n = len(cand)
                     creatures = np.zeros(
-                        (n, 128), dtype=np.float32)
+                        (n, CARD_DIM), dtype=np.float32)
                     for j, cf in enumerate(cand):
-                        cl = min(len(cf), 128)
+                        cl = min(len(cf), CARD_DIM)
                         creatures[j, :cl] = np.array(
                             cf[:cl], dtype=np.float32)
                     np.clip(creatures, -10, 10,
@@ -376,29 +351,30 @@ def make_batch(model, batch, device, use_amp, head):
     max_c = max(s['n_creatures'] for s in batch)
     max_c = max(max_c, 1)
     bs = len(batch)
+    cd = CARD_DIM
 
-    cf = torch.zeros(bs, max_c, 128, device=device)
+    cf = torch.zeros(bs, max_c, cd, device=device)
     cm = torch.zeros(bs, max_c, dtype=torch.bool,
                       device=device)
     tgt = torch.zeros(bs, max_c, device=device)
-    gf = torch.zeros(bs, 64, device=device)
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
 
-    mb = torch.zeros(bs, 30, 128, device=device)
-    mbm = torch.zeros(bs, 30, dtype=torch.bool,
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool,
                        device=device)
-    ob = torch.zeros(bs, 30, 128, device=device)
-    obm = torch.zeros(bs, 30, dtype=torch.bool,
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool,
                        device=device)
-    h = torch.zeros(bs, 15, 128, device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
     hm = torch.zeros(bs, 15, dtype=torch.bool,
                       device=device)
-    mg = torch.zeros(bs, 40, 128, device=device)
-    mgm = torch.zeros(bs, 40, dtype=torch.bool,
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool,
                        device=device)
-    og = torch.zeros(bs, 40, 128, device=device)
-    ogm = torch.zeros(bs, 40, dtype=torch.bool,
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool,
                        device=device)
-    st = torch.zeros(bs, 10, 128, device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
     stm = torch.zeros(bs, 10, dtype=torch.bool,
                        device=device)
 
@@ -463,28 +439,29 @@ def make_priority_batch(model, batch, device, use_amp,
     max_a = max(max_a, 1)
     bs = len(batch)
 
+    cd = CARD_DIM
     af = torch.zeros(bs, max_a, 64, device=device)
     am = torch.zeros(bs, max_a, dtype=torch.bool,
                       device=device)
     tgt = torch.zeros(bs, dtype=torch.long, device=device)
-    gf = torch.zeros(bs, 64, device=device)
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
 
-    mb = torch.zeros(bs, 30, 128, device=device)
-    mbm = torch.zeros(bs, 30, dtype=torch.bool,
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool,
                        device=device)
-    ob = torch.zeros(bs, 30, 128, device=device)
-    obm = torch.zeros(bs, 30, dtype=torch.bool,
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool,
                        device=device)
-    h = torch.zeros(bs, 15, 128, device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
     hm = torch.zeros(bs, 15, dtype=torch.bool,
                       device=device)
-    mg = torch.zeros(bs, 40, 128, device=device)
-    mgm = torch.zeros(bs, 40, dtype=torch.bool,
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool,
                        device=device)
-    og = torch.zeros(bs, 40, 128, device=device)
-    ogm = torch.zeros(bs, 40, dtype=torch.bool,
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool,
                        device=device)
-    st = torch.zeros(bs, 10, 128, device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
     stm = torch.zeros(bs, 10, dtype=torch.bool,
                        device=device)
 
@@ -561,10 +538,10 @@ def make_block_batch(model, batch, device, use_amp,
             continue
         # Find number of attackers: first blocker's pairs
         # end when blocker features change
-        first_blocker = pf[0, :128]
+        first_blocker = pf[0, :CARD_DIM]
         na = 1
         for j in range(1, real):
-            if np.allclose(pf[j, :128], first_blocker,
+            if np.allclose(pf[j, :CARD_DIM], first_blocker,
                            atol=0.01):
                 na += 1
             else:
@@ -576,33 +553,34 @@ def make_block_batch(model, batch, device, use_amp,
     max_b = max(max_b, 1)
     max_a = max(max_a, 1)
 
-    bf = torch.zeros(bs, max_b, 128, device=device)
+    cd = CARD_DIM
+    bf = torch.zeros(bs, max_b, cd, device=device)
     bm = torch.zeros(bs, max_b, dtype=torch.bool,
                       device=device)
-    af = torch.zeros(bs, max_a, 128, device=device)
+    af = torch.zeros(bs, max_a, cd, device=device)
     am_t = torch.zeros(bs, max_a, dtype=torch.bool,
                        device=device)
     # Target: for each blocker, which attacker (or no-block)
     tgt = torch.full((bs, max_b), max_a, dtype=torch.long,
                      device=device)  # default = no block
-    gf = torch.zeros(bs, 64, device=device)
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
 
-    mb = torch.zeros(bs, 30, 128, device=device)
-    mbm = torch.zeros(bs, 30, dtype=torch.bool,
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool,
                        device=device)
-    ob = torch.zeros(bs, 30, 128, device=device)
-    obm = torch.zeros(bs, 30, dtype=torch.bool,
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool,
                        device=device)
-    h = torch.zeros(bs, 15, 128, device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
     hm = torch.zeros(bs, 15, dtype=torch.bool,
                       device=device)
-    mg = torch.zeros(bs, 40, 128, device=device)
-    mgm = torch.zeros(bs, 40, dtype=torch.bool,
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool,
                        device=device)
-    og = torch.zeros(bs, 40, 128, device=device)
-    ogm = torch.zeros(bs, 40, dtype=torch.bool,
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool,
                        device=device)
-    st = torch.zeros(bs, 10, 128, device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
     stm = torch.zeros(bs, 10, dtype=torch.bool,
                        device=device)
 
@@ -615,10 +593,10 @@ def make_block_batch(model, batch, device, use_amp,
             continue
 
         # Infer nb, na from pair structure
-        first_blocker = pf_np[0, :128]
+        first_blocker = pf_np[0, :CARD_DIM]
         na = 1
         for j in range(1, real):
-            if np.allclose(pf_np[j, :128], first_blocker,
+            if np.allclose(pf_np[j, :CARD_DIM], first_blocker,
                            atol=0.01):
                 na += 1
             else:
@@ -628,11 +606,11 @@ def make_block_batch(model, batch, device, use_amp,
         # Extract unique blockers and attackers
         for b_idx in range(min(nb, max_b)):
             bf[i, b_idx] = torch.from_numpy(
-                pf_np[b_idx * na, :128])
+                pf_np[b_idx * na, :CARD_DIM])
             bm[i, b_idx] = True
         for a_idx in range(min(na, max_a)):
             af[i, a_idx] = torch.from_numpy(
-                pf_np[a_idx, 128:256])
+                pf_np[a_idx, CARD_DIM:CARD_DIM*2])
             am_t[i, a_idx] = True
 
         # Build assignment target from selected pairs

@@ -72,7 +72,7 @@ The architecture is designed around the insight that MTG decisions are heterogen
 
 ### 2.2 Game State Representation
 
-#### 2.2.1 Global Features (64 dimensions)
+#### 2.2.1 Global Features (96 dimensions)
 
 The global feature vector captures non-card-specific game state:
 
@@ -91,11 +91,22 @@ The global feature vector captures non-card-specific game state:
 | 29-31 | Land counts (untapped, tapped, opponent) | [0,1] over [0, 15] |
 | 32 | Stack size | [0,1] over [0, 10] |
 | 33-35 | Phase convenience flags | {0, 1} |
-| 36-63 | Reserved | 0 |
+| 36-41 | Available mana in pool by color (WUBRGC) | [0,1] over [0, 10] |
+| 42-47 | Producible mana from untapped permanents (WUBRGC) | {0, 1} |
+| 48 | Total available mana (pool + untapped lands) | [0,1] over [0, 15] |
+| 49 | Spells cast this turn | [0,1] over [0, 10] |
+| 50 | Lands played this turn | [0,1] over [0, 2] |
+| 51 | Opponent lands untapped | [0,1] over [0, 15] |
+| 52-53 | Nonland permanent counts (both players) | [0,1] over [0, 30] |
+| 54-63 | Reserved | 0 |
+| 64-69 | Color devotion (WUBRGC) | [0,1] over [0, 15] |
+| 70 | Castable cards in hand | [0,1] over [0, 10] |
+| 72-75 | Enchantment/artifact counts (both players) | [0,1] over [0, 10] |
+| 76-95 | Reserved | 0 |
 
-#### 2.2.2 Card Features (128 dimensions per card)
+#### 2.2.2 Card Features (256 dimensions per card)
 
-Each card in any zone is encoded as a 128-dimensional vector:
+Each card in any zone is encoded as a 256-dimensional vector:
 
 | Range | Features | Encoding |
 |-------|----------|----------|
@@ -109,11 +120,22 @@ Each card in any zone is encoded as a 128-dimensional vector:
 | 27 | Number of attachments | Normalized [0,5] |
 | 28 | Damage marked | Normalized [0,20] |
 | 29-58 | Keyword abilities (30 common: flying, first strike, trample, deathtouch, lifelink, haste, vigilance, reach, menace, hexproof, shroud, indestructible, flash, defender, fear, ward, prowess, wither, infect, protection, shadow, undying, persist, convoke, delve, cascade, equip, enchant, flanking) | Binary flags |
-| 59-68 | Zone (one-hot: battlefield, hand, library, graveyard, exile, stack, command, sideboard, ante, planar) | Binary flags |
-| 69-124 | Reserved for ability type encoding | 0 |
-| 125-128 | Card identity hash (4 bytes, normalized) | [0,1] per byte |
+| 59-68 | Zone (one-hot) | Binary flags |
+| 69-98 | Primary ability ApiType flags (30 ability types: Mana, ManaReflected, Pump, PumpAll, DealDamage, Destroy, Counter, Draw, ChangeZone, Token, Attach, Animate, Protection, Regenerate, Sacrifice, Tap, Untap, Proliferate, Gain/LoseLife, Mill, Discard, Fight, Explore, Scry, Transform, Bounce, Copy, Exile, Surveil, Adapt) | Binary flags |
+| 97-100 | Ability summary (has_activated, has_triggered, has_mana, n_abilities) | Mixed |
+| 101-104 | Primary ability effects (est. damage, cards drawn, life gained, tokens) | Normalized |
+| 105-108 | Targeting (requires_target, targets_creatures, targets_players, n_targets) | Mixed |
+| 109-127 | Reserved | 0 |
+| 128-157 | Secondary ability ApiType flags (same 30 types) | Binary flags |
+| 139-168 | Extended keywords (30 more: horsemanship, intimidate, skulk, annihilator, absorb, bushido, exalted, melee, modular, toxic, afflict, phasing, cumulative_upkeep, echo, fading, vanishing, storm, affinity, changeling, devoid, emerge, improvise, spectacle, revolt, riot, entwine, companion, foretell, disturb, daybound) | Binary flags |
+| 169-173 | Mana production (produces W, U, B, R, G) | Binary flags |
+| 174-177 | Spell speed (instant_speed, has_flash, can_respond, is_modal) | Binary flags |
+| 178-181 | Trigger summary (ETB, death, combat, upkeep) | Binary flags |
+| 182-189 | Mana cost breakdown (W, U, B, R, G, colorless, generic, total) | Normalized |
+| 190-251 | Reserved | 0 |
+| 252-255 | Card identity hash (4 bytes, normalized) | [0,1] per byte |
 
-The card identity hash enables the model to develop learned embeddings for specific cards, capturing strategic value beyond what structural features alone convey.
+The expanded encoding allows the model to see what cards *do* — their ability types, effects, mana production, and triggers — rather than just their static characteristics. The card identity hash enables learned embeddings for specific cards.
 
 #### 2.2.3 Zone Encoding
 
@@ -121,29 +143,29 @@ Cards are grouped into zones with fixed maximum sizes:
 
 | Zone | Max Cards | Description |
 |------|-----------|-------------|
-| My Battlefield | 30 | Player's permanents |
-| Opponent's Battlefield | 30 | Opponent's permanents |
+| My Battlefield | 40 | Player's permanents |
+| Opponent's Battlefield | 40 | Opponent's permanents |
 | My Hand | 15 | Cards in hand |
-| My Graveyard | 40 | Player's graveyard |
-| Opponent's Graveyard | 40 | Opponent's graveyard |
+| My Graveyard | 20 | Player's graveyard |
+| Opponent's Graveyard | 20 | Opponent's graveyard |
 | Stack | 10 | Spells/abilities resolving |
 
-Each zone produces a (max_cards, 128) tensor with a boolean mask indicating which slots contain real cards versus padding. The total flattened game state is 21,184 floats (64 global + 165 × 128 card features).
+Each zone produces a (max_cards, 256) tensor with a boolean mask indicating which slots contain real cards versus padding. The total flattened game state is 37,216 floats (96 global + 145 × 256 card features). Board sizes were increased to 40 to accommodate token-heavy strategies, while graveyards were reduced to 20 since most relevant graveyard information is captured in the most recent cards.
 
 ### 2.3 Neural Network Architecture
 
 The complete model architecture is shown in Figure 1. Data flows left-to-right: raw game state inputs are encoded by the shared transformer encoder into a 512-dimensional state embedding, which then fans out to the value network (critic) and seven specialized decision heads (actors). Heads shown at full opacity are trained; greyed heads are architecturally complete but currently fall through to the heuristic AI.
 
-![Model Architecture](forge-ai-rl/src/main/python/tools/mtg_model_architecture.svg)
+![Model Architecture](forge-ai-rl/src/main/python/tools/mtg_model_architecture.png)
 
-*Figure 1: MTG RL Model Architecture. The shared game state encoder (3.4M parameters) processes 7 input zones through per-zone self-attention and cross-zone attention, producing a 512-dimensional state embedding. This embedding is consumed by the value network (critic, providing PPO advantage baseline) and decision heads (actors). Each head is specialized for its decision type: the priority head uses cross-attention between game state and available spells to select which spell to play; the attack head uses self-attention among creatures for coordinated attack decisions; the block head uses cross-attention between blockers and attackers for assignment. Currently trained heads: Value, Priority (95.5% accuracy), Attack (84.4%), Block (61.0%). Untrained heads (Target, Card Select, Mulligan, Binary) fall through to the heuristic AI.*
+*Figure 1: MTG RL Model Architecture. The shared game state encoder (3.5M parameters) processes 7 input zones through per-zone self-attention and cross-zone attention, producing a 512-dimensional state embedding. This embedding is consumed by the value network (critic, providing PPO advantage baseline) and decision heads (actors). Each head is specialized for its decision type: the priority head uses cross-attention between game state and available spells to select which spell to play; the attack head uses self-attention among creatures for coordinated attack decisions; the block head uses cross-attention between blockers and attackers for assignment. Currently trained heads: Value, Priority, Attack, Block. Untrained heads (Target, Card Select, Mulligan, Binary) fall through to the heuristic AI.*
 
 #### 2.3.1 Game State Encoder (Transformer)
 
 The encoder uses a two-level attention architecture:
 
 **Level 1: Per-Zone Card Set Attention.** Each zone has a dedicated `CardSetEncoder` module consisting of:
-- Linear projection: card_dim (128) → zone_embed_dim (128)
+- Linear projection: card_dim (256) → zone_embed_dim (128)
 - Multi-head self-attention transformer (2 layers, 4 heads, GELU activation)
 - Masked mean pooling over valid cards
 
@@ -153,7 +175,7 @@ This produces a single zone_embed_dim vector per zone. Self-attention within a z
 
 **Output projection.** The 7 zone embeddings are concatenated (7 × 128 = 896 dimensions) and projected through a two-layer MLP to the final state embedding of 512 dimensions.
 
-Total encoder parameters: 3,409,664.
+Total encoder parameters: 3,512,064.
 
 #### 2.3.2 Value Network (Critic)
 
@@ -170,25 +192,25 @@ Total parameters: 198,401.
 
 The attack head makes a joint binary decision for each potential attacker: attack or hold back. This is implemented as:
 
-1. **Card projection.** Each creature's 128-dim features are projected to 256 dimensions.
+1. **Card projection.** Each creature's 256-dim features are projected to 256 dimensions.
 2. **Self-attention among potential attackers** (2 transformer layers, 4 heads). This allows the model to consider attack patterns — e.g., "if creature A attacks, creature B should also attack to force unfavorable blocks."
 3. **State conditioning.** The 512-dim game state embedding is expanded and concatenated with each creature's attention-refined representation.
 4. **Binary classifier.** A two-layer MLP produces a logit per creature, where positive means "attack" and negative means "hold."
 
 During training, binary cross-entropy loss is applied per creature, masked to only count real creatures (not padding).
 
-Total parameters: 1,875,457.
+Total parameters: 1,908,225.
 
 #### 2.3.4 Block Decision Head
 
 The block head assigns each potential blocker to an attacker (or no attacker). Architecture:
 
-1. **Separate projections** for blockers and attackers (128 → 256 each).
+1. **Separate projections** for blockers and attackers (256 → 256 each).
 2. **Cross-attention.** Blockers attend to attackers to understand the threat landscape.
 3. **Pairwise scoring.** For each (blocker, attacker) pair, a scoring network produces an assignment logit, plus a "don't block" option.
 4. **Independent categorical sampling** per blocker over the attacker options + no-block.
 
-Total parameters: 657,665.
+Total parameters: 723,201.
 
 #### 2.3.5 Priority Action Head
 
@@ -205,26 +227,26 @@ Total parameters: 543,233.
 | Head | Purpose | Parameters |
 |------|---------|------------|
 | Target | Pointer network for selecting spell targets | 674,304 |
-| Card Select | General card selection (discard, sacrifice, scry) | 1,480,449 |
-| Mulligan | Opening hand evaluation + London mulligan bottom selection | 2,007,042 |
+| Card Select | General card selection (discard, sacrifice, scry) | 1,513,217 |
+| Mulligan | Opening hand evaluation + London mulligan bottom selection | 2,039,810 |
 | Binary | Yes/no decisions (confirm triggers, replacement effects) | 197,889 |
 
 #### 2.3.7 Total Model Size
 
 | Component | Parameters |
 |-----------|------------|
-| Game State Encoder | 3,409,664 |
+| Game State Encoder | 3,512,064 |
 | Value Network | 198,401 |
 | Priority Head | 543,233 |
 | Target Head | 674,304 |
-| Attack Head | 1,875,457 |
-| Block Head | 657,665 |
-| Card Select Head | 1,480,449 |
-| Mulligan Head | 2,007,042 |
+| Attack Head | 1,908,225 |
+| Block Head | 723,201 |
+| Card Select Head | 1,513,217 |
+| Mulligan Head | 2,039,810 |
 | Binary Head | 197,889 |
-| **Total** | **11,044,104** |
+| **Total** | **11,310,344** |
 
-At 42MB in fp32, the full model fits comfortably on consumer GPUs. We plan progressive scaling to 50-80M parameters in later training phases, with weight transfer via net2net-style initialization.
+At ~43MB in fp32, the full model fits comfortably on consumer GPUs (~65MB VRAM for inference). The wider 256-dim card features account for the increase from 11.0M to 11.3M parameters, primarily in the input projection layers of the card-consuming heads.
 
 ---
 

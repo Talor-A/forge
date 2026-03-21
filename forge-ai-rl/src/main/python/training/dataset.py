@@ -29,9 +29,9 @@ class TrajectoryDataset(Dataset):
     """
 
     def __init__(self, data_dir: str, max_files: int = None,
-                 global_dim: int = 64, card_dim: int = 128,
-                 max_board: int = 30, max_hand: int = 15,
-                 max_gy: int = 40, max_stack: int = 10):
+                 global_dim: int = 96, card_dim: int = 256,
+                 max_board: int = 40, max_hand: int = 15,
+                 max_gy: int = 20, max_stack: int = 10):
         self.data_dir = data_dir
         self.global_dim = global_dim
         self.card_dim = card_dim

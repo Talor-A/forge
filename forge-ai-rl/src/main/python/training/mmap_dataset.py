@@ -31,26 +31,33 @@ def _split_file_ids(file_ids, val_fraction=0.1, seed=42):
     return train_ids, val_ids
 
 
+GLOBAL_DIM = 96
+CARD_DIM = 256
+ZONES_CONFIG = [('my_board', 40), ('opp_board', 40),
+                ('hand', 15), ('my_gy', 20),
+                ('opp_gy', 20), ('stack', 10)]
+TOTAL_CARDS = sum(c for _, c in ZONES_CONFIG)  # 145
+GAME_STATE_DIM = GLOBAL_DIM + TOTAL_CARDS * CARD_DIM  # 37,216
+
+
 def parse_game_state(flat, global_feats):
-    """Parse flat game state into zone tensors."""
-    card_dim = 128
-    zones = [('my_board', 30), ('opp_board', 30),
-             ('hand', 15), ('my_gy', 40),
-             ('opp_gy', 40), ('stack', 10)]
-    g = np.zeros(64, dtype=np.float32)
-    gl = min(len(global_feats), 64)
+    """Parse flat game state into zone tensors.
+    Canonical implementation — all other files should import
+    this function rather than defining their own copy."""
+    g = np.zeros(GLOBAL_DIM, dtype=np.float32)
+    gl = min(len(global_feats), GLOBAL_DIM)
     if gl > 0:
         g[:gl] = global_feats[:gl]
     zdata = {}
     zmask = {}
-    offset = 64
-    for name, count in zones:
-        zs = count * card_dim
-        zd = np.zeros((count, card_dim), dtype=np.float32)
+    offset = GLOBAL_DIM
+    for name, count in ZONES_CONFIG:
+        zs = count * CARD_DIM
+        zd = np.zeros((count, CARD_DIM), dtype=np.float32)
         zm = np.zeros(count, dtype=np.bool_)
         if offset + zs <= len(flat):
             raw = flat[offset:offset + zs].reshape(
-                count, card_dim)
+                count, CARD_DIM)
             for j in range(count):
                 if np.any(raw[j] != 0):
                     zd[j] = raw[j]

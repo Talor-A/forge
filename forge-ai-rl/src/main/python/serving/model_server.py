@@ -236,7 +236,7 @@ class ModelServer:
         Uses the same parse_game_state() as training to guarantee
         identical tensor layout."""
         import numpy as np
-        from training.ppo_trainer import parse_game_state
+        from training.mmap_dataset import parse_game_state
 
         gf = request.get('globalFeatures', [])
         flat = request.get('gameStateFlat', [])
@@ -339,7 +339,7 @@ class ModelServer:
         if not candidates:
             return {'selectedIndices': [], 'actionProbabilities': [], 'valueEstimate': 0.0}
 
-        creature_features = self._to_tensor_2d(candidates, len(candidates), 128)
+        creature_features = self._to_tensor_2d(candidates, len(candidates), 256)
         creature_mask = torch.ones(1, len(candidates), dtype=torch.bool, device=self.device)
 
         logits = self.model.attack_head(state, creature_features, creature_mask)
@@ -382,12 +382,13 @@ class ModelServer:
 
         # Infer number of attackers from pair structure:
         # pairs are ordered b0a0, b0a1, ..., b1a0, b1a1, ...
-        # First blocker's features are in pairs[0][:128]
+        # First blocker's features are in pairs[0][:card_dim]
         import numpy as np
-        first_blocker = np.array(real_pairs[0][:128])
+        card_dim = self.model.config.get('card_feature_dim', 256)
+        first_blocker = np.array(real_pairs[0][:card_dim])
         n_attackers = 1
         for j in range(1, n_pairs):
-            other = np.array(real_pairs[j][:128])
+            other = np.array(real_pairs[j][:card_dim])
             if np.allclose(first_blocker, other, atol=0.01):
                 n_attackers += 1
             else:
@@ -401,11 +402,11 @@ class ModelServer:
                     'valueEstimate': value}
 
         # Extract unique blocker and attacker features
-        bf = torch.zeros(1, n_blockers, 128,
+        bf = torch.zeros(1, n_blockers, card_dim,
                          device=self.device)
         bm = torch.ones(1, n_blockers, dtype=torch.bool,
                         device=self.device)
-        af = torch.zeros(1, n_attackers, 128,
+        af = torch.zeros(1, n_attackers, card_dim,
                          device=self.device)
         am = torch.ones(1, n_attackers, dtype=torch.bool,
                         device=self.device)
@@ -414,15 +415,15 @@ class ModelServer:
             pair_idx = b * n_attackers
             if pair_idx < n_pairs:
                 feats = real_pairs[pair_idx]
-                bf[0, b, :min(128, len(feats))] = \
-                    torch.tensor(feats[:128],
+                bf[0, b, :min(card_dim, len(feats))] = \
+                    torch.tensor(feats[:card_dim],
                                  dtype=torch.float32,
                                  device=self.device)
         for a in range(n_attackers):
             if a < n_pairs:
                 feats = real_pairs[a]
-                af[0, a, :min(128, len(feats)-128)] = \
-                    torch.tensor(feats[128:256],
+                af[0, a, :min(card_dim, len(feats)-card_dim)] = \
+                    torch.tensor(feats[card_dim:card_dim*2],
                                  dtype=torch.float32,
                                  device=self.device)
 
@@ -469,7 +470,7 @@ class ModelServer:
         if not candidates:
             return {'selectedIndices': [], 'actionProbabilities': [], 'valueEstimate': 0.0}
 
-        card_features = self._to_tensor_2d(candidates, len(candidates), 128)
+        card_features = self._to_tensor_2d(candidates, len(candidates), 256)
         card_mask = torch.ones(1, len(candidates), dtype=torch.bool, device=self.device)
 
         logits = self.model.card_select_head(state, card_features, card_mask)
@@ -500,7 +501,7 @@ class ModelServer:
         if not candidates:
             return {'selectedIndices': [1], 'actionProbabilities': [], 'valueEstimate': 0.0}
 
-        hand_features = self._to_tensor_2d(candidates, len(candidates), 128)
+        hand_features = self._to_tensor_2d(candidates, len(candidates), 256)
         hand_mask = torch.ones(1, len(candidates), dtype=torch.bool, device=self.device)
 
         keep_logit, _ = self.model.mulligan_head.evaluate_hand(state, hand_features, hand_mask)

@@ -74,7 +74,7 @@ python training/training_ui.py --data-dir /path/to/trajectories --device cuda --
 JSONL files, one per player per game. Header line + decision records:
 ```json
 {"gameId":"...","won":true,"totalDecisions":15,"durationMs":3500}
-{"decisionType":"DECLARE_ATTACKERS","contextInfo":"attack_2_of_5","candidateFeatures":[[...128 floats...],[...]],"selectedIndices":[0,2],"globalFeatures":[...64 floats...],"gameStateFlat":[...21184 floats...]}
+{"decisionType":"DECLARE_ATTACKERS","contextInfo":"attack_2_of_5","candidateFeatures":[[...256 floats...],[...]],"selectedIndices":[0,2],"globalFeatures":[...96 floats...],"gameStateFlat":[...37216 floats...]}
 ```
 
 Decision types with action data:

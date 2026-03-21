@@ -1,13 +1,16 @@
 package forge.ai.rl.features;
 
 import forge.ai.rl.RLConfig;
+import forge.card.mana.ManaAtom;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
 import forge.game.card.CardCollectionView;
+import forge.game.mana.ManaPool;
 import forge.game.phase.PhaseHandler;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
+import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.MagicStack;
 import forge.game.zone.ZoneType;
@@ -65,10 +68,13 @@ public class GameStateEncoder {
         );
     }
 
+    /** Global feature dimension. */
+    public static final int GLOBAL_FEATURE_SIZE = 96;
+
     /**
      * Encode global (non-per-card) game state features.
      *
-     * Layout (64 floats):
+     * Layout (96 floats):
      * [0]     : my life total (normalized)
      * [1]     : opponent life total (normalized)
      * [2]     : my poison counters (normalized)
@@ -93,10 +99,26 @@ public class GameStateEncoder {
      * [33]    : is my main phase 1? (0 or 1)
      * [34]    : is my main phase 2? (0 or 1)
      * [35]    : is combat? (0 or 1)
-     * [36-63] : reserved for expansion
+     * [36-41] : available mana in pool by color (W, U, B, R, G, colorless)
+     * [42-47] : producible mana from untapped permanents (W, U, B, R, G, colorless)
+     * [48]    : total available mana (sum of pool)
+     * [49]    : spells cast this turn (normalized)
+     * [50]    : lands played this turn (0 or 1)
+     * [51]    : opponent lands untapped (normalized)
+     * [52]    : my nonland permanents count (normalized)
+     * [53]    : opponent nonland permanents count (normalized)
+     * [54-63] : reserved
+     * [64-69] : my color devotion (W, U, B, R, G, colorless)
+     * [70]    : castable cards in hand (normalized)
+     * [71]    : reserved
+     * [72]    : my enchantment count (normalized)
+     * [73]    : my artifact count (normalized)
+     * [74]    : opponent enchantment count (normalized)
+     * [75]    : opponent artifact count (normalized)
+     * [76-95] : reserved
      */
     private float[] encodeGlobalState(Game game, Player me, Player opp) {
-        float[] features = new float[64];
+        float[] features = new float[GLOBAL_FEATURE_SIZE];
         PhaseHandler ph = game.getPhaseHandler();
 
         int idx = 0;
@@ -124,15 +146,59 @@ public class GameStateEncoder {
         features[idx++] = normalize(me.getCardsIn(ZoneType.Library).size(), 0, 60);
         features[idx++] = normalize(opp != null ? opp.getCardsIn(ZoneType.Library).size() : 0, 0, 60);
 
-        // Creature counts
+        // Board statistics — collect in a single pass per player
         int myCreatures = 0, oppCreatures = 0;
         int myPower = 0, oppPower = 0;
         int myToughness = 0, oppToughness = 0;
+        int myLandsUntapped = 0, myLandsTapped = 0;
+        int oppLands = 0, oppLandsUntapped = 0;
+        int myNonlands = 0, oppNonlands = 0;
+        int myEnchantments = 0, myArtifacts = 0;
+        int oppEnchantments = 0, oppArtifacts = 0;
+        // Devotion: count colored mana symbols on permanents
+        int[] myDevotion = new int[6]; // WUBRGC
+        // Producible mana from untapped permanents
+        boolean[] myProducible = new boolean[6]; // WUBRGC
+
         for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
             if (c.isCreature()) {
                 myCreatures++;
                 myPower += c.getNetPower();
                 myToughness += c.getNetToughness();
+            }
+            if (c.isLand()) {
+                if (c.isTapped()) myLandsTapped++;
+                else myLandsUntapped++;
+            } else {
+                myNonlands++;
+            }
+            if (c.isEnchantment()) myEnchantments++;
+            if (c.isArtifact()) myArtifacts++;
+
+            // Devotion: count colored mana symbols in mana cost
+            if (c.getManaCost() != null) {
+                int[] shards = c.getManaCost().getColorShardCounts();
+                for (int i = 0; i < Math.min(shards.length, 6); i++) {
+                    myDevotion[i] += shards[i];
+                }
+            }
+
+            // Producible mana from untapped permanents with mana abilities
+            if (!c.isTapped()) {
+                for (SpellAbility ma : c.getManaAbilities()) {
+                    String produced = ma.getManaPart() != null
+                            ? ma.getManaPart().getOrigProduced() : "";
+                    if (produced.contains("W")) myProducible[0] = true;
+                    if (produced.contains("U")) myProducible[1] = true;
+                    if (produced.contains("B")) myProducible[2] = true;
+                    if (produced.contains("R")) myProducible[3] = true;
+                    if (produced.contains("G")) myProducible[4] = true;
+                    if (produced.contains("C")) myProducible[5] = true;
+                    // "Any" can produce any color
+                    if (produced.contains("Any")) {
+                        for (int i = 0; i < 5; i++) myProducible[i] = true;
+                    }
+                }
             }
         }
         if (opp != null) {
@@ -142,40 +208,95 @@ public class GameStateEncoder {
                     oppPower += c.getNetPower();
                     oppToughness += c.getNetToughness();
                 }
+                if (c.isLand()) {
+                    oppLands++;
+                    if (!c.isTapped()) oppLandsUntapped++;
+                } else {
+                    oppNonlands++;
+                }
+                if (c.isEnchantment()) oppEnchantments++;
+                if (c.isArtifact()) oppArtifacts++;
             }
         }
 
-        features[idx++] = normalize(myCreatures, 0, 20);
-        features[idx++] = normalize(oppCreatures, 0, 20);
-        features[idx++] = normalize(myPower, 0, 60);
-        features[idx++] = normalize(oppPower, 0, 60);
-        features[idx++] = normalize(myToughness, 0, 60);
-        features[idx++] = normalize(oppToughness, 0, 60);
+        features[idx++] = normalize(myCreatures, 0, 20);    // [23]
+        features[idx++] = normalize(oppCreatures, 0, 20);    // [24]
+        features[idx++] = normalize(myPower, 0, 60);         // [25]
+        features[idx++] = normalize(oppPower, 0, 60);        // [26]
+        features[idx++] = normalize(myToughness, 0, 60);     // [27]
+        features[idx++] = normalize(oppToughness, 0, 60);    // [28]
 
-        // Lands
-        int myLandsUntapped = 0, myLandsTapped = 0, oppLands = 0;
-        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
-            if (c.isLand()) {
-                if (c.isTapped()) myLandsTapped++;
-                else myLandsUntapped++;
-            }
-        }
-        if (opp != null) {
-            for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
-                if (c.isLand()) oppLands++;
-            }
-        }
-        features[idx++] = normalize(myLandsUntapped, 0, 15);
-        features[idx++] = normalize(myLandsTapped, 0, 15);
-        features[idx++] = normalize(oppLands, 0, 15);
+        features[idx++] = normalize(myLandsUntapped, 0, 15); // [29]
+        features[idx++] = normalize(myLandsTapped, 0, 15);   // [30]
+        features[idx++] = normalize(oppLands, 0, 15);        // [31]
 
         // Stack
-        features[idx++] = normalize(game.getStack().size(), 0, 10);
+        features[idx++] = normalize(game.getStack().size(), 0, 10); // [32]
 
         // Phase convenience flags (currentPhase is null during mulligan)
-        features[idx++] = (currentPhase == PhaseType.MAIN1 && ph.getPlayerTurn() == me) ? 1f : 0f;
-        features[idx++] = (currentPhase == PhaseType.MAIN2 && ph.getPlayerTurn() == me) ? 1f : 0f;
-        features[idx++] = (currentPhase != null && currentPhase.isAfter(PhaseType.MAIN1) && currentPhase.isBefore(PhaseType.MAIN2)) ? 1f : 0f;
+        features[idx++] = (currentPhase == PhaseType.MAIN1 && ph.getPlayerTurn() == me) ? 1f : 0f;  // [33]
+        features[idx++] = (currentPhase == PhaseType.MAIN2 && ph.getPlayerTurn() == me) ? 1f : 0f;  // [34]
+        features[idx++] = (currentPhase != null && currentPhase.isAfter(PhaseType.MAIN1) && currentPhase.isBefore(PhaseType.MAIN2)) ? 1f : 0f; // [35]
+
+        // === NEW FEATURES [36-75] ===
+
+        // [36-41] Available mana in pool by color (W, U, B, R, G, colorless)
+        ManaPool pool = me.getManaPool();
+        byte[] manaTypes = ManaAtom.MANATYPES; // {W, U, B, R, G, C}
+        int totalPoolMana = 0;
+        for (int i = 0; i < 6; i++) {
+            int amount = pool.getAmountOfColor(manaTypes[i]);
+            features[36 + i] = normalize(amount, 0, 10);
+            totalPoolMana += amount;
+        }
+
+        // [42-47] Producible mana from untapped permanents (binary flags)
+        for (int i = 0; i < 6; i++) {
+            features[42 + i] = myProducible[i] ? 1f : 0f;
+        }
+
+        // [48] Total available mana (pool + untapped lands as rough estimate)
+        features[48] = normalize(totalPoolMana + myLandsUntapped, 0, 15);
+
+        // [49] Spells cast this turn
+        features[49] = normalize(me.getSpellsCastThisTurn(), 0, 10);
+
+        // [50] Lands played this turn
+        features[50] = normalize(me.getLandsPlayedThisTurn(), 0, 2);
+
+        // [51] Opponent lands untapped (threat of instant-speed response)
+        features[51] = normalize(oppLandsUntapped, 0, 15);
+
+        // [52-53] Nonland permanent counts
+        features[52] = normalize(myNonlands, 0, 30);
+        features[53] = normalize(oppNonlands, 0, 30);
+
+        // [54-63] reserved
+
+        // [64-69] Color devotion (WUBRGC)
+        for (int i = 0; i < 6; i++) {
+            features[64 + i] = normalize(myDevotion[i], 0, 15);
+        }
+
+        // [70] Castable cards in hand (can afford mana cost from untapped lands)
+        int castable = 0;
+        int availableMana = myLandsUntapped + totalPoolMana;
+        for (Card c : me.getCardsIn(ZoneType.Hand)) {
+            if (c.getManaCost() != null && c.getManaCost().getCMC() <= availableMana) {
+                castable++;
+            }
+        }
+        features[70] = normalize(castable, 0, 10);
+
+        // [71] reserved
+
+        // [72-75] Artifact/enchantment counts
+        features[72] = normalize(myEnchantments, 0, 10);
+        features[73] = normalize(myArtifacts, 0, 10);
+        features[74] = normalize(oppEnchantments, 0, 10);
+        features[75] = normalize(oppArtifacts, 0, 10);
+
+        // [76-95] reserved
 
         return features;
     }

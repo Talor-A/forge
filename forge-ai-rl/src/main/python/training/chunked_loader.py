@@ -13,6 +13,10 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Generator
 
+from training.mmap_dataset import (
+    parse_game_state, CARD_DIM, GLOBAL_DIM,
+    ZONES_CONFIG as _ZONES_CONFIG, GAME_STATE_DIM)
+
 
 def chunked_file_loader(data_dir: str,
                         chunk_size: int = 200,
@@ -41,11 +45,7 @@ def chunked_file_loader(data_dir: str,
         yield files[i:i + chunk_size]
 
 
-ZONES_CONFIG = [
-    ('my_board', 30), ('opp_board', 30),
-    ('hand', 15), ('my_gy', 40),
-    ('opp_gy', 40), ('stack', 10),
-]
+ZONES_CONFIG = _ZONES_CONFIG
 
 
 def load_value_samples(files: List[Path]) -> list:
@@ -54,7 +54,7 @@ def load_value_samples(files: List[Path]) -> list:
     Returns samples in the format expected by SimpleDataset:
     {global_features, zones{...}, masks{...}, value_target}
     """
-    card_dim = 128
+    card_dim = CARD_DIM
     samples = []
     for filepath in files:
         try:
@@ -80,15 +80,15 @@ def load_value_samples(files: List[Path]) -> list:
                 gf = np.nan_to_num(gf)
                 flat = np.nan_to_num(flat)
 
-                g = np.zeros(64, dtype=np.float32)
-                gl = min(len(gf), 64)
+                g = np.zeros(GLOBAL_DIM, dtype=np.float32)
+                gl = min(len(gf), GLOBAL_DIM)
                 if gl > 0:
                     g[:gl] = gf[:gl]
 
                 # Parse zones from flat state
                 zones = {}
                 masks = {}
-                offset = 64
+                offset = GLOBAL_DIM
                 for name, count in ZONES_CONFIG:
                     zs = count * card_dim
                     zd = np.zeros((count, card_dim),
@@ -163,8 +163,8 @@ def load_decision_samples(files: List[Path],
                     dtype=np.float32)
                 np.clip(gf, -10, 10, out=gf)
                 gf = np.nan_to_num(gf)
-                g = np.zeros(64, dtype=np.float32)
-                gl = min(len(gf), 64)
+                g = np.zeros(GLOBAL_DIM, dtype=np.float32)
+                gl = min(len(gf), GLOBAL_DIM)
                 if gl > 0:
                     g[:gl] = gf[:gl]
 
@@ -201,9 +201,9 @@ def load_decision_samples(files: List[Path],
                 elif dt == 'DECLARE_ATTACKERS':
                     n = len(cand)
                     creatures = np.zeros(
-                        (n, 128), dtype=np.float32)
+                        (n, CARD_DIM), dtype=np.float32)
                     for j, cf in enumerate(cand):
-                        cl = min(len(cf), 128)
+                        cl = min(len(cf), CARD_DIM)
                         creatures[j, :cl] = np.array(
                             cf[:cl], dtype=np.float32)
                     np.clip(creatures, -10, 10,

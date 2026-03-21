@@ -53,13 +53,13 @@ public class GameStateFeatures {
      */
     public static GameStateFeatures empty() {
         return new GameStateFeatures(
-                new float[64],
-                new float[30][128], new boolean[30],
-                new float[30][128], new boolean[30],
-                new float[15][128], new boolean[15],
-                new float[40][128], new boolean[40],
-                new float[40][128], new boolean[40],
-                new float[10][128], new boolean[10]);
+                new float[GameStateEncoder.GLOBAL_FEATURE_SIZE],
+                new float[40][CardFeatures.FEATURE_SIZE], new boolean[40],
+                new float[40][CardFeatures.FEATURE_SIZE], new boolean[40],
+                new float[15][CardFeatures.FEATURE_SIZE], new boolean[15],
+                new float[20][CardFeatures.FEATURE_SIZE], new boolean[20],
+                new float[20][CardFeatures.FEATURE_SIZE], new boolean[20],
+                new float[10][CardFeatures.FEATURE_SIZE], new boolean[10]);
     }
 
     public float[] getGlobalFeatures() { return globalFeatures; }

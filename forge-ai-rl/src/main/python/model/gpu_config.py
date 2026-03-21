@@ -9,7 +9,7 @@ RTX 3080 (10GB VRAM) profile:
 
 Memory estimates at default dimensions:
 - Model parameters: ~15M * 4 bytes = ~60MB (fp32), ~30MB (fp16)
-- Batch of 64 game states: ~64 * (30*128 + 30*128 + 15*128 + 40*128 + 10*128) * 4 ≈ ~50MB
+- Batch of 64 game states: ~64 * (40*256 + 40*256 + 15*256 + 20*256 + 20*256 + 10*256) * 4 ≈ ~100MB
 - Gradients + optimizer states: ~180MB (fp32), ~120MB (fp16)
 - Total training: ~400-600MB (well within 10GB)
 """
@@ -127,17 +127,17 @@ def auto_detect_profile() -> GPUProfile:
 
 
 def estimate_memory_usage(batch_size: int = 64, state_dim: int = 512,
-                          board_size: int = 30, card_dim: int = 128) -> dict:
+                          board_size: int = 40, card_dim: int = 256) -> dict:
     """Estimate VRAM usage in MB."""
     # Model parameters (rough estimate)
     model_params_mb = 15 * 4  # ~15M params * 4 bytes (fp32)
 
     # Input tensors per batch
     per_sample_mb = (
-        64 * 4 +  # global features
+        96 * 4 +  # global features
         board_size * card_dim * 4 * 2 +  # my board + opp board
         15 * card_dim * 4 +  # hand
-        40 * card_dim * 4 * 2 +  # graveyards
+        20 * card_dim * 4 * 2 +  # graveyards
         10 * card_dim * 4  # stack
     ) / (1024 * 1024)
     input_mb = per_sample_mb * batch_size

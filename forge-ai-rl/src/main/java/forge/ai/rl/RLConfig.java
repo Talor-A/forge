@@ -11,10 +11,10 @@ public class RLConfig {
 
     // Feature dimensions
     private int gameStateEmbeddingDim = 512;
-    private int cardEmbeddingDim = 128;
-    private int maxBoardCreatures = 30;
+    private int cardEmbeddingDim = 256;
+    private int maxBoardCreatures = 40;
     private int maxHandCards = 15;
-    private int maxGraveyardCards = 40;
+    private int maxGraveyardCards = 20;
     private int maxStackEntries = 10;
     private int maxAvailableActions = 50;
 

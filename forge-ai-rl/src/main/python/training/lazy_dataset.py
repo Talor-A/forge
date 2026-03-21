@@ -134,9 +134,9 @@ class ValueDataset(torch.utils.data.Dataset):
     Parses game state into zone tensors on demand."""
 
     ZONES = [
-        ('my_board', 30), ('opp_board', 30),
-        ('hand', 15), ('my_gy', 40),
-        ('opp_gy', 40), ('stack', 10),
+        ('my_board', 40), ('opp_board', 40),
+        ('hand', 15), ('my_gy', 20),
+        ('opp_gy', 20), ('stack', 10),
     ]
 
     def __init__(self, data_dir: str,
@@ -153,10 +153,10 @@ class ValueDataset(torch.utils.data.Dataset):
         g = raw['global_features']
         flat = raw['game_state_flat']
 
-        card_dim = 128
+        card_dim = 256
         zones = {}
         masks = {}
-        offset = 64
+        offset = 96
         for name, count in self.ZONES:
             zs = count * card_dim
             zd = np.zeros((count, card_dim),

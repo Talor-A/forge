@@ -103,13 +103,13 @@ draw_section(ix, iy, 280, 520, "Game State Input", C['input'])
 ty = iy + 48
 
 inputs = [
-    ("Global Features", "64-dim", "Life, turn, phase, hand/lib sizes,\ncreature counts, mana, stack"),
-    ("My Board", "30 × 128-dim", "Creatures, lands, enchantments\nwith type/color/P&T/keywords/state"),
-    ("Opponent Board", "30 × 128-dim", "Same encoding as my board"),
-    ("My Hand", "15 × 128-dim", "Cards in hand"),
-    ("My Graveyard", "40 × 128-dim", "Graveyard cards"),
-    ("Opp Graveyard", "40 × 128-dim", "Opponent's graveyard"),
-    ("Stack", "10 × 128-dim", "Spells/abilities resolving"),
+    ("Global Features", "96-dim", "Life, turn, phase, mana pool,\ndevotion, castable, artifacts/enchants"),
+    ("My Board", "40 × 256-dim", "Creatures, lands, enchantments\nwith type/color/P&T/keywords/abilities"),
+    ("Opponent Board", "40 × 256-dim", "Same encoding as my board"),
+    ("My Hand", "15 × 256-dim", "Cards in hand"),
+    ("My Graveyard", "20 × 256-dim", "Graveyard cards"),
+    ("Opp Graveyard", "20 × 256-dim", "Opponent's graveyard"),
+    ("Stack", "10 × 256-dim", "Spells/abilities resolving"),
 ]
 
 for name, dim, desc in inputs:
@@ -120,20 +120,20 @@ for name, dim, desc in inputs:
     ty += 64
 
 # Total
-draw.text((ix+140, ty+5), "Total: 21,184 floats", fill=C['highlight'],
+draw.text((ix+140, ty+5), "Total: 37,216 floats", fill=C['highlight'],
           font=font_sub, anchor='mt')
 
 # === ENCODER (center-left) ===
 ex, ey = 350, 100
 enc_h = 520
-inner_y = draw_section(ex, ey, 340, enc_h, "Game State Encoder", C['encoder'], "3.4M params")
+inner_y = draw_section(ex, ey, 340, enc_h, "Game State Encoder", C['encoder'], "3.5M params")
 
 # Per-zone encoders
 draw_box(ex+10, inner_y, 320, 120, '#161b22', C['encoder_light'], radius=6)
 draw.text((ex+170, inner_y+6), "6 × CardSetEncoder", fill=C['encoder_light'],
           font=font_sub, anchor='mt')
 ly = inner_y + 28
-ly = draw_layer(ex+20, ly, 300, "Linear(128 → 128)", color='#1a2332', border=C['encoder'])
+ly = draw_layer(ex+20, ly, 300, "Linear(256 → 128)", color='#1a2332', border=C['encoder'])
 ly = draw_layer(ex+20, ly, 300, "TransformerEncoder × 2", "4 heads, GELU, d_ff=512",
                 color='#1a2332', border=C['encoder'])
 ly = draw_layer(ex+20, ly, 300, "Masked Mean Pool → (batch, 128)", color='#1a2332', border=C['encoder'])
@@ -144,7 +144,7 @@ inner_y += 130
 draw_box(ex+10, inner_y, 320, 52, '#161b22', C['encoder_light'], radius=6)
 draw.text((ex+170, inner_y+6), "Global Encoder", fill=C['encoder_light'],
           font=font_sub, anchor='mt')
-draw_layer(ex+20, inner_y+26, 300, "Linear(64 → 128) → GELU → LayerNorm",
+draw_layer(ex+20, inner_y+26, 300, "Linear(96 → 128) → GELU → LayerNorm",
            color='#1a2332', border=C['encoder'])
 inner_y += 62
 
@@ -216,7 +216,7 @@ heads = [
         'output': 'Per-creature sigmoid [0,1]',
     },
     {
-        'name': 'Block Head', 'color': C['block'], 'params': '658K',
+        'name': 'Block Head', 'color': C['block'], 'params': '723K',
         'input': 'State + Blockers + Attackers (128)',
         'layers': [
             'Blocker/Attacker proj: Linear(128→256)',
@@ -313,9 +313,9 @@ draw.text((lx+300, ly+8), "Architecture Summary", fill=C['text'],
           font=font_head, anchor='mt')
 
 legend_items = [
-    ("Shared Encoder", C['encoder'], "3.4M params — Transformer with per-zone set attention"),
+    ("Shared Encoder", C['encoder'], "3.5M params — Transformer with per-zone set attention"),
     ("Value Network (Critic)", C['value'], "198K params — Evaluates game state win probability"),
-    ("Decision Heads (Actor)", C['priority'], "7.5M params — Specialized policies per decision type"),
+    ("Decision Heads (Actor)", C['priority'], "7.6M params — Specialized policies per decision type"),
 ]
 for i, (name, color, desc) in enumerate(legend_items):
     ly_item = ly + 34 + i * 28

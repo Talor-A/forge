@@ -6,8 +6,8 @@ Structure:
     preprocessed/
     ├── metadata.json
     ├── shared/
-    │   ├── game_state.npy      (N_total × 21184, float32)
-    │   ├── global_features.npy (N_total × 64, float32)
+    │   ├── game_state.npy      (N_total × 37216, float32)
+    │   ├── global_features.npy (N_total × 96, float32)
     │   ├── outcome.npy         (N_total, float32)
     │   └── file_id.npy         (N_total, int32)
     ├── priority/
@@ -18,13 +18,13 @@ Structure:
     │   └── action_probs.npy    (N_pri × MAX, float32)
     ├── attack/
     │   ├── gs_index.npy        → row in shared
-    │   ├── creatures.npy       (N_atk × MAX × 128)
+    │   ├── creatures.npy       (N_atk × MAX × 256)
     │   ├── creature_mask.npy
     │   ├── action_mask.npy
     │   └── action_probs.npy
     └── block/
         ├── gs_index.npy        → row in shared
-        ├── pairs.npy           (N_blk × MAX × 256)
+        ├── pairs.npy           (N_blk × MAX × 512)
         ├── pair_mask.npy
         ├── action_mask.npy
         └── action_probs.npy
@@ -46,6 +46,11 @@ import sys
 import time
 import numpy as np
 from pathlib import Path
+
+# Canonical dimension constants
+GLOBAL_DIM = 96
+CARD_DIM = 256
+GAME_STATE_DIM = 37216  # 96 + 145*256
 
 
 def scan_files(files):
@@ -81,7 +86,7 @@ def scan_files(files):
                     max_cand['attack'] = max(
                         max_cand['attack'], nc)
                 elif dt == 'DECLARE_BLOCKERS':
-                    if cand and len(cand[0]) > 200:
+                    if cand and len(cand[0]) > CARD_DIM + 10:
                         counts['block'] += 1
                         max_cand['block'] = max(
                             max_cand['block'], nc)
@@ -122,11 +127,11 @@ def preprocess(files, output_dir, counts, max_cand):
     gs = np.lib.format.open_memmap(
         os.path.join(sh, 'game_state.npy'),
         mode='w+', dtype=np.float32,
-        shape=(nt, 21184))
+        shape=(nt, GAME_STATE_DIM))
     gf = np.lib.format.open_memmap(
         os.path.join(sh, 'global_features.npy'),
         mode='w+', dtype=np.float32,
-        shape=(nt, 64))
+        shape=(nt, GLOBAL_DIM))
     outcome = np.lib.format.open_memmap(
         os.path.join(sh, 'outcome.npy'),
         mode='w+', dtype=np.float32, shape=(nt,))
@@ -169,7 +174,7 @@ def preprocess(files, output_dir, counts, max_cand):
     a_crt = np.lib.format.open_memmap(
         os.path.join(ad, 'creatures.npy'),
         mode='w+', dtype=np.float32,
-        shape=(na, ma, 128))
+        shape=(na, ma, CARD_DIM))
     a_cmask = np.lib.format.open_memmap(
         os.path.join(ad, 'creature_mask.npy'),
         mode='w+', dtype=np.bool_, shape=(na, ma))
@@ -192,7 +197,7 @@ def preprocess(files, output_dir, counts, max_cand):
     b_pairs = np.lib.format.open_memmap(
         os.path.join(bd, 'pairs.npy'),
         mode='w+', dtype=np.float32,
-        shape=(nb, mb, 256))
+        shape=(nb, mb, CARD_DIM * 2))
     b_pmask = np.lib.format.open_memmap(
         os.path.join(bd, 'pair_mask.npy'),
         mode='w+', dtype=np.bool_, shape=(nb, mb))
@@ -258,16 +263,17 @@ def preprocess(files, output_dir, counts, max_cand):
                     dtype=np.float32)
                 if len(flat_raw) == 0:
                     continue
-                flat = np.zeros(21184, dtype=np.float32)
-                fl = min(len(flat_raw), 21184)
+                flat = np.zeros(GAME_STATE_DIM,
+                                dtype=np.float32)
+                fl = min(len(flat_raw), GAME_STATE_DIM)
                 flat[:fl] = flat_raw[:fl]
                 sanitize(flat)
 
                 gf_raw = np.array(
                     rec.get('globalFeatures', []),
                     dtype=np.float32)
-                g = np.zeros(64, dtype=np.float32)
-                gl = min(len(gf_raw), 64)
+                g = np.zeros(GLOBAL_DIM, dtype=np.float32)
+                gl = min(len(gf_raw), GLOBAL_DIM)
                 if gl > 0:
                     g[:gl] = gf_raw[:gl]
                 sanitize(g)
@@ -304,7 +310,7 @@ def preprocess(files, output_dir, counts, max_cand):
                     a_gs_idx[ai] = shared_row
                     for j in range(min(nc, ma)):
                         cf = cand[j]
-                        cl = min(len(cf), 128)
+                        cl = min(len(cf), CARD_DIM)
                         a_crt[ai, j, :cl] = sanitize(
                             np.array(cf[:cl],
                                      dtype=np.float32))
@@ -317,12 +323,12 @@ def preprocess(files, output_dir, counts, max_cand):
                     ai += 1
 
                 elif dt == 'DECLARE_BLOCKERS':
-                    if not cand or len(cand[0]) <= 200:
+                    if not cand or len(cand[0]) <= CARD_DIM + 10:
                         continue
                     b_gs_idx[bi] = shared_row
                     for j in range(min(nc, mb)):
                         cf = cand[j]
-                        cl = min(len(cf), 256)
+                        cl = min(len(cf), CARD_DIM * 2)
                         b_pairs[bi, j, :cl] = sanitize(
                             np.array(cf[:cl],
                                      dtype=np.float32))
@@ -390,8 +396,9 @@ def main():
         'final_counts': final,
         'max_candidates': max_cand,
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-        'game_state_dim': 21184,
-        'global_feature_dim': 64,
+        'game_state_dim': GAME_STATE_DIM,
+        'global_feature_dim': GLOBAL_DIM,
+        'card_feature_dim': CARD_DIM,
         'shared_game_state': True,
         'discount_gamma': GAMMA,
         'value_targets': 'discounted_returns',

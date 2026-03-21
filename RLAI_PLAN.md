@@ -329,8 +329,8 @@ The final card representation is the **concatenation of all four**, projected to
 ### Phase 1: Infrastructure (weeks 1-4) ✅ COMPLETE
 1. ✅ Create `forge-ai-rl` Maven module
 2. ✅ Implement `PlayerControllerRL` — extends PlayerControllerAi, overrides combat + priority decisions
-3. ✅ Build `GameStateEncoder` — 21,184-float game state (64 global + 165×128 card features)
-4. ✅ Build `CardFeatures` (128-dim) + `ActionEncoder` (64-dim) — card and spell representations
+3. ✅ Build `GameStateEncoder` — 37,216-float game state (96 global + 145×256 card features)
+4. ✅ Build `CardFeatures` (256-dim) + `ActionEncoder` (64-dim) — card and spell representations
 5. ✅ Build `TrajectoryRecorder` — JSONL trajectory files with full state + action features
 6. ✅ Build `SimulateRLTraining` — headless parallel game runner (16 threads, 1.3 games/sec)
 7. ✅ JSON-over-TCP bridge with batched inference server

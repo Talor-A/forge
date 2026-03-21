@@ -94,8 +94,11 @@ def ppo_thread(state, args):
             load_ppo_data, compute_ppo_batch,
             compute_ppo_priority_batch,
             run_games, start_model_server,
-            find_free_port, parse_game_state,
+            find_free_port,
             ModelServerError, PROJECT_ROOT)
+        from training.mmap_dataset import (
+            parse_game_state, CARD_DIM, GLOBAL_DIM,
+            ZONES_CONFIG)
         from model.mtg_model import MTGModel
         from model.gpu_config import auto_detect_profile
         import torch
@@ -335,36 +338,37 @@ def ppo_thread(state, args):
                         continue
                     try:
                         bs = len(batch)
-                        gf = torch.zeros(bs, 64,
+                        cd = CARD_DIM
+                        gf = torch.zeros(bs, GLOBAL_DIM,
                             device=device)
                         tgt = torch.zeros(bs,
                             device=device)
-                        mb = torch.zeros(bs, 30, 128,
+                        mb = torch.zeros(bs, 40, cd,
                             device=device)
-                        mbm = torch.zeros(bs, 30,
+                        mbm = torch.zeros(bs, 40,
                             dtype=torch.bool,
                             device=device)
-                        ob = torch.zeros(bs, 30, 128,
+                        ob = torch.zeros(bs, 40, cd,
                             device=device)
-                        obm = torch.zeros(bs, 30,
+                        obm = torch.zeros(bs, 40,
                             dtype=torch.bool,
                             device=device)
-                        h = torch.zeros(bs, 15, 128,
+                        h = torch.zeros(bs, 15, cd,
                             device=device)
                         hm = torch.zeros(bs, 15,
                             dtype=torch.bool,
                             device=device)
-                        mg = torch.zeros(bs, 40, 128,
+                        mg = torch.zeros(bs, 20, cd,
                             device=device)
-                        mgm = torch.zeros(bs, 40,
+                        mgm = torch.zeros(bs, 20,
                             dtype=torch.bool,
                             device=device)
-                        og = torch.zeros(bs, 40, 128,
+                        og = torch.zeros(bs, 20, cd,
                             device=device)
-                        ogm = torch.zeros(bs, 40,
+                        ogm = torch.zeros(bs, 20,
                             dtype=torch.bool,
                             device=device)
-                        st = torch.zeros(bs, 10, 128,
+                        st = torch.zeros(bs, 10, cd,
                             device=device)
                         stm = torch.zeros(bs, 10,
                             dtype=torch.bool,

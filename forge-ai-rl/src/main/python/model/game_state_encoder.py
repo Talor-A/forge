@@ -80,7 +80,7 @@ class GameStateTransformer(nn.Module):
     concatenates with global features, and produces a single game state embedding.
     """
 
-    def __init__(self, global_feature_dim: int = 64, card_feature_dim: int = 128,
+    def __init__(self, global_feature_dim: int = 96, card_feature_dim: int = 256,
                  zone_embed_dim: int = 128, output_dim: int = 512,
                  num_heads: int = 4, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()

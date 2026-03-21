@@ -118,9 +118,9 @@ def print_summary(best_acc, best_epoch, total_time, save_path):
 
 # ── Dataset with progress ────────────────────────────
 
-def load_dataset_with_progress(data_dir, global_dim=64,
-                                card_dim=128, max_board=30,
-                                max_hand=15, max_gy=40,
+def load_dataset_with_progress(data_dir, global_dim=96,
+                                card_dim=256, max_board=40,
+                                max_hand=15, max_gy=20,
                                 max_stack=10, max_files=None):
     """Load trajectory files with a progress bar."""
     import json

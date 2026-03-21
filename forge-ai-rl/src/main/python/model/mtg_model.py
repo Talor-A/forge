@@ -32,7 +32,7 @@ class MTGModel(nn.Module):
             └── BinaryHead (yes/no decisions)
     """
 
-    def __init__(self, global_feature_dim: int = 64, card_feature_dim: int = 128,
+    def __init__(self, global_feature_dim: int = 96, card_feature_dim: int = 256,
                  action_feature_dim: int = 64, state_dim: int = 512,
                  hidden_dim: int = 256, zone_embed_dim: int = 128,
                  num_heads: int = 4, num_layers: int = 2, dropout: float = 0.1):
