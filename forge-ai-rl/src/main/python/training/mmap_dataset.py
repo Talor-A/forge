@@ -2,8 +2,10 @@
 Memory-mapped datasets for training.
 
 Loads preprocessed numpy arrays with mmap_mode='r', keeping RAM
-usage at O(batch_size) regardless of dataset size. Compatible
-with PyTorch DataLoader (num_workers=0).
+usage at O(batch_size) regardless of dataset size.
+
+Game state is stored once in shared/ and accessed via gs_index
+indirection from each decision type's dataset.
 
 Usage:
     ds = MmapValueDataset('preprocessed/', train=True)
@@ -16,19 +18,11 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from typing import Optional, Set
-
-
-def _load_metadata(preprocessed_dir):
-    """Load metadata.json from preprocessed directory."""
-    path = os.path.join(preprocessed_dir, 'metadata.json')
-    with open(path) as f:
-        return json.load(f)
 
 
 def _split_file_ids(file_ids, val_fraction=0.1, seed=42):
     """Split file IDs into train/val sets."""
-    unique_ids = sorted(set(file_ids.tolist()))
+    unique_ids = sorted(set(int(x) for x in file_ids))
     rng = np.random.RandomState(seed)
     rng.shuffle(unique_ids)
     n_val = max(1, int(len(unique_ids) * val_fraction))
@@ -38,8 +32,7 @@ def _split_file_ids(file_ids, val_fraction=0.1, seed=42):
 
 
 def parse_game_state(flat, global_feats):
-    """Parse flat game state into zone tensors.
-    Same logic as train_decisions_ui.parse_game_state."""
+    """Parse flat game state into zone tensors."""
     card_dim = 128
     zones = [('my_board', 30), ('opp_board', 30),
              ('hand', 15), ('my_gy', 40),
@@ -68,38 +61,44 @@ def parse_game_state(flat, global_feats):
     return g, zdata, zmask
 
 
-class MmapValueDataset(Dataset):
-    """Memory-mapped dataset for value network training.
+class SharedState:
+    """Shared mmap arrays for game state.
+    Loaded once, referenced by all datasets."""
 
-    Returns dicts compatible with SimpleDataset format:
-    {global_features, zones, masks, value_target}
-    """
-
-    def __init__(self, preprocessed_dir: str,
-                 train: bool = True,
-                 val_fraction: float = 0.1):
-        vdir = os.path.join(preprocessed_dir, 'value')
+    def __init__(self, preprocessed_dir):
+        sh = os.path.join(preprocessed_dir, 'shared')
         self.game_state = np.load(
-            os.path.join(vdir, 'game_state.npy'),
+            os.path.join(sh, 'game_state.npy'),
             mmap_mode='r')
         self.global_features = np.load(
-            os.path.join(vdir, 'global_features.npy'),
+            os.path.join(sh, 'global_features.npy'),
             mmap_mode='r')
         self.outcome = np.load(
-            os.path.join(vdir, 'outcome.npy'),
+            os.path.join(sh, 'outcome.npy'),
             mmap_mode='r')
         self.file_id = np.load(
-            os.path.join(vdir, 'file_id.npy'),
+            os.path.join(sh, 'file_id.npy'),
             mmap_mode='r')
 
-        # Train/val split by file ID
+
+class MmapValueDataset(Dataset):
+    """Memory-mapped dataset for value network training.
+    Uses shared game state directly (every record is a
+    value training sample)."""
+
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        s = self.shared
+
         train_ids, val_ids = _split_file_ids(
-            self.file_id, val_fraction)
+            s.file_id, val_fraction)
         target_ids = train_ids if train else val_ids
 
         self.indices = np.array([
-            i for i in range(len(self.file_id))
-            if self.file_id[i] in target_ids
+            i for i in range(len(s.file_id))
+            if int(s.file_id[i]) in target_ids
         ], dtype=np.int64)
 
     def __len__(self):
@@ -107,8 +106,9 @@ class MmapValueDataset(Dataset):
 
     def __getitem__(self, idx):
         i = self.indices[idx]
-        flat = np.array(self.game_state[i])  # copy from mmap
-        gf = np.array(self.global_features[i])
+        s = self.shared
+        flat = np.array(s.game_state[i])
+        gf = np.array(s.global_features[i])
 
         g, zones, masks = parse_game_state(flat, gf)
 
@@ -135,51 +135,46 @@ class MmapValueDataset(Dataset):
             'stack_mask': torch.from_numpy(
                 masks['stack_mask']),
             'value_target': torch.tensor(
-                float(self.outcome[i]),
+                float(s.outcome[i]),
                 dtype=torch.float32),
         }
 
 
 class MmapPriorityDataset(Dataset):
-    """Memory-mapped dataset for priority head training.
+    """Memory-mapped dataset for priority head.
+    References shared game state via gs_index."""
 
-    Returns dicts compatible with make_priority_batch:
-    {global_features, game_state_flat, action_features,
-     selected_idx, n_actions, won}
-    """
-
-    def __init__(self, preprocessed_dir: str,
-                 train: bool = True,
-                 val_fraction: float = 0.1):
-        pdir = os.path.join(preprocessed_dir, 'priority')
-        self.game_state = np.load(
-            os.path.join(pdir, 'game_state.npy'),
-            mmap_mode='r')
-        self.global_features = np.load(
-            os.path.join(pdir, 'global_features.npy'),
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        pd = os.path.join(preprocessed_dir, 'priority')
+        self.gs_index = np.load(
+            os.path.join(pd, 'gs_index.npy'),
             mmap_mode='r')
         self.candidates = np.load(
-            os.path.join(pdir, 'candidates.npy'),
+            os.path.join(pd, 'candidates.npy'),
             mmap_mode='r')
         self.candidate_mask = np.load(
-            os.path.join(pdir, 'candidate_mask.npy'),
+            os.path.join(pd, 'candidate_mask.npy'),
             mmap_mode='r')
         self.selected_idx = np.load(
-            os.path.join(pdir, 'selected_idx.npy'),
+            os.path.join(pd, 'selected_idx.npy'),
             mmap_mode='r')
-        self.outcome = np.load(
-            os.path.join(pdir, 'outcome.npy'),
-            mmap_mode='r')
-        self.file_id = np.load(
-            os.path.join(pdir, 'file_id.npy'),
+        self.action_probs = np.load(
+            os.path.join(pd, 'action_probs.npy'),
             mmap_mode='r')
 
+        # Train/val split using shared file_id
+        s = self.shared
         train_ids, val_ids = _split_file_ids(
-            self.file_id, val_fraction)
+            s.file_id, val_fraction)
         target_ids = train_ids if train else val_ids
+
         self.indices = np.array([
-            i for i in range(len(self.file_id))
-            if self.file_id[i] in target_ids
+            i for i in range(len(self.gs_index))
+            if int(s.file_id[self.gs_index[i]])
+            in target_ids
         ], dtype=np.int64)
 
     def __len__(self):
@@ -187,57 +182,58 @@ class MmapPriorityDataset(Dataset):
 
     def __getitem__(self, idx):
         i = self.indices[idx]
+        si = int(self.gs_index[i])
+        s = self.shared
+
         mask = np.array(self.candidate_mask[i])
         n_actions = int(mask.sum())
 
         return {
             'global_features': np.array(
-                self.global_features[i]),
+                s.global_features[si]),
             'game_state_flat': np.array(
-                self.game_state[i]),
+                s.game_state[si]),
             'action_features': np.array(
                 self.candidates[i, :n_actions]),
             'selected_idx': int(self.selected_idx[i]),
             'n_actions': n_actions,
-            'won': float(self.outcome[i] > 0),
+            'won': float(s.outcome[si] > 0),
         }
 
 
 class MmapAttackDataset(Dataset):
-    """Memory-mapped dataset for attack head training."""
+    """Memory-mapped dataset for attack head."""
 
-    def __init__(self, preprocessed_dir: str,
-                 train: bool = True,
-                 val_fraction: float = 0.1):
-        adir = os.path.join(preprocessed_dir, 'attack')
-        self.game_state = np.load(
-            os.path.join(adir, 'game_state.npy'),
-            mmap_mode='r')
-        self.global_features = np.load(
-            os.path.join(adir, 'global_features.npy'),
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        ad = os.path.join(preprocessed_dir, 'attack')
+        self.gs_index = np.load(
+            os.path.join(ad, 'gs_index.npy'),
             mmap_mode='r')
         self.creatures = np.load(
-            os.path.join(adir, 'creatures.npy'),
+            os.path.join(ad, 'creatures.npy'),
             mmap_mode='r')
         self.creature_mask = np.load(
-            os.path.join(adir, 'creature_mask.npy'),
+            os.path.join(ad, 'creature_mask.npy'),
             mmap_mode='r')
         self.action_mask = np.load(
-            os.path.join(adir, 'action_mask.npy'),
+            os.path.join(ad, 'action_mask.npy'),
             mmap_mode='r')
-        self.outcome = np.load(
-            os.path.join(adir, 'outcome.npy'),
-            mmap_mode='r')
-        self.file_id = np.load(
-            os.path.join(adir, 'file_id.npy'),
+        self.action_probs = np.load(
+            os.path.join(ad, 'action_probs.npy'),
             mmap_mode='r')
 
+        s = self.shared
         train_ids, val_ids = _split_file_ids(
-            self.file_id, val_fraction)
+            s.file_id, val_fraction)
         target_ids = train_ids if train else val_ids
+
         self.indices = np.array([
-            i for i in range(len(self.file_id))
-            if self.file_id[i] in target_ids
+            i for i in range(len(self.gs_index))
+            if int(s.file_id[self.gs_index[i]])
+            in target_ids
         ], dtype=np.int64)
 
     def __len__(self):
@@ -245,58 +241,59 @@ class MmapAttackDataset(Dataset):
 
     def __getitem__(self, idx):
         i = self.indices[idx]
+        si = int(self.gs_index[i])
+        s = self.shared
+
         cmask = np.array(self.creature_mask[i])
         n = int(cmask.sum())
 
         return {
             'global_features': np.array(
-                self.global_features[i]),
+                s.global_features[si]),
             'game_state_flat': np.array(
-                self.game_state[i]),
+                s.game_state[si]),
             'creature_features': np.array(
                 self.creatures[i, :n]),
             'action_mask': np.array(
                 self.action_mask[i, :n]),
             'n_creatures': n,
-            'won': float(self.outcome[i] > 0),
+            'won': float(s.outcome[si] > 0),
         }
 
 
 class MmapBlockDataset(Dataset):
-    """Memory-mapped dataset for block head training."""
+    """Memory-mapped dataset for block head."""
 
-    def __init__(self, preprocessed_dir: str,
-                 train: bool = True,
-                 val_fraction: float = 0.1):
-        bdir = os.path.join(preprocessed_dir, 'block')
-        self.game_state = np.load(
-            os.path.join(bdir, 'game_state.npy'),
-            mmap_mode='r')
-        self.global_features = np.load(
-            os.path.join(bdir, 'global_features.npy'),
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        bd = os.path.join(preprocessed_dir, 'block')
+        self.gs_index = np.load(
+            os.path.join(bd, 'gs_index.npy'),
             mmap_mode='r')
         self.pairs = np.load(
-            os.path.join(bdir, 'pairs.npy'),
+            os.path.join(bd, 'pairs.npy'),
             mmap_mode='r')
         self.pair_mask = np.load(
-            os.path.join(bdir, 'pair_mask.npy'),
+            os.path.join(bd, 'pair_mask.npy'),
             mmap_mode='r')
         self.action_mask = np.load(
-            os.path.join(bdir, 'action_mask.npy'),
+            os.path.join(bd, 'action_mask.npy'),
             mmap_mode='r')
-        self.outcome = np.load(
-            os.path.join(bdir, 'outcome.npy'),
-            mmap_mode='r')
-        self.file_id = np.load(
-            os.path.join(bdir, 'file_id.npy'),
+        self.action_probs = np.load(
+            os.path.join(bd, 'action_probs.npy'),
             mmap_mode='r')
 
+        s = self.shared
         train_ids, val_ids = _split_file_ids(
-            self.file_id, val_fraction)
+            s.file_id, val_fraction)
         target_ids = train_ids if train else val_ids
+
         self.indices = np.array([
-            i for i in range(len(self.file_id))
-            if self.file_id[i] in target_ids
+            i for i in range(len(self.gs_index))
+            if int(s.file_id[self.gs_index[i]])
+            in target_ids
         ], dtype=np.int64)
 
     def __len__(self):
@@ -304,18 +301,21 @@ class MmapBlockDataset(Dataset):
 
     def __getitem__(self, idx):
         i = self.indices[idx]
+        si = int(self.gs_index[i])
+        s = self.shared
+
         pmask = np.array(self.pair_mask[i])
         n = int(pmask.sum())
 
         return {
             'global_features': np.array(
-                self.global_features[i]),
+                s.global_features[si]),
             'game_state_flat': np.array(
-                self.game_state[i]),
+                s.game_state[si]),
             'pair_features': np.array(
                 self.pairs[i, :n]),
             'action_mask': np.array(
                 self.action_mask[i, :n]),
             'n_pairs': n,
-            'won': float(self.outcome[i] > 0),
+            'won': float(s.outcome[si] > 0),
         }
