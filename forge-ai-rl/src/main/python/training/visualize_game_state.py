@@ -55,11 +55,33 @@ LAND_COLORS = {
 
 
 def decode_card(feats):
+    """Decode a 128-dim CardFeatures vector.
+
+    Layout (from CardFeatures.java):
+    [0-6]   card types
+    [7-12]  colors (W,U,B,R,G,C)
+    [13]    CMC (normalized 0-16)
+    [14-15] power/toughness (normalized -5 to 20)
+    [16]    loyalty (normalized 0-10)
+    [17]    tapped
+    [18]    summoning sick
+    [19]    attacking
+    [20]    blocking
+    [21]    face down
+    [22-26] counters (+1/+1, -1/-1, loyalty, charge, other)
+    [27]    attachments count
+    [28]    damage marked
+    [29-58] 30 keyword flags
+    [59-68] zone (one-hot)
+    [69-96] ability type flags (reserved)
+    [97-127] reserved / card hash
+    """
     if len(feats) < 30:
         return None
 
     type_names = ["Creature", "Instant", "Sorcery",
-                  "Enchantment", "Artifact", "Planeswalker", "Land"]
+                  "Enchantment", "Artifact",
+                  "Planeswalker", "Land"]
     types = [t for i, t in enumerate(type_names)
              if i < len(feats) and feats[i] > 0.5]
 
@@ -67,22 +89,51 @@ def decode_card(feats):
     colors = [c for i, c in enumerate(color_chars)
               if 7+i < len(feats) and feats[7+i] > 0.5]
 
-    cmc = int(round(feats[13] * 16)) if len(feats) > 13 else 0
+    cmc = int(round(feats[13] * 16)) \
+        if len(feats) > 13 else 0
 
-    power = int(round(feats[14] * 25 - 5)) if "Creature" in types and len(feats) > 14 else None
-    toughness = int(round(feats[15] * 25 - 5)) if "Creature" in types and len(feats) > 15 else None
+    power = None
+    toughness = None
+    if "Creature" in types and len(feats) > 15:
+        power = int(round(feats[14] * 25 - 5))
+        toughness = int(round(feats[15] * 25 - 5))
+
+    loyalty = None
+    if "Planeswalker" in types and len(feats) > 16:
+        loyalty = int(round(feats[16] * 10))
 
     tapped = feats[17] > 0.5 if len(feats) > 17 else False
     sick = feats[18] > 0.5 if len(feats) > 18 else False
+    attacking = feats[19] > 0.5 \
+        if len(feats) > 19 else False
+    blocking = feats[20] > 0.5 \
+        if len(feats) > 20 else False
 
-    p1p1 = int(round(feats[22] * 20)) if len(feats) > 22 else 0
+    p1p1 = int(round(feats[22] * 20)) \
+        if len(feats) > 22 else 0
+    m1m1 = int(round(feats[23] * 10)) \
+        if len(feats) > 23 else 0
+    damage = int(round(feats[28] * 20)) \
+        if len(feats) > 28 else 0
 
     kws = [kw for i, kw in enumerate(KEYWORDS)
            if 29+i < len(feats) and feats[29+i] > 0.5]
 
+    # Zone
+    zone_names = ["Battlefield", "Hand", "Library",
+                  "Graveyard", "Exile", "Stack",
+                  "Command", "Sideboard", "Ante",
+                  "Planar"]
+    zone = None
+    for i, zn in enumerate(zone_names):
+        if 59+i < len(feats) and feats[59+i] > 0.5:
+            zone = zn
+            break
+
     # Type label
     if "Land" in types:
-        c = colors[0] if colors and colors[0] != "C" else "C"
+        c = colors[0] if colors and colors[0] != "C" \
+            else "C"
         label = LAND_COLORS.get(c, "Land")
     elif types:
         label = "/".join(types)
@@ -92,8 +143,11 @@ def decode_card(feats):
     return {
         "label": label, "types": types, "colors": colors,
         "cmc": cmc, "power": power, "toughness": toughness,
-        "tapped": tapped, "sick": sick, "p1p1": p1p1,
-        "keywords": kws,
+        "loyalty": loyalty,
+        "tapped": tapped, "sick": sick,
+        "attacking": attacking, "blocking": blocking,
+        "p1p1": p1p1, "m1m1": m1m1, "damage": damage,
+        "keywords": kws, "zone": zone,
     }
 
 
@@ -110,6 +164,40 @@ API_TYPES = [
 ]
 
 
+# Human-readable API type descriptions
+API_DESCRIPTIONS = {
+    "DealDamage": "Deal damage",
+    "Draw": "Draw cards",
+    "Counter": "Counter spell",
+    "ChangeZone": "Move card (bounce/exile/reanimate)",
+    "Pump": "Pump creature (+X/+X)",
+    "PumpAll": "Pump all creatures",
+    "Destroy": "Destroy permanent",
+    "DestroyAll": "Destroy all (board wipe)",
+    "Sacrifice": "Force sacrifice",
+    "Discard": "Force discard",
+    "GainLife": "Gain life",
+    "LoseLife": "Lose life",
+    "Token": "Create token",
+    "Animate": "Animate permanent",
+    "Attach": "Attach (equip/enchant)",
+    "Tap": "Tap permanent",
+    "Untap": "Untap permanent",
+    "Mill": "Mill cards",
+    "Regenerate": "Regenerate",
+    "Protection": "Grant protection",
+    "Fight": "Fight creature",
+    "Charm": "Charm (modal)",
+    "Scry": "Scry",
+    "Explore": "Explore",
+    "AddOrRemoveCounter": "Add/remove counter",
+    "ManaReflected": "Produce mana (reflected)",
+    "Mana": "Produce mana",
+    "ChangeTargets": "Change targets",
+    "Fog": "Prevent combat damage",
+}
+
+
 def decode_action(feats):
     """Decode a 64-dim ActionEncoder feature vector."""
     if len(feats) < 18:
@@ -120,7 +208,10 @@ def decode_action(feats):
         return {"label": "PASS", "is_pass": True,
                 "types": [], "colors": [], "cmc": 0,
                 "sa_type": "pass", "api": None,
-                "targets": False}
+                "targets": False, "detail": "",
+                "damage": 0, "cards_drawn": 0,
+                "power": None, "toughness": None,
+                "target_info": ""}
 
     type_names = ["Creature", "Instant", "Sorcery",
                   "Enchantment", "Artifact", "Planeswalker",
@@ -148,28 +239,84 @@ def decode_action(feats):
             api = name
             break
 
-    targets = feats[48] > 0.5 if len(feats) > 48 else False
+    # Targeting info [48-51]
+    requires_target = feats[48] > 0.5 \
+        if len(feats) > 48 else False
+    n_targets = int(round(feats[49] * 5)) \
+        if len(feats) > 49 else 0
+    targets_creatures = feats[50] > 0.5 \
+        if len(feats) > 50 else False
+    targets_players = feats[51] > 0.5 \
+        if len(feats) > 51 else False
+
+    # Source P/T [52-53]
+    power = None
+    toughness = None
+    if "Creature" in types and len(feats) > 53:
+        power = int(round(feats[52] * 25 - 5))
+        toughness = int(round(feats[53] * 25 - 5))
+
+    # Estimated damage [54] and cards drawn [55]
+    damage = 0
+    cards_drawn = 0
+    if len(feats) > 54:
+        damage = int(round(feats[54] * 20))
+    if len(feats) > 55:
+        cards_drawn = int(round(feats[55] * 10))
+
+    # Build target description
+    target_parts = []
+    if requires_target:
+        if targets_creatures and targets_players:
+            target_parts.append("→ creature/player")
+        elif targets_creatures:
+            target_parts.append("→ creature")
+        elif targets_players:
+            target_parts.append("→ player")
+        else:
+            target_parts.append("→ target")
+    target_info = " ".join(target_parts)
+
+    # Build detail string
+    detail_parts = []
+    if api:
+        desc = API_DESCRIPTIONS.get(api, api)
+        detail_parts.append(desc)
+    if damage > 0:
+        detail_parts.append(f"{damage} dmg")
+    if cards_drawn > 0:
+        detail_parts.append(f"draw {cards_drawn}")
+    if power is not None:
+        detail_parts.append(f"{power}/{toughness}")
+    if target_info:
+        detail_parts.append(target_info)
+    detail = " | ".join(detail_parts)
 
     # Build label
     color_str = "".join(colors) if colors else ""
     type_str = "/".join(types) if types else "?"
     label = f"{color_str} {type_str}" if color_str \
         else type_str
-    if api:
-        label += f" ({api})"
     label += f" [{cmc}]"
+    if detail:
+        label += f" — {detail}"
 
     return {
         "label": label, "is_pass": False,
         "types": types, "colors": colors, "cmc": cmc,
         "sa_type": sa_type, "api": api,
-        "targets": targets,
+        "targets": requires_target,
+        "target_info": target_info,
+        "damage": damage, "cards_drawn": cards_drawn,
+        "power": power, "toughness": toughness,
+        "detail": detail,
     }
 
 
 # ── Card rendering (MTG card style) ───────────────
 
-CARD_W, CARD_H = 85, 120
+CARD_W, CARD_H = 90, 140
+ACTION_W, ACTION_H = 100, 140
 
 
 def draw_card_image(info, highlight=None):
@@ -239,33 +386,72 @@ def draw_card_image(info, highlight=None):
     y += 3
 
     # Keywords (compact)
-    for kw in info["keywords"][:2]:
+    for kw in info.get("keywords", [])[:3]:
         draw.text((4, y), kw, fill=fg_color, font=font_sm)
         y += 10
 
-    # +1/+1 counters
-    if info["p1p1"] > 0:
-        draw.text((4, y), f"+{info['p1p1']}/+{info['p1p1']}",
+    # Counters
+    p1p1 = info.get("p1p1", 0)
+    m1m1 = info.get("m1m1", 0)
+    if p1p1 > 0:
+        draw.text((4, y), f"+{p1p1}/+{p1p1}",
                   fill="#ffdd00", font=font_sm)
         y += 10
-
-    # State (tapped/sick)
-    if info["tapped"]:
-        draw.text((4, y), "TAPPED", fill="#ff6666", font=font_sm)
+    if m1m1 > 0:
+        draw.text((4, y), f"-{m1m1}/-{m1m1}",
+                  fill="#ff4444", font=font_sm)
         y += 10
-    if info["sick"]:
-        draw.text((4, y), "SICK", fill="#ffaa44", font=font_sm)
+
+    # Damage marked
+    dmg = info.get("damage", 0)
+    if dmg > 0:
+        draw.text((4, y), f"{dmg} dmg",
+                  fill="#ff6666", font=font_sm)
+        y += 10
+
+    # Loyalty (planeswalkers)
+    loyalty = info.get("loyalty")
+    if loyalty is not None and loyalty > 0:
+        draw.text((4, y), f"Loyalty: {loyalty}",
+                  fill="#ccccff", font=font_sm)
+        y += 10
+
+    # State flags
+    if info.get("tapped"):
+        draw.text((4, y), "TAPPED",
+                  fill="#ff6666", font=font_sm)
+        y += 10
+    if info.get("sick"):
+        draw.text((4, y), "SICK",
+                  fill="#ffaa44", font=font_sm)
+        y += 10
+    if info.get("attacking"):
+        draw.text((4, y), "ATTACKING",
+                  fill="#00ff00", font=font_sm)
+        y += 10
+    if info.get("blocking"):
+        draw.text((4, y), "BLOCKING",
+                  fill="#4488ff", font=font_sm)
         y += 10
 
     # P/T box (bottom right for creatures)
-    if info["power"] is not None:
+    if info.get("power") is not None:
         pt = f"{info['power']}/{info['toughness']}"
         box_w = 30
         bx = CARD_W - box_w - 4
         by = CARD_H - 18
         draw.rectangle([bx, by, CARD_W-4, CARD_H-4],
                        fill="#000000", outline=fg_color)
-        draw.text((bx+3, by+1), pt, fill="#ffffff", font=font_lg)
+        draw.text((bx+3, by+1), pt,
+                  fill="#ffffff", font=font_lg)
+
+    # CMC box (bottom left)
+    cmc = info.get("cmc", 0)
+    if cmc > 0 and "Land" not in info.get("types", []):
+        draw.rectangle([4, CARD_H-18, 24, CARD_H-4],
+                       fill="#444444", outline=fg_color)
+        draw.text((7, CARD_H-17), str(cmc),
+                  fill="#ffffff", font=font_lg)
 
     return img
 
@@ -275,6 +461,154 @@ def _darken(hex_color, factor):
     g = int(hex_color[3:5], 16)
     b = int(hex_color[5:7], 16)
     return f"#{int(r*factor):02x}{int(g*factor):02x}{int(b*factor):02x}"
+
+
+def draw_action_card_image(info, is_chosen=False,
+                           is_pass=False):
+    """Draw a priority action candidate as a card."""
+    if not HAS_PIL:
+        return None
+
+    if is_pass or info.get("is_pass"):
+        # Pass action — distinct style
+        border = "#f9e2af" if is_chosen else "#585b70"
+        img = Image.new("RGB", (ACTION_W, ACTION_H),
+                        border)
+        d = ImageDraw.Draw(img)
+        m = 3
+        d.rectangle([m, m, ACTION_W-m-1, ACTION_H-m-1],
+                     fill="#313244")
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/"
+                "DejaVuSansMono-Bold.ttf", 14)
+        except (IOError, OSError):
+            font = ImageFont.load_default()
+        d.text((ACTION_W//2, ACTION_H//2 - 8), "PASS",
+               fill="#f9e2af" if is_chosen else "#6c7086",
+               font=font, anchor='mt')
+        if is_chosen:
+            d.text((ACTION_W//2, ACTION_H//2 + 12),
+                   "CHOSEN",
+                   fill="#a6e3a1", font=font, anchor='mt')
+        return img
+
+    c = info["colors"][0] if info.get("colors") else "C"
+    bg_color, fg_color = COLOR_HEX.get(c, COLOR_HEX["C"])
+
+    if is_chosen:
+        border = "#a6e3a1"
+    else:
+        border = "#333333"
+
+    img = Image.new("RGB", (ACTION_W, ACTION_H), border)
+    d = ImageDraw.Draw(img)
+    m = 3
+    d.rectangle([m, m, ACTION_W-m-1, ACTION_H-m-1],
+                 fill=bg_color)
+
+    try:
+        font_sm = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSansMono.ttf", 8)
+        font_md = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSansMono-Bold.ttf", 8)
+        font_lg = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSansMono-Bold.ttf", 10)
+    except (IOError, OSError):
+        font_sm = ImageFont.load_default()
+        font_md = font_sm
+        font_lg = font_sm
+
+    y = 4
+
+    # Type + CMC header
+    type_str = "/".join(
+        info.get("types", []))[:12] or "?"
+    d.text((4, y), type_str, fill=fg_color, font=font_md)
+    cmc = info.get("cmc", 0)
+    d.text((ACTION_W - 22, y), f"{{{cmc}}}",
+           fill=fg_color, font=font_md)
+    y += 12
+
+    # Color + spell/ability type
+    color_str = "".join(
+        info.get("colors", [])) or "Colorless"
+    sa = info.get("sa_type", "")
+    d.text((4, y), f"{color_str} {sa}",
+           fill=fg_color, font=font_sm)
+    y += 10
+
+    # Separator
+    d.line([(4, y), (ACTION_W-4, y)],
+           fill=fg_color, width=1)
+    y += 3
+
+    # Effect area — API type description
+    darker = _darken(bg_color, 0.8)
+    d.rectangle([4, y, ACTION_W-4, y+42], fill=darker)
+
+    api = info.get("api")
+    if api:
+        desc = API_DESCRIPTIONS.get(api, api)
+        # Wrap long descriptions
+        if len(desc) > 14:
+            parts = desc.split(" ", 1)
+            d.text((6, y+3), parts[0],
+                   fill=fg_color, font=font_md)
+            if len(parts) > 1:
+                d.text((6, y+13), parts[1][:16],
+                       fill=fg_color, font=font_sm)
+        else:
+            d.text((6, y+3), desc,
+                   fill=fg_color, font=font_md)
+
+    # Damage / draw info
+    dmg = info.get("damage", 0)
+    cards = info.get("cards_drawn", 0)
+    ey = y + 24
+    if dmg > 0:
+        d.text((6, ey), f"{dmg} damage",
+               fill="#ff6666", font=font_md)
+        ey += 10
+    if cards > 0:
+        d.text((6, ey), f"Draw {cards}",
+               fill="#89b4fa", font=font_md)
+        ey += 10
+
+    y += 45
+
+    # Separator
+    d.line([(4, y), (ACTION_W-4, y)],
+           fill=fg_color, width=1)
+    y += 3
+
+    # Target info
+    ti = info.get("target_info", "")
+    if ti:
+        d.text((4, y), ti, fill=fg_color, font=font_sm)
+        y += 10
+
+    # P/T for creatures
+    pw = info.get("power")
+    if pw is not None:
+        pt = f"{pw}/{info.get('toughness', 0)}"
+        box_w = 30
+        bx = ACTION_W - box_w - 4
+        by = ACTION_H - 18
+        d.rectangle([bx, by, ACTION_W-4, ACTION_H-4],
+                     fill="#000000", outline=fg_color)
+        d.text((bx+3, by+1), pt,
+               fill="#ffffff", font=font_lg)
+
+    # "CHOSEN" marker
+    if is_chosen:
+        d.text((4, ACTION_H - 16), ">> CHOSEN",
+               fill="#a6e3a1", font=font_md)
+
+    return img
 
 
 # ── Data loading ───────────────────────────────────
@@ -835,7 +1169,7 @@ class GameStateViewer:
             lbl.pack(side=tk.LEFT, padx=1, pady=2)
 
     def _render_priority(self, s):
-        """Render priority action candidates as text labels."""
+        """Render priority candidates as card images."""
         for w in self.priority_frame.winfo_children():
             w.destroy()
 
@@ -860,8 +1194,25 @@ class GameStateViewer:
             is_chosen = (i == sel_idx)
             is_pass = info.get("is_pass", False)
 
+            if HAS_PIL:
+                pil_img = draw_action_card_image(
+                    info, is_chosen=is_chosen,
+                    is_pass=is_pass)
+                if pil_img:
+                    photo = ImageTk.PhotoImage(pil_img)
+                    self.card_photos.append(photo)
+                    lbl = tk.Label(
+                        self.priority_frame,
+                        image=photo,
+                        bg=self.priority_frame["bg"])
+                    lbl.pack(side=tk.LEFT, padx=1,
+                             pady=2)
+                    continue
+
+            # Text fallback
             if is_chosen:
-                bg = "#a6e3a1" if not is_pass else "#f9e2af"
+                bg = "#a6e3a1" if not is_pass \
+                    else "#f9e2af"
                 fg = "#1e1e2e"
             elif is_pass:
                 bg = "#45475a"
