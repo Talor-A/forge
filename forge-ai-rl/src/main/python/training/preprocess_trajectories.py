@@ -209,6 +209,9 @@ def preprocess(files, output_dir, counts, max_cand):
     ai = 0  # attack index
     bi = 0  # block index
 
+    GAMMA = 0.95  # discount factor — turn-1 in a
+    # 40-decision game gets ~0.13, not ±1.0
+
     for fi, filepath in enumerate(files):
         if (fi + 1) % 200 == 0:
             print(f"    {fi+1}/{len(files)} "
@@ -221,10 +224,29 @@ def preprocess(files, output_dir, counts, max_cand):
                 continue
             header = json.loads(lines[0])
             won = header.get('won', False)
-            oc = 1.0 if won else -1.0
 
+            # Parse all records first to compute
+            # discounted returns backward
+            records = []
             for line in lines[1:]:
-                rec = json.loads(line)
+                records.append(json.loads(line))
+
+            # Compute discounted returns:
+            # G_t = r_t + γ*G_{t+1}
+            # where r_t = intermediateReward (shaping)
+            # and terminal reward on last step
+            n_recs = len(records)
+            returns = np.zeros(n_recs, dtype=np.float32)
+            G = 0.0
+            for t in range(n_recs - 1, -1, -1):
+                r = records[t].get(
+                    'intermediateReward', 0.0)
+                tr = records[t].get(
+                    'terminalReward', 0.0)
+                G = r + tr + GAMMA * G
+                returns[t] = G
+
+            for rec_idx, rec in enumerate(records):
                 dt = rec.get('decisionType', '')
                 cand = rec.get('candidateFeatures', [])
                 sel = rec.get('selectedIndices', [])
@@ -251,10 +273,11 @@ def preprocess(files, output_dir, counts, max_cand):
                     g[:gl] = gf_raw[:gl]
                 sanitize(g)
 
-                # Write shared
+                # Write shared — discounted return, not
+                # binary outcome
                 gs[si] = flat
                 gf[si] = g
-                outcome[si] = oc
+                outcome[si] = returns[rec_idx]
                 file_id[si] = fi
                 shared_row = si
                 si += 1
@@ -371,6 +394,8 @@ def main():
         'game_state_dim': 21184,
         'global_feature_dim': 64,
         'shared_game_state': True,
+        'discount_gamma': GAMMA,
+        'value_targets': 'discounted_returns',
     }
     with open(os.path.join(args.output_dir,
                            'metadata.json'), 'w') as f:
