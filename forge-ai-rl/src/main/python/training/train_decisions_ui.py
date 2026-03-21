@@ -160,7 +160,52 @@ def parse_game_state(flat, global_feats):
 
 
 def load_decisions(data_dir, state, max_files=None,
+                   heads=None, chunk_size=200):
+    """Load decision samples in chunks to bound memory.
+
+    For priority (140K+ samples), loads chunk_size files
+    at a time. For attack/block (small), loads all at once.
+    """
+    from training.chunked_loader import load_decision_samples
+
+    state.phase = "loading"
+    state.status = "Loading trajectory files..."
+
+    path = Path(data_dir)
+    files = sorted(path.glob('traj_*.jsonl'))
+    if max_files:
+        files = files[:max_files]
+    state.files_total = len(files)
+
+    attack_samples = []
+    block_samples = []
+    priority_samples = []
+
+    # Load in chunks to bound memory
+    for ci in range(0, len(files), chunk_size):
+        chunk_files = files[ci:ci + chunk_size]
+        a, b, p = load_decision_samples(
+            chunk_files, heads=
+            list(heads) if heads else None)
+        attack_samples.extend(a)
+        block_samples.extend(b)
+        priority_samples.extend(p)
+        state.files_loaded = min(ci + chunk_size,
+                                 len(files))
+        state.attack_samples = len(attack_samples)
+        state.block_samples = len(block_samples)
+        state.priority_samples = len(priority_samples)
+
+    state.status = (
+        f"Loaded {len(attack_samples)} attack, "
+        f"{len(block_samples)} block, "
+        f"{len(priority_samples)} priority decisions")
+    return attack_samples, block_samples, priority_samples
+
+
+def load_decisions_old(data_dir, state, max_files=None,
                    heads=None):
+    """Original load function — kept as fallback."""
     state.phase = "loading"
     state.status = "Loading trajectory files..."
 
@@ -1100,6 +1145,326 @@ def train_head(model, head, head_name, samples, args,
     return best_acc
 
 
+def train_head_mmap(model, head, head_name,
+                    train_ds, val_ds, args, state,
+                    device, use_amp, batch_fn):
+    """Generic mmap-based head training.
+    Uses DataLoader directly, no list materialization."""
+    import torch.utils.data as tud
+
+    state.current_head = head_name
+    state.status = f"Training {head_name} head..."
+    log(state, f"\n=== Training {head_name} head (mmap)"
+        f" ===")
+    log(state, f"Train: {len(train_ds)}, "
+        f"Val: {len(val_ds)}")
+
+    for p in model.state_encoder.parameters():
+        p.requires_grad = False
+    for p in model.value_network.parameters():
+        p.requires_grad = False
+    for p in head.parameters():
+        p.requires_grad = True
+
+    state.head_params = sum(
+        p.numel() for p in head.parameters())
+    log(state, f"Head params: {state.head_params:,}")
+
+    optimizer = optim.AdamW(
+        head.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler('cuda') if use_amp \
+        else None
+
+    train_loader = tud.DataLoader(
+        train_ds, batch_size=args.batch_size,
+        shuffle=True, num_workers=0,
+        collate_fn=lambda x: x)
+    val_loader = tud.DataLoader(
+        val_ds, batch_size=args.batch_size,
+        shuffle=False, num_workers=0,
+        collate_fn=lambda x: x)
+
+    best_acc = 0
+    save_path = os.path.join(
+        args.save_dir, f'best_{head_name}_model.pt')
+
+    if head_name == 'attack':
+        tl_list = state.attack_train_losses
+        ta_list = state.attack_train_accs
+        vl_list = state.attack_val_losses
+        va_list = state.attack_val_accs
+    else:
+        tl_list = state.block_train_losses
+        ta_list = state.block_train_accs
+        vl_list = state.block_val_losses
+        va_list = state.block_val_accs
+
+    start = time.time()
+
+    for epoch in range(1, args.epochs + 1):
+        state.epoch = epoch
+        state.status = (
+            f"Training {head_name} head: "
+            f"epoch {epoch}/{args.epochs}")
+        t0 = time.time()
+
+        model.train()
+        tloss, tc, tt = 0, 0, 0
+
+        for bi, batch in enumerate(train_loader):
+            if len(batch) < 2:
+                continue
+            state.epoch_progress = bi / max(
+                len(train_loader), 1)
+
+            loss, correct, total = batch_fn(
+                model, batch, device, use_amp, head)
+
+            optimizer.zero_grad()
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                optimizer.step()
+
+            tloss += loss.item() * total
+            tc += correct
+            tt += total
+
+        scheduler.step()
+
+        model.eval()
+        vloss, vc, vt = 0, 0, 0
+        with torch.no_grad():
+            for batch in val_loader:
+                if len(batch) < 2:
+                    continue
+                loss, correct, total = batch_fn(
+                    model, batch, device, use_amp, head)
+                vloss += loss.item() * total
+                vc += correct
+                vt += total
+
+        ta = tc / max(tt, 1)
+        va = vc / max(vt, 1)
+        tl = tloss / max(tt, 1)
+        vl = vloss / max(vt, 1)
+
+        state.current_train_loss = tl
+        state.current_train_acc = ta
+        state.current_val_loss = vl
+        state.current_val_acc = va
+        tl_list.append(tl)
+        ta_list.append(ta)
+        vl_list.append(vl)
+        va_list.append(va)
+
+        if va > best_acc:
+            best_acc = va
+            model.save(save_path)
+
+        if head_name == 'attack':
+            state.attack_best_acc = best_acc
+        else:
+            state.block_best_acc = best_acc
+
+        status = ' *BEST*' if va == best_acc and va > 0 \
+            else ''
+        log(state,
+            f"  Epoch {epoch:>3d}/{args.epochs} | "
+            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
+            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
+
+        if np.isnan(tl) or np.isnan(vl):
+            log(state,
+                f"  NaN detected! Stopping {head_name}.")
+            break
+
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        state.eta = (args.epochs - epoch) * state.epoch_time
+        state.epoch_progress = 1.0
+        state.chart_dirty = True
+
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()
+            state.gpu_mem_used_mb = (
+                torch.cuda.memory_allocated() / 1024**2)
+            state.gpu_mem_total_mb = (
+                torch.cuda.get_device_properties(0)
+                .total_memory / 1024**2)
+
+        time.sleep(0.05)
+
+    return best_acc
+
+
+def train_priority_head_mmap(model, head,
+                             train_ds, val_ds,
+                             args, state, device,
+                             use_amp):
+    """Train priority head using mmap datasets directly.
+    Avoids materializing 140K samples into RAM."""
+    import torch.utils.data as tud
+
+    state.current_head = 'priority'
+    state.status = "Training priority head..."
+    log(state, f"\n=== Training priority head (mmap) ===")
+    log(state, f"Train: {len(train_ds)}, "
+        f"Val: {len(val_ds)}")
+
+    for p in model.state_encoder.parameters():
+        p.requires_grad = False
+    for p in model.value_network.parameters():
+        p.requires_grad = False
+    for p in head.parameters():
+        p.requires_grad = True
+
+    state.head_params = sum(
+        p.numel() for p in head.parameters())
+    log(state, f"Head params: {state.head_params:,}")
+
+    optimizer = optim.AdamW(
+        head.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler('cuda') if use_amp \
+        else None
+
+    # DataLoaders with list collation (batch = list of dicts)
+    train_loader = tud.DataLoader(
+        train_ds, batch_size=args.batch_size,
+        shuffle=True, num_workers=0,
+        collate_fn=lambda x: x)
+    val_loader = tud.DataLoader(
+        val_ds, batch_size=args.batch_size,
+        shuffle=False, num_workers=0,
+        collate_fn=lambda x: x)
+
+    best_acc = 0
+    save_path = os.path.join(
+        args.save_dir, 'best_priority_model.pt')
+
+    tl_list = state.priority_train_losses
+    ta_list = state.priority_train_accs
+    vl_list = state.priority_val_losses
+    va_list = state.priority_val_accs
+
+    start = time.time()
+
+    for epoch in range(1, args.epochs + 1):
+        state.epoch = epoch
+        state.status = (
+            f"Training priority head: "
+            f"epoch {epoch}/{args.epochs}")
+        t0 = time.time()
+
+        # Train
+        model.train()
+        tloss, tc, tt = 0, 0, 0
+
+        for bi, batch in enumerate(train_loader):
+            if len(batch) < 2:
+                continue
+            state.epoch_progress = bi / max(
+                len(train_loader), 1)
+
+            loss, correct, total = make_priority_batch(
+                model, batch, device, use_amp, head)
+
+            optimizer.zero_grad()
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    head.parameters(), 1.0)
+                optimizer.step()
+
+            tloss += loss.item() * total
+            tc += correct
+            tt += total
+
+        scheduler.step()
+
+        # Val
+        model.eval()
+        vloss, vc, vt = 0, 0, 0
+        with torch.no_grad():
+            for batch in val_loader:
+                if len(batch) < 2:
+                    continue
+                loss, correct, total = make_priority_batch(
+                    model, batch, device, use_amp, head)
+                vloss += loss.item() * total
+                vc += correct
+                vt += total
+
+        ta = tc / max(tt, 1)
+        va = vc / max(vt, 1)
+        tl = tloss / max(tt, 1)
+        vl = vloss / max(vt, 1)
+
+        state.current_train_loss = tl
+        state.current_train_acc = ta
+        state.current_val_loss = vl
+        state.current_val_acc = va
+        tl_list.append(tl)
+        ta_list.append(ta)
+        vl_list.append(vl)
+        va_list.append(va)
+
+        if va > best_acc:
+            best_acc = va
+            model.save(save_path)
+
+        state.priority_best_acc = best_acc
+
+        status = ' *BEST*' if va == best_acc and va > 0 \
+            else ''
+        log(state,
+            f"  Epoch {epoch:>3d}/{args.epochs} | "
+            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
+            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
+
+        if np.isnan(tl) or np.isnan(vl):
+            log(state,
+                "  NaN detected! Stopping priority.")
+            break
+
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        state.eta = (args.epochs - epoch) * state.epoch_time
+        state.epoch_progress = 1.0
+        state.chart_dirty = True
+
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()
+            state.gpu_mem_used_mb = (
+                torch.cuda.memory_allocated() / 1024**2)
+            state.gpu_mem_total_mb = (
+                torch.cuda.get_device_properties(0)
+                .total_memory / 1024**2)
+
+        time.sleep(0.05)
+
+    return best_acc
+
+
 def trainer_thread(state, args):
     try:
         profile = auto_detect_profile()
@@ -1112,14 +1477,85 @@ def trainer_thread(state, args):
         state.gpu_name = profile.name
         state.total_epochs = args.epochs
 
-        # Load data (only parse decision types we need)
-        heads = (args.heads.split(',')
+        # Load data via mmap or fallback to JSONL
+        heads_list = (args.heads.split(',')
                  if args.heads != 'all'
-                 else None)
-        attack_samples, block_samples, priority_samples = \
-            load_decisions(
-                args.data_dir, state, args.max_files,
-                heads=heads)
+                 else ['priority', 'attack', 'block'])
+
+        preprocessed_dir = os.path.join(
+            os.path.dirname(args.data_dir),
+            'preprocessed')
+        use_mmap = os.path.exists(
+            os.path.join(preprocessed_dir,
+                         'metadata.json'))
+
+        if use_mmap:
+            from training.mmap_dataset import (
+                MmapPriorityDataset,
+                MmapAttackDataset,
+                MmapBlockDataset)
+            import json as json_mod
+
+            state.status = "Loading preprocessed data..."
+            with open(os.path.join(preprocessed_dir,
+                                   'metadata.json')) as f:
+                meta = json_mod.load(f)
+
+            priority_samples = []
+            attack_samples = []
+            block_samples = []
+
+            if 'priority' in heads_list:
+                # Priority uses DataLoader directly
+                # (too large to materialize into list)
+                priority_train_ds = MmapPriorityDataset(
+                    preprocessed_dir, train=True)
+                priority_val_ds = MmapPriorityDataset(
+                    preprocessed_dir, train=False)
+                state.priority_samples = len(
+                    priority_train_ds)
+                log(state,
+                    f"Priority: {len(priority_train_ds)}"
+                    f" train, {len(priority_val_ds)}"
+                    f" val samples (mmap)")
+
+            if 'attack' in heads_list:
+                attack_train_ds = MmapAttackDataset(
+                    preprocessed_dir, train=True)
+                attack_val_ds = MmapAttackDataset(
+                    preprocessed_dir, train=False)
+                state.attack_samples = len(
+                    attack_train_ds)
+                log(state,
+                    f"Attack: {len(attack_train_ds)}"
+                    f" train, {len(attack_val_ds)}"
+                    f" val samples (mmap)")
+
+            if 'block' in heads_list:
+                block_train_ds = MmapBlockDataset(
+                    preprocessed_dir, train=True)
+                block_val_ds = MmapBlockDataset(
+                    preprocessed_dir, train=False)
+                state.block_samples = len(
+                    block_train_ds)
+                log(state,
+                    f"Block: {len(block_train_ds)}"
+                    f" train, {len(block_val_ds)}"
+                    f" val samples (mmap)")
+        else:
+            # Fallback: load from JSONL (chunked)
+            log(state,
+                "No preprocessed data — loading JSONL")
+            heads_filter = (
+                list(heads_list)
+                if heads_list != ['priority', 'attack',
+                                  'block']
+                else None)
+            attack_samples, block_samples, \
+                priority_samples = load_decisions(
+                    args.data_dir, state,
+                    args.max_files,
+                    heads=heads_filter)
 
         # Load model
         state.phase = "training"
@@ -1127,7 +1563,8 @@ def trainer_thread(state, args):
         log(state, f"\nDevice: {device} ({state.gpu_name})")
         log(state, f"AMP: {use_amp}")
         if os.path.exists(args.encoder_checkpoint):
-            log(state, f"Loading encoder: {args.encoder_checkpoint}")
+            log(state, f"Loading encoder: "
+                f"{args.encoder_checkpoint}")
             model = MTGModel.load(
                 args.encoder_checkpoint, device=device)
             log(state, "Encoder loaded.")
@@ -1141,34 +1578,51 @@ def trainer_thread(state, args):
 
         os.makedirs(args.save_dir, exist_ok=True)
 
-        heads = (args.heads.split(',')
-                 if args.heads != 'all'
-                 else ['priority', 'attack', 'block'])
-        log(state, f"Heads to train: {heads}")
+        log(state, f"Heads to train: {heads_list}")
 
         # Train priority head first (softmax CE, not BCE)
-        if 'priority' in heads and priority_samples:
-            train_priority_head(
-                model, model.priority_head,
-                priority_samples, args, state,
-                device, use_amp)
+        if 'priority' in heads_list:
+            if use_mmap and priority_train_ds:
+                train_priority_head_mmap(
+                    model, model.priority_head,
+                    priority_train_ds, priority_val_ds,
+                    args, state, device, use_amp)
+            elif priority_samples:
+                train_priority_head(
+                    model, model.priority_head,
+                    priority_samples, args, state,
+                    device, use_amp)
 
         # Train attack head
-        if 'attack' in heads and attack_samples:
+        if 'attack' in heads_list:
             state.epoch = 0
             state.epoch_progress = 0
-            train_head(model, model.attack_head, 'attack',
-                       attack_samples, args, state,
-                       device, use_amp)
+            if use_mmap and attack_train_ds:
+                train_head_mmap(
+                    model, model.attack_head, 'attack',
+                    attack_train_ds, attack_val_ds,
+                    args, state, device, use_amp,
+                    make_batch)
+            elif attack_samples:
+                train_head(model, model.attack_head,
+                           'attack', attack_samples,
+                           args, state, device, use_amp)
 
         # Train block head (pair-based assignment)
-        if 'block' in heads and block_samples:
+        if 'block' in heads_list:
             state.epoch = 0
             state.epoch_progress = 0
-            train_block_head(
-                model, model.block_head,
-                block_samples, args, state,
-                device, use_amp)
+            if use_mmap and block_train_ds:
+                train_head_mmap(
+                    model, model.block_head, 'block',
+                    block_train_ds, block_val_ds,
+                    args, state, device, use_amp,
+                    make_block_batch)
+            elif block_samples:
+                train_block_head(
+                    model, model.block_head,
+                    block_samples, args, state,
+                    device, use_amp)
 
         # Save combined model
         save_path = os.path.join(
