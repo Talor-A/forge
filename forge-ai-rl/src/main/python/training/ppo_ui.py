@@ -139,6 +139,7 @@ def ppo_thread(state, args):
 
         # Resume training state if available
         import json as json_mod
+        save_dir = args.save_dir
         state_path = os.path.join(
             save_dir, 'ppo_training_state.json')
         start_round = 0
@@ -175,7 +176,6 @@ def ppo_thread(state, args):
         traj_dir = os.path.join(
             PROJECT_ROOT, 'rl_data/ppo_trajectories')
         eval_dir = traj_dir + '_eval'
-        save_dir = args.save_dir
         os.makedirs(save_dir, exist_ok=True)
 
         start_time = time.time()
