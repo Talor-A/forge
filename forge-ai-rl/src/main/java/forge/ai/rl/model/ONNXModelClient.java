@@ -217,13 +217,13 @@ public class ONNXModelClient {
 
     // ── Priority ──
 
-    // Fixed sizes matching ONNX export dummy inputs
-    private static final int PRI_MAX = 10;
-    private static final int TGT_MAX = 5;
-    private static final int ATK_MAX = 5;
-    private static final int BLK_MAX = 3;
-    private static final int BLK_ATK_MAX = 2;
-    private static final int CS_MAX = 5;
+    // Fixed sizes matching ONNX export dummy inputs — must match export_onnx.py
+    private static final int PRI_MAX = 50;
+    private static final int TGT_MAX = 40;
+    private static final int ATK_MAX = 40;
+    private static final int BLK_MAX = 40;
+    private static final int BLK_ATK_MAX = 40;
+    private static final int CS_MAX = 40;
     private static final int MUL_MAX = 7;
 
     private DecisionResult handlePriority(float[] state, DecisionContext ctx, float value)

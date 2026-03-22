@@ -219,7 +219,7 @@ def export_model(checkpoint_path, output_dir, device='cpu'):
 
     # 3. Priority Head
     print("Exporting priority_head.onnx...", flush=True)
-    n_actions = 10
+    n_actions = MAX_ACTIONS  # 50
     pri_wrapper = HeadWrapper(model.priority_head)
     pri_wrapper.eval()
     torch.onnx.export(
@@ -236,7 +236,7 @@ def export_model(checkpoint_path, output_dir, device='cpu'):
 
     # 4. Target Head
     print("Exporting target_head.onnx...", flush=True)
-    n_targets = 5
+    n_targets = MAX_BOARD  # 40
     tgt_wrapper = HeadWrapper(model.target_head)
     tgt_wrapper.eval()
     torch.onnx.export(
@@ -253,7 +253,7 @@ def export_model(checkpoint_path, output_dir, device='cpu'):
 
     # 5. Attack Head
     print("Exporting attack_head.onnx...", flush=True)
-    n_creatures = 5
+    n_creatures = MAX_BOARD  # 40
     atk_wrapper = HeadWrapper(model.attack_head)
     atk_wrapper.eval()
     torch.onnx.export(
@@ -270,8 +270,8 @@ def export_model(checkpoint_path, output_dir, device='cpu'):
 
     # 6. Block Head
     print("Exporting block_head.onnx...", flush=True)
-    n_blockers = 3
-    n_attackers = 2
+    n_blockers = MAX_BLOCKERS  # 40
+    n_attackers = MAX_ATTACKERS  # 40
     blk_wrapper = BlockHeadWrapper(model.block_head)
     blk_wrapper.eval()
     torch.onnx.export(
@@ -292,7 +292,7 @@ def export_model(checkpoint_path, output_dir, device='cpu'):
 
     # 7. Card Select Head
     print("Exporting card_select_head.onnx...", flush=True)
-    n_cards = 5
+    n_cards = MAX_BOARD  # 40
     cs_wrapper = HeadWrapper(model.card_select_head)
     cs_wrapper.eval()
     torch.onnx.export(
