@@ -336,24 +336,33 @@ The final card representation is the **concatenation of all four**, projected to
 7. ✅ JSON-over-TCP bridge with batched inference server
 8. ✅ Python project with PyTorch, MTGModel (11M params), training dashboards
 
-### Phase 2: Imitation Learning (weeks 5-8) 🔄 IN PROGRESS
-1. ✅ Run 1,000 heuristic AI vs AI games, recording all decisions (~137K records)
+### Phase 2: Imitation Learning (weeks 5-8) ✅ COMPLETE
+1. ✅ Run 1,000 heuristic AI vs AI games, recording all 7 decision types (~142K records)
 2. ✅ Train game state encoder + value network (stopped early, overfitting observed)
-   - *Note: Previous 99.6% accuracy was from a version with feature leakage (tapped flag leaked attack decisions). Not comparable to current run.*
-3. 🔄 Train decision heads with 256-dim card features (training in progress)
-   - Priority: 126,172 samples (CE softmax) — TBD accuracy
-   - Attack: 8,576 samples (BCE per-creature) — TBD accuracy
-   - Block: 2,478 samples (CE per-blocker assignment) — TBD accuracy
-4. ⬜ Validate RL agent win rate vs heuristic
-   - *Note: Previous 53% win rate was from 128-dim leaked-feature model. Not comparable.*
+3. ✅ Train ALL 7 decision heads with 256-dim card features:
+   - Priority: 117,111 samples → 95.7% val accuracy
+   - Attack: 10,396 samples → 82.8% val accuracy
+   - Target: 5,535 samples → 74.3% val accuracy (256-dim card features, pointer attention)
+   - Card Select: 708 samples → 76.5% val accuracy (scry top/bottom)
+   - Block: 2,977 samples → 64.2% val accuracy (pairwise assignment)
+   - Mulligan: 2,864 samples → 99.0% val accuracy (keep/mull binary)
+   - Binary: 2,277 samples → 80.9% val accuracy (trigger confirmation)
+4. ✅ Pure RL gameplay — all 7 heads make decisions, no heuristic involvement
+5. ✅ Baseline: ~25% win rate vs heuristic (imitation model, no PPO)
 
-### Phase 3: RL Training — Simple Cards (weeks 9-14) ⬜ NOT STARTED (with 256-dim model)
-1. ⬜ Curriculum card pools (currently using 4 aggro decks)
-2. ✅ PPO training loop implemented (ppo_trainer.py + ppo_ui.py)
+### Phase 3: RL Training — Simple Cards (weeks 9-14) 🔄 IN PROGRESS
+1. 4 aggro decks (Red Aggro, Green Stompy, White Weenie, Blue Tempo)
+2. ✅ PPO training loop with GAE per-decision advantages
 3. ✅ Reward shaping implemented (life/card/board advantage signals with decay)
-4. ⬜ PPO training with 256-dim model (after decision heads converge)
-5. ⬜ Progress through curriculum stages
-6. ⬜ Elo tracking and benchmarking
+4. ✅ Frozen encoder during PPO (separate LRs: heads 3e-5, value 1e-4)
+5. 🔄 PPO training: 400 games/round, 4 epochs, batch 64, clip 0.1, entropy 0.005
+   - Initial results: eval win rate climbed 14%→34% in 5 rounds, then degraded
+   - Fixed: GAE advantages, frozen encoder, reduced entropy — re-running
+6. ⬜ Investigate going-first weakness (10% vs 37% going-second)
+   - Analysis shows model wastes burn spells early instead of saving for strategic moments
+   - Not a bug in creature deployment (matches heuristic rates)
+   - PPO with GAE should help learn spell sequencing
+7. ⬜ Elo tracking and benchmarking
 
 ### Phase 4: RL Training — Full Complexity (weeks 15-22)
 1. Train on full card pools (Standard, Modern, or curated sets)
@@ -396,9 +405,15 @@ The final card representation is the **concatenation of all four**, projected to
 
 ### Critical — FIXED
 
-- **~~ppo_ui.py used attack_head for block data~~** — FIXED 2026-03-22. Line 268 always used `model.attack_head` for both attack and block data. Block decisions were trained through the wrong head. Fixed to use `(data, head)` tuple pairing.
+- **~~ppo_ui.py used attack_head for block data~~** — FIXED 2026-03-22. Block decisions trained through attack head. Fixed with `(data, head)` tuple pairing.
 
-- **~~RewardShaper.initialized never set to true~~** — FIXED 2026-03-22. Line 68 had `initialized = false` instead of `initialized = true`. Intermediate rewards always returned 0.
+- **~~RewardShaper.initialized never set to true~~** — FIXED 2026-03-22. Intermediate rewards always returned 0.
+
+- **~~PPO used flat terminal +1/-1 for all decisions~~** — FIXED 2026-03-22. Every decision in a game got the same reward regardless of quality. `load_ppo_data()` now computes GAE advantages from `intermediateReward` per decision with gamma=0.999, lambda=0.95.
+
+- **~~Encoder corrupted by PPO gradients~~** — FIXED 2026-03-22. Single optimizer updated encoder alongside heads. Now encoder is frozen during PPO, heads get lr=3e-5, value network gets lr=1e-4.
+
+- **~~Heuristic vetoed RL spell choices~~** — FIXED 2026-03-22. `canPlayAndPayForFacade` applied full strategic evaluation, rejecting spells the model wanted to play. Now RL uses `decideTargets` for targeting directly, no heuristic strategic veto.
 
 ### Critical — Open
 
@@ -412,10 +427,29 @@ The final card representation is the **concatenation of all four**, projected to
 
 ### Diagnostics Added (2026-03-22)
 
-- **Priority decision tracking**: `PlayerControllerRL` now logs per-game counts of: model_asked, model_play, model_pass, targeting_rejected, heuristic_bypass. Look for `RL_DIAG:` and `RL_TARGETING_REJECTED:` in logs.
+- **All decision logging**: `PlayerControllerRL` logs every RL decision:
+  - `RL_PRIORITY_PLAY: {card} ({api}) -> target: {target}` — spell played with target
+  - `RL_PRIORITY: PASS ({n} options available)` — priority pass
+  - `RL_SPELL_REJECTED: {card} ({api}) reason={reason}` — spell couldn't be played
+  - `RL_MULLIGAN: KEEP/MULLIGAN ({n} cards)` — mulligan decision
+  - `RL_BINARY: YES/NO ({context})` — binary decision
+  - `RL_MODEL_ATTACK: probs=[...] selected=[...] value={v}` — attack decision
+- **Per-game diagnostics**: `RL_DIAG:` summary at game end with model_asked, play, pass, rejected, bypass counts
 
-## Known Limitations (v2 enhancements)
+## Training Data Enhancements (next data collection cycle)
+
+- **Add `is_sorcery_speed_timing` flag**: Single bit in global features or action features indicating whether sorcery-speed spells (creatures) can be cast. Currently the model must learn this from a 13-way phase one-hot. A single bit makes it trivial to distinguish "main phase, can play creatures" from "combat, can only play instants." Highest impact enhancement.
+
+- **Encode spell utility in context**: The 64-dim action features encode what a spell IS but not what it DOES in the current board state. Add features like "would_kill_a_creature" (Shock at a 2-toughness creature), "is_lethal" (burn to face when opponent is low enough), "has_valid_creature_target" to help the model learn spell timing.
+
+- **Record opponent's plays**: Currently only the RL player's decisions are recorded. Recording opponent plays (or at least board state deltas between decisions) would help the model learn reactive strategies ("opponent played a 3/3, so save removal").
+
+- **Searing Blaze multi-target fix**: Spells requiring 2+ targets (like Searing Blaze) need the targeting code to handle multiple target selections. Currently only 1 target is set, causing stack failures. Fix: check `sa.getMinTargets()` and call `decideTargets` with the correct min/max.
+
+## Known Limitations (v2 feature enhancements)
 
 - **Trigger effect encoding**: The model sees boolean flags for trigger presence (has_etb, has_death, has_combat, has_upkeep) but not what those triggers DO. An ETB that draws a card and one that deals 2 damage both just show `has_etb=1`. Fix: extract ApiType + effect params from each trigger's `getOverridingAbility()` in CardFeatures.java.
 
 - **Aura/equipment association**: Cards encode attachments count [27] and auras show as separate board cards, but there is no explicit "card X is attached to card Y" pointer. The model sees P/T effects (getNetPower/getNetToughness include bonuses) but cannot reason about what happens if an aura is removed. Fix: encode host card index in aura's feature vector.
+
+- **Card selection (discard/sacrifice) not routed through model**: The `chooseCardsForEffect`, `choosePermanentsToSacrifice`, `chooseCardsToDiscardFrom`, and `arrangeForScry` methods still fall back to heuristic. Need GRPC routing with `CardCollectionView` index conversion.
