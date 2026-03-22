@@ -97,55 +97,71 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             int idx = rl.decidePriorityAction(candidates);
             if (idx < 0 || idx >= candidates.size()) {
                 priorityModelPass++;
-                return null; // model chose pass — null signals "pass priority"
-            }
-
-            // RL picked a spell — let heuristic set up targeting and evaluate
-            SpellAbility chosen = candidates.get(idx);
-            forge.ai.AiPlayDecision reason = getAi().canPlayForRL(chosen);
-
-            if (reason.willingToPlay()) {
-                // Heuristic agrees — targets set, play it
-                priorityModelPlay++;
-                List<SpellAbility> rlResult = new ArrayList<>();
-                rlResult.add(chosen);
-                return rlResult;
-            }
-
-            // Strategic vetoes only — heuristic set up targets but decided
-            // not to play. We override IF targets are still valid.
-            boolean isStrategicVeto = (reason == forge.ai.AiPlayDecision.CantPlayAi
-                    || reason == forge.ai.AiPlayDecision.BadEtbEffects
-                    || reason == forge.ai.AiPlayDecision.CurseEffects);
-
-            if (isStrategicVeto) {
-                // Only override if spell doesn't need targeting OR targets survived
-                if (!chosen.usesTargeting() || chosen.isTargetNumberValid()) {
-                    Logger.info("RL_OVERRIDE: {} ({}) heuristic_said={}",
-                            chosen.getHostCard().getName(),
-                            chosen.getApi() != null ? chosen.getApi().name() : "null",
-                            reason.name());
-                    priorityModelPlay++;
-                    List<SpellAbility> rlResult = new ArrayList<>();
-                    rlResult.add(chosen);
-                    return rlResult;
-                }
-                // Strategic veto AND targets cleared — can't safely play
-                priorityTargetingRejected++;
-                Logger.info("RL_SPELL_REJECTED: {} ({}) reason={}_no_targets",
-                        chosen.getHostCard().getName(),
-                        chosen.getApi() != null ? chosen.getApi().name() : "null",
-                        reason.name());
+                Logger.info("RL_PRIORITY: PASS ({} options available)", candidates.size());
                 return null;
             }
 
-            // Mechanical failure — genuinely can't play
-            priorityTargetingRejected++;
-            Logger.info("RL_SPELL_REJECTED: {} ({}) reason={}",
-                    chosen.getHostCard().getName(),
-                    chosen.getApi() != null ? chosen.getApi().name() : "null",
-                    reason.name());
-            return null;
+            // RL picked a spell — set up targeting via RL model
+            SpellAbility chosen = candidates.get(idx);
+            chosen.setActivatingPlayer(player);
+            String spellName = chosen.getHostCard() != null ? chosen.getHostCard().getName() : "?";
+            String apiName = chosen.getApi() != null ? chosen.getApi().name() : "none";
+
+            if (chosen.usesTargeting()) {
+                if (chosen.getTargetRestrictions() == null) {
+                    priorityTargetingRejected++;
+                    Logger.info("RL_SPELL_REJECTED: {} ({}) reason=no_target_restrictions", spellName, apiName);
+                    return null;
+                }
+
+                List<GameEntity> legalTargets = chosen.getTargetRestrictions()
+                        .getAllCandidates(chosen, true);
+                if (legalTargets.isEmpty()) {
+                    priorityTargetingRejected++;
+                    Logger.info("RL_SPELL_REJECTED: {} ({}) reason=no_legal_targets", spellName, apiName);
+                    return null;
+                }
+
+                List<Integer> targetIndices = rl.decideTargets(legalTargets, 1, 1);
+                if (targetIndices.isEmpty()) {
+                    priorityTargetingRejected++;
+                    Logger.info("RL_SPELL_REJECTED: {} ({}) reason=model_returned_no_targets", spellName, apiName);
+                    return null;
+                }
+
+                chosen.resetTargets();
+                for (int ti : targetIndices) {
+                    if (ti >= 0 && ti < legalTargets.size()) {
+                        GameEntity target = legalTargets.get(ti);
+                        if (chosen.canTarget(target)) {
+                            chosen.getTargets().add(target);
+                        }
+                    }
+                }
+
+                if (!chosen.isTargetNumberValid()) {
+                    priorityTargetingRejected++;
+                    Logger.info("RL_SPELL_REJECTED: {} ({}) reason=invalid_target_count", spellName, apiName);
+                    return null;
+                }
+
+                String targetName = "?";
+                if (!chosen.getTargets().isEmpty()) {
+                    Object t = chosen.getTargets().get(0);
+                    if (t instanceof Card) targetName = ((Card) t).getName();
+                    else if (t instanceof Player) targetName = "Player:" + ((Player) t).getName();
+                    else targetName = t.toString();
+                }
+                Logger.info("RL_PRIORITY_PLAY: {} ({}) -> target: {} (of {} legal)",
+                        spellName, apiName, targetName, legalTargets.size());
+            } else {
+                Logger.info("RL_PRIORITY_PLAY: {} ({}) [no targeting needed]", spellName, apiName);
+            }
+
+            priorityModelPlay++;
+            List<SpellAbility> rlResult = new ArrayList<>();
+            rlResult.add(chosen);
+            return rlResult;
         } else {
             // Heuristic decides — record the decision
             List<SpellAbility> result = super.chooseSpellAbilityToPlay();
@@ -493,7 +509,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         if (rl.getConfig().getMode() == RLModelMode.GRPC
                 && rl.isModelServerAvailable()) {
             CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
-            return rl.decideMulligan(hand, cardsToReturn);
+            boolean keep = rl.decideMulligan(hand, cardsToReturn);
+            Logger.info("RL_MULLIGAN: {} ({} cards, {} to return)",
+                    keep ? "KEEP" : "MULLIGAN", hand.size(), cardsToReturn);
+            return keep;
         }
 
         List<float[]> handFeats = new ArrayList<>();
@@ -520,7 +539,9 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             Map<String, Object> params) {
         if (rl.getConfig().getMode() == RLModelMode.GRPC
                 && rl.isModelServerAvailable()) {
-            return rl.decideBinary("confirm_" + mode);
+            boolean result = rl.decideBinary("confirm_" + mode);
+            Logger.info("RL_BINARY: {} (confirm_{})", result ? "YES" : "NO", mode);
+            return result;
         }
 
         boolean result = super.confirmAction(
@@ -535,7 +556,9 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     public boolean confirmTrigger(WrappedAbility wrapper) {
         if (rl.getConfig().getMode() == RLModelMode.GRPC
                 && rl.isModelServerAvailable()) {
-            return rl.decideBinary("trigger");
+            boolean result = rl.decideBinary("trigger");
+            Logger.info("RL_BINARY: {} (trigger)", result ? "YES" : "NO");
+            return result;
         }
 
         boolean result = super.confirmTrigger(wrapper);
