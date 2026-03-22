@@ -218,26 +218,39 @@ public class VLobby implements ILobbyView {
     private static final java.util.Set<String> RL_SUPPORTED_DECKS = new java.util.HashSet<>(
             java.util.Arrays.asList("Red Aggro", "Green Stompy", "White Weenie", "Blue Tempo"));
 
-    @Override
+    private void filterToRlDecks(FDeckChooser deckChooser) {
+        deckChooser.setSelectedDeckType(DeckType.CONSTRUCTED_DECK);
+        final Iterable<DeckProxy> allDecks = DeckProxy.getAllConstructedDecks();
+        final java.util.List<DeckProxy> rlDecks = new java.util.ArrayList<>();
+        for (DeckProxy dp : allDecks) {
+            if (RL_SUPPORTED_DECKS.contains(dp.getName())) {
+                rlDecks.add(dp);
+            }
+        }
+        if (!rlDecks.isEmpty()) {
+            deckChooser.getLstDecks().setPool(rlDecks);
+            deckChooser.getLstDecks().setSelectedIndex(0);
+        }
+    }
 
+    @Override
     public void update(final int slot, final LobbySlotType type) {
         final FDeckChooser deckChooser = getDeckChooser(slot);
         deckChooser.setIsAi(type==LobbySlotType.AI || type==LobbySlotType.RL_AI);
 
-        // For RL AI, show only the 4 supported decks
-        if (type == LobbySlotType.RL_AI) {
-            deckChooser.setSelectedDeckType(DeckType.CONSTRUCTED_DECK);
-            // Filter to only RL-supported decks
-            final Iterable<DeckProxy> allDecks = DeckProxy.getAllConstructedDecks();
-            final java.util.List<DeckProxy> rlDecks = new java.util.ArrayList<>();
-            for (DeckProxy dp : allDecks) {
-                if (RL_SUPPORTED_DECKS.contains(dp.getName())) {
-                    rlDecks.add(dp);
-                }
+        // When any player is RL AI, lock ALL players to the 4 supported decks
+        boolean anyRlAi = false;
+        for (int i = 0; i < activePlayersNum; i++) {
+            if (playerPanels.get(i).getType() == LobbySlotType.RL_AI) {
+                anyRlAi = true;
+                break;
             }
-            if (!rlDecks.isEmpty()) {
-                deckChooser.getLstDecks().setPool(rlDecks);
-                deckChooser.getLstDecks().setSelectedIndex(0);
+        }
+        if (anyRlAi) {
+            // Filter all players' deck choosers to RL decks
+            for (int i = 0; i < activePlayersNum; i++) {
+                final FDeckChooser dc = getDeckChooser(i);
+                filterToRlDecks(dc);
             }
             return;
         }
