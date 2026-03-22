@@ -81,7 +81,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        if (rl.getConfig().getMode() == RLModelMode.GRPC && rl.isModelServerAvailable()) {
+        if (rl.isModelServerAvailable()) {
             // Let the heuristic build the candidate lists (lands, filtering, etc.)
             // then use the RL model to pick from the mechanically-legal set
             List<SpellAbility> heuristicResult = super.chooseSpellAbilityToPlay();
@@ -202,7 +202,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         }
         if (possibleAttackers.isEmpty()) return;
 
-        if (rl.getConfig().getMode() == RLModelMode.GRPC && rl.isModelServerAvailable()) {
+        if (rl.isModelServerAvailable()) {
             // RL model makes the decision
             List<Integer> attackerIndices = rl.decideAttackers(possibleAttackers);
             for (int idx : attackerIndices) {
@@ -247,7 +247,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         CardCollection attackers = combat.getAttackers();
         if (possibleBlockers.isEmpty() || attackers.isEmpty()) return;
 
-        if (rl.getConfig().getMode() == RLModelMode.GRPC && rl.isModelServerAvailable()) {
+        if (rl.isModelServerAvailable()) {
             // RL model makes the decision
             List<int[]> assignments = rl.decideBlockers(possibleBlockers, attackers);
             for (int[] pair : assignments) {
@@ -360,8 +360,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             boolean isOptional, Player targetedPlayer,
             Map<String, Object> params) {
 
-        if (rl.getConfig().getMode() == RLModelMode.GRPC
-                && rl.isModelServerAvailable()
+        if (rl.isModelServerAvailable()
                 && optionList.size() > 1) {
             // RL model picks the target
             List<GameEntity> targets = new ArrayList<>(optionList);
@@ -506,8 +505,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     @Override
     public boolean mulliganKeepHand(
             Player firstPlayer, int cardsToReturn) {
-        if (rl.getConfig().getMode() == RLModelMode.GRPC
-                && rl.isModelServerAvailable()) {
+        if (rl.isModelServerAvailable()) {
             CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
             boolean keep = rl.decideMulligan(hand, cardsToReturn);
             Logger.info("RL_MULLIGAN: {} ({} cards, {} to return)",
@@ -537,8 +535,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             String message, List<String> options,
             Card cardToShow,
             Map<String, Object> params) {
-        if (rl.getConfig().getMode() == RLModelMode.GRPC
-                && rl.isModelServerAvailable()) {
+        if (rl.isModelServerAvailable()) {
             boolean result = rl.decideBinary("confirm_" + mode);
             Logger.info("RL_BINARY: {} (confirm_{})", result ? "YES" : "NO", mode);
             return result;
@@ -554,8 +551,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     @Override
     public boolean confirmTrigger(WrappedAbility wrapper) {
-        if (rl.getConfig().getMode() == RLModelMode.GRPC
-                && rl.isModelServerAvailable()) {
+        if (rl.isModelServerAvailable()) {
             boolean result = rl.decideBinary("trigger");
             Logger.info("RL_BINARY: {} (trigger)", result ? "YES" : "NO");
             return result;
