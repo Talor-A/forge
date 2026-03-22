@@ -7,6 +7,7 @@ import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.GameStateEncoder;
 import forge.ai.rl.features.GameStateFeatures;
 import forge.ai.rl.model.ModelServerClient;
+import forge.ai.rl.model.ONNXModelClient;
 import forge.ai.rl.training.TrajectoryRecorder;
 import forge.ai.rl.training.RewardShaper;
 import forge.game.Game;
@@ -30,6 +31,7 @@ public class RLController {
     private final RLConfig config;
     private final GameStateEncoder stateEncoder;
     private final ModelServerClient modelClient;
+    private final ONNXModelClient onnxClient;
     private final TrajectoryRecorder trajectoryRecorder;
     private final RewardShaper rewardShaper;
 
@@ -40,6 +42,15 @@ public class RLController {
         this.config = config;
         this.stateEncoder = new GameStateEncoder(config);
         this.modelClient = new ModelServerClient(config);
+
+        // Initialize ONNX client if in ONNX mode
+        if (config.getMode() == RLModelMode.ONNX) {
+            this.onnxClient = new ONNXModelClient(config);
+            this.onnxClient.loadModels();
+        } else {
+            this.onnxClient = null;
+        }
+
         this.trajectoryRecorder = config.isRecordTrajectories()
                 ? new TrajectoryRecorder(config.getTrajectoryOutputDir())
                 : null;
@@ -60,6 +71,9 @@ public class RLController {
      * When false, callers should use heuristic fallback for all decisions.
      */
     public boolean isModelServerAvailable() {
+        if (config.getMode() == RLModelMode.ONNX) {
+            return onnxClient != null && onnxClient.isLoaded();
+        }
         return config.getMode() == RLModelMode.GRPC && modelClient.isConnected();
     }
 
@@ -520,9 +534,7 @@ public class RLController {
             case GRPC:
                 return modelClient.requestDecision(context);
             case ONNX:
-                // TODO: implement ONNX local inference
-                Logger.warn("ONNX inference not yet implemented, returning null");
-                return null;
+                return onnxClient != null ? onnxClient.requestDecision(context) : null;
             case HEURISTIC_FALLBACK:
             case RECORD_HEURISTIC:
             default:

@@ -96,6 +96,36 @@ public final class GamePlayerUtil {
         return player;
     }
 
+    /**
+     * Create an RL AI player using ONNX inference.
+     * Uses reflection to avoid compile-time dependency on forge-ai-rl.
+     */
+    public static LobbyPlayer createRlAiPlayer(final String name, final int avatarIndex, final int sleeveIndex) {
+        try {
+            // Create RLConfig with ONNX mode
+            Class<?> configClass = Class.forName("forge.ai.rl.RLConfig");
+            Object config = configClass.getDeclaredConstructor().newInstance();
+
+            // Set mode to ONNX
+            Class<?> modeClass = Class.forName("forge.ai.rl.RLModelMode");
+            Object onnxMode = modeClass.getField("ONNX").get(null);
+            configClass.getMethod("setMode", modeClass).invoke(config, onnxMode);
+
+            // Create LobbyPlayerRL
+            Class<?> lobbyClass = Class.forName("forge.ai.rl.LobbyPlayerRL");
+            LobbyPlayer player = (LobbyPlayer) lobbyClass
+                    .getDeclaredConstructor(String.class, configClass)
+                    .newInstance(name, config);
+            player.setAvatarIndex(avatarIndex);
+            player.setSleeveIndex(sleeveIndex);
+            return player;
+        } catch (Exception e) {
+            System.err.println("RL AI not available: " + e.getMessage()
+                    + " — falling back to heuristic AI");
+            return createAiPlayer(name, avatarIndex, sleeveIndex);
+        }
+    }
+
     public static void setPlayerName() {
         final String oldPlayerName = FModel.getPreferences().getPref(FPref.PLAYER_NAME);
 

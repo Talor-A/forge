@@ -150,7 +150,8 @@ public class PlayerPanel extends FPanel {
 
         createPlayerTypeOptions();
         this.add(radioHuman, "gapright 5px");
-        this.add(radioAi, "wrap");
+        this.add(radioAi, "gapright 5px");
+        this.add(radioRlAi, "wrap");
 
         int cellY = 1;
         if (prefs.getPrefBoolean(FPref.UI_ENABLE_AI_PICKER)) {
@@ -265,6 +266,7 @@ public class PlayerPanel extends FPanel {
 
         radioHuman.setSelected(type == LobbySlotType.LOCAL);
         radioAi.setSelected(type == LobbySlotType.AI);
+        radioRlAi.setSelected(type == LobbySlotType.RL_AI);
         radioOpen.setSelected(type == LobbySlotType.OPEN);
 
         updateVariantControlsVisibility();
@@ -499,6 +501,9 @@ public class PlayerPanel extends FPanel {
         case AI:
             radioAi.setSelected(true);
             break;
+        case RL_AI:
+            radioRlAi.setSelected(true);
+            break;
         case OPEN:
             radioOpen.setSelected(true);
             break;
@@ -640,9 +645,12 @@ public class PlayerPanel extends FPanel {
         });
     }
 
+    private FRadioButton radioRlAi;
+
     private void createPlayerTypeOptions() {
         radioHuman = new FRadioButton(localizer.getMessage("lblHuman"));
         radioAi = new FRadioButton(localizer.getMessage("lblAI"));
+        radioRlAi = new FRadioButton("RL AI");
         radioOpen = new FRadioButton(localizer.getMessage("lblOpen"));
 
         final JPopupMenu menu = new  JPopupMenu();
@@ -653,11 +661,13 @@ public class PlayerPanel extends FPanel {
 
         radioHuman.addMouseListener(radioMouseAdapter(radioHuman, LobbySlotType.LOCAL));
         radioAi.addMouseListener   (radioMouseAdapter(radioAi,    LobbySlotType.AI));
+        radioRlAi.addMouseListener (radioMouseAdapter(radioRlAi,  LobbySlotType.RL_AI));
         radioOpen.addMouseListener (radioMouseAdapter(radioOpen,  LobbySlotType.OPEN));
 
         final ButtonGroup tempBtnGroup = new ButtonGroup();
         tempBtnGroup.add(radioHuman);
         tempBtnGroup.add(radioAi);
+        tempBtnGroup.add(radioRlAi);
         tempBtnGroup.add(radioOpen);
     }
 

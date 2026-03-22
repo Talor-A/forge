@@ -423,8 +423,12 @@ public abstract class GameLobby implements IHasGameType {
             final Set<AIOption> aiOptions = slot.getAiOptions(); // TODO: could AiOptions carry the choice of which AI is selected to play against?
 
             final boolean isAI = slot.getType() == LobbySlotType.AI;
+            final boolean isRlAI = slot.getType() == LobbySlotType.RL_AI;
             final LobbyPlayer lobbyPlayer;
-            if (isAI) {
+            if (isRlAI) {
+                lobbyPlayer = GamePlayerUtil.createRlAiPlayer(name, avatar, sleeve);
+            }
+            else if (isAI) {
                 String aiProfileOverride = slot.getAiProfile();
                 lobbyPlayer = GamePlayerUtil.createAiPlayer(name, avatar, sleeve, aiOptions, aiProfileOverride);
             }
