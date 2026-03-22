@@ -21,29 +21,29 @@
 
     <!-- Global features - small -->
     <rect x="0" y="0" width="20" height="18" rx="2" fill="#b8c9e0" stroke="#7a9ec4" stroke-width="1"/>
-    <text x="25" y="12" font-size="7" fill="#444">Global 64</text>
+    <text x="25" y="12" font-size="7" fill="#444">Global 96</text>
 
     <!-- My board - tall -->
     <rect x="0" y="22" width="20" height="85" rx="2" fill="#a8d5a2" stroke="#6db06a" stroke-width="1"/>
-    <text x="25" y="68" font-size="7" fill="#444">My Board 30×128</text>
+    <text x="25" y="68" font-size="7" fill="#444">My Board 40×256</text>
 
     <!-- Opp board -->
     <rect x="0" y="111" width="20" height="85" rx="2" fill="#f5a8a8" stroke="#d07070" stroke-width="1"/>
-    <text x="25" y="157" font-size="7" fill="#444">Opp Board 30×128</text>
+    <text x="25" y="157" font-size="7" fill="#444">Opp Board 40×256</text>
 
     <!-- Hand -->
     <rect x="0" y="200" width="20" height="42" rx="2" fill="#f5e6a8" stroke="#d0c070" stroke-width="1"/>
-    <text x="25" y="224" font-size="7" fill="#444">Hand 15×128</text>
+    <text x="25" y="224" font-size="7" fill="#444">Hand 15×256</text>
 
     <!-- Graveyards -->
     <rect x="0" y="246" width="20" height="56" rx="2" fill="#d4d4d4" stroke="#aaa" stroke-width="1"/>
-    <text x="25" y="278" font-size="7" fill="#444">GYs 2×40×128</text>
+    <text x="25" y="278" font-size="7" fill="#444">GYs 2×20×256</text>
 
     <!-- Stack -->
     <rect x="0" y="306" width="20" height="28" rx="2" fill="#c8b8e8" stroke="#9080c0" stroke-width="1"/>
-    <text x="25" y="324" font-size="7" fill="#444">Stack 10×128</text>
+    <text x="25" y="324" font-size="7" fill="#444">Stack 10×256</text>
 
-    <text x="55" y="350" text-anchor="middle" font-size="8" fill="#999">21,184 floats</text>
+    <text x="55" y="350" text-anchor="middle" font-size="8" fill="#999">37,216 floats</text>
   </g>
 
   <!-- Arrow to per-zone encoders -->
@@ -56,7 +56,7 @@
 
     <!-- Linear -->
     <rect x="10" y="14" width="110" height="22" rx="3" fill="#d4e3f7" stroke="#7aadeb" stroke-width="1"/>
-    <text x="65" y="29" text-anchor="middle" font-size="8" fill="#333">Linear 128→128</text>
+    <text x="65" y="29" text-anchor="middle" font-size="8" fill="#333">Linear 256→128</text>
 
     <!-- Self-attention -->
     <rect x="10" y="42" width="110" height="36" rx="3" fill="#c0d6f0" stroke="#5a90d0" stroke-width="1"/>
@@ -222,12 +222,12 @@
 
     <rect x="10" y="26" width="55" height="44" rx="3" fill="#d1fae5" stroke="#6ee7b7" stroke-width="1"/>
     <text x="37" y="42" text-anchor="middle" font-size="7" fill="#444">Creatures</text>
-    <text x="37" y="54" text-anchor="middle" font-size="7" fill="#888">N×128</text>
+    <text x="37" y="54" text-anchor="middle" font-size="7" fill="#888">N×256</text>
 
     <line x1="67" y1="48" x2="77" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
 
     <rect x="79" y="26" width="65" height="44" rx="3" fill="#d1fae5" stroke="#10b981" stroke-width="1"/>
-    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj 128→256</text>
+    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj 256→256</text>
     <text x="111" y="54" text-anchor="middle" font-size="7" fill="#444">Proj 512→256</text>
 
     <line x1="146" y1="48" x2="156" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
@@ -263,14 +263,14 @@
 
     <rect x="10" y="26" width="55" height="44" rx="3" fill="#dbeafe" stroke="#93c5fd" stroke-width="1"/>
     <text x="37" y="38" text-anchor="middle" font-size="7" fill="#444">Blockers</text>
-    <text x="37" y="48" text-anchor="middle" font-size="7" fill="#888">B×128</text>
-    <text x="37" y="58" text-anchor="middle" font-size="7" fill="#888">Atk A×128</text>
+    <text x="37" y="48" text-anchor="middle" font-size="7" fill="#888">B×256</text>
+    <text x="37" y="58" text-anchor="middle" font-size="7" fill="#888">Atk A×256</text>
 
     <line x1="67" y1="48" x2="77" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
 
     <rect x="79" y="26" width="65" height="44" rx="3" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
-    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj B→256</text>
-    <text x="111" y="54" text-anchor="middle" font-size="7" fill="#444">Proj A→256</text>
+    <text x="111" y="42" text-anchor="middle" font-size="7" fill="#444">Proj B 256→256</text>
+    <text x="111" y="54" text-anchor="middle" font-size="7" fill="#444">Proj A 256→256</text>
 
     <line x1="146" y1="48" x2="156" y2="48" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
 
@@ -306,7 +306,7 @@
 
     <rect x="10" y="24" width="55" height="36" rx="3" fill="#e0f2fe" stroke="#7dd3fc" stroke-width="1"/>
     <text x="37" y="38" text-anchor="middle" font-size="7" fill="#444">Cards</text>
-    <text x="37" y="50" text-anchor="middle" font-size="7" fill="#888">N×128</text>
+    <text x="37" y="50" text-anchor="middle" font-size="7" fill="#888">N×256</text>
 
     <line x1="67" y1="42" x2="77" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
 
@@ -372,7 +372,7 @@
 
     <rect x="10" y="24" width="45" height="36" rx="3" fill="#fce7f3" stroke="#f9a8d4" stroke-width="1"/>
     <text x="32" y="38" text-anchor="middle" font-size="7" fill="#444">Hand</text>
-    <text x="32" y="50" text-anchor="middle" font-size="7" fill="#888">7×128</text>
+    <text x="32" y="50" text-anchor="middle" font-size="7" fill="#888">7×256</text>
 
     <line x1="57" y1="42" x2="67" y2="42" stroke="#999" stroke-width="0.8" marker-end="url(#arr)"/>
 
