@@ -326,3 +326,232 @@ class MmapBlockDataset(Dataset):
             'n_pairs': n,
             'won': float(s.outcome[si] > 0),
         }
+
+
+class MmapTargetDataset(Dataset):
+    """Memory-mapped dataset for target head.
+    Single-select from 256-dim candidate features."""
+
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        td = os.path.join(preprocessed_dir, 'target')
+        if not os.path.isdir(td):
+            self.indices = np.array([], dtype=np.int64)
+            return
+        self.gs_index = np.load(
+            os.path.join(td, 'gs_index.npy'),
+            mmap_mode='r')
+        self.candidates = np.load(
+            os.path.join(td, 'candidates.npy'),
+            mmap_mode='r')
+        self.candidate_mask = np.load(
+            os.path.join(td, 'candidate_mask.npy'),
+            mmap_mode='r')
+        self.selected_idx = np.load(
+            os.path.join(td, 'selected_idx.npy'),
+            mmap_mode='r')
+
+        s = self.shared
+        train_ids, val_ids = _split_file_ids(
+            s.file_id, val_fraction)
+        target_ids = train_ids if train else val_ids
+
+        self.indices = np.array([
+            i for i in range(len(self.gs_index))
+            if int(s.file_id[self.gs_index[i]])
+            in target_ids
+        ], dtype=np.int64)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        i = self.indices[idx]
+        si = int(self.gs_index[i])
+        s = self.shared
+
+        mask = np.array(self.candidate_mask[i])
+        n = int(mask.sum())
+
+        return {
+            'global_features': np.array(
+                s.global_features[si]),
+            'game_state_flat': np.array(
+                s.game_state[si]),
+            'candidate_features': np.array(
+                self.candidates[i, :n]),
+            'selected_idx': int(self.selected_idx[i]),
+            'n_candidates': n,
+            'won': float(s.outcome[si] > 0),
+        }
+
+
+class MmapCardSelectDataset(Dataset):
+    """Memory-mapped dataset for card select head.
+    Multi-select from 256-dim candidate features."""
+
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        csd = os.path.join(preprocessed_dir, 'card_select')
+        if not os.path.isdir(csd):
+            self.indices = np.array([], dtype=np.int64)
+            return
+        self.gs_index = np.load(
+            os.path.join(csd, 'gs_index.npy'),
+            mmap_mode='r')
+        self.candidates = np.load(
+            os.path.join(csd, 'candidates.npy'),
+            mmap_mode='r')
+        self.candidate_mask = np.load(
+            os.path.join(csd, 'candidate_mask.npy'),
+            mmap_mode='r')
+        self.action_mask = np.load(
+            os.path.join(csd, 'action_mask.npy'),
+            mmap_mode='r')
+
+        s = self.shared
+        train_ids, val_ids = _split_file_ids(
+            s.file_id, val_fraction)
+        target_ids = train_ids if train else val_ids
+
+        self.indices = np.array([
+            i for i in range(len(self.gs_index))
+            if int(s.file_id[self.gs_index[i]])
+            in target_ids
+        ], dtype=np.int64)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        i = self.indices[idx]
+        si = int(self.gs_index[i])
+        s = self.shared
+
+        cmask = np.array(self.candidate_mask[i])
+        n = int(cmask.sum())
+
+        return {
+            'global_features': np.array(
+                s.global_features[si]),
+            'game_state_flat': np.array(
+                s.game_state[si]),
+            'candidate_features': np.array(
+                self.candidates[i, :n]),
+            'action_mask': np.array(
+                self.action_mask[i, :n]),
+            'n_candidates': n,
+            'won': float(s.outcome[si] > 0),
+        }
+
+
+class MmapMulliganDataset(Dataset):
+    """Memory-mapped dataset for mulligan head.
+    Binary keep/mulligan + hand card features."""
+
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        muld = os.path.join(preprocessed_dir, 'mulligan')
+        if not os.path.isdir(muld):
+            self.indices = np.array([], dtype=np.int64)
+            return
+        self.gs_index = np.load(
+            os.path.join(muld, 'gs_index.npy'),
+            mmap_mode='r')
+        self.hand_features = np.load(
+            os.path.join(muld, 'hand_features.npy'),
+            mmap_mode='r')
+        self.hand_mask = np.load(
+            os.path.join(muld, 'hand_mask.npy'),
+            mmap_mode='r')
+        self.keep_decision = np.load(
+            os.path.join(muld, 'keep_decision.npy'),
+            mmap_mode='r')
+
+        s = self.shared
+        train_ids, val_ids = _split_file_ids(
+            s.file_id, val_fraction)
+        target_ids = train_ids if train else val_ids
+
+        self.indices = np.array([
+            i for i in range(len(self.gs_index))
+            if int(s.file_id[self.gs_index[i]])
+            in target_ids
+        ], dtype=np.int64)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        i = self.indices[idx]
+        si = int(self.gs_index[i])
+        s = self.shared
+
+        hmask = np.array(self.hand_mask[i])
+        n = int(hmask.sum())
+
+        return {
+            'global_features': np.array(
+                s.global_features[si]),
+            'game_state_flat': np.array(
+                s.game_state[si]),
+            'hand_features': np.array(
+                self.hand_features[i, :n]),
+            'n_cards': n,
+            'keep': float(self.keep_decision[i]),
+            'won': float(s.outcome[si] > 0),
+        }
+
+
+class MmapBinaryDataset(Dataset):
+    """Memory-mapped dataset for binary head.
+    Just game state + yes/no decision."""
+
+    def __init__(self, preprocessed_dir, train=True,
+                 val_fraction=0.1, shared=None):
+        self.shared = shared or SharedState(
+            preprocessed_dir)
+        bind = os.path.join(preprocessed_dir, 'binary')
+        if not os.path.isdir(bind):
+            self.indices = np.array([], dtype=np.int64)
+            return
+        self.gs_index = np.load(
+            os.path.join(bind, 'gs_index.npy'),
+            mmap_mode='r')
+        self.decision = np.load(
+            os.path.join(bind, 'decision.npy'),
+            mmap_mode='r')
+
+        s = self.shared
+        train_ids, val_ids = _split_file_ids(
+            s.file_id, val_fraction)
+        target_ids = train_ids if train else val_ids
+
+        self.indices = np.array([
+            i for i in range(len(self.gs_index))
+            if int(s.file_id[self.gs_index[i]])
+            in target_ids
+        ], dtype=np.int64)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        i = self.indices[idx]
+        si = int(self.gs_index[i])
+        s = self.shared
+
+        return {
+            'global_features': np.array(
+                s.global_features[si]),
+            'game_state_flat': np.array(
+                s.game_state[si]),
+            'decision': float(self.decision[i]),
+            'won': float(s.outcome[si] > 0),
+        }

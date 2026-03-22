@@ -49,6 +49,13 @@ class MulliganHead(nn.Module):
             nn.Linear(hidden_dim, 1),  # higher score = more likely to bottom
         )
 
+    def forward(self, game_state: torch.Tensor, hand_features: torch.Tensor,
+                hand_mask: torch.Tensor) -> torch.Tensor:
+        """Forward for training compatibility.
+        Returns keep logit per sample (positive=keep, negative=mull)."""
+        keep_logit, _ = self.evaluate_hand(game_state, hand_features, hand_mask)
+        return keep_logit.squeeze(-1)
+
     def evaluate_hand(self, game_state: torch.Tensor, hand_features: torch.Tensor,
                       hand_mask: torch.Tensor) -> tuple:
         """

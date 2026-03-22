@@ -108,6 +108,46 @@ class TrainingState:
         default_factory=list)
     priority_best_acc: float = 0.0
 
+    target_train_losses: List[float] = field(
+        default_factory=list)
+    target_train_accs: List[float] = field(
+        default_factory=list)
+    target_val_losses: List[float] = field(
+        default_factory=list)
+    target_val_accs: List[float] = field(
+        default_factory=list)
+    target_best_acc: float = 0.0
+
+    card_select_train_losses: List[float] = field(
+        default_factory=list)
+    card_select_train_accs: List[float] = field(
+        default_factory=list)
+    card_select_val_losses: List[float] = field(
+        default_factory=list)
+    card_select_val_accs: List[float] = field(
+        default_factory=list)
+    card_select_best_acc: float = 0.0
+
+    mulligan_train_losses: List[float] = field(
+        default_factory=list)
+    mulligan_train_accs: List[float] = field(
+        default_factory=list)
+    mulligan_val_losses: List[float] = field(
+        default_factory=list)
+    mulligan_val_accs: List[float] = field(
+        default_factory=list)
+    mulligan_best_acc: float = 0.0
+
+    binary_train_losses: List[float] = field(
+        default_factory=list)
+    binary_train_accs: List[float] = field(
+        default_factory=list)
+    binary_val_losses: List[float] = field(
+        default_factory=list)
+    binary_val_accs: List[float] = field(
+        default_factory=list)
+    binary_best_acc: float = 0.0
+
     current_train_loss: float = 0.0
     current_train_acc: float = 0.0
     current_val_loss: float = 0.0
@@ -347,8 +387,22 @@ def load_decisions_old(data_dir, state, max_files=None,
 
 # ── Batch processing ─────────────────────────────────
 
+def _get_n_items(s):
+    """Get item count from sample — handles different field names."""
+    for key in ('n_creatures', 'n_candidates', 'n_cards'):
+        if key in s:
+            return s[key]
+    return 1
+
+def _get_features(s):
+    """Get feature array from sample — handles different field names."""
+    for key in ('creature_features', 'candidate_features', 'hand_features'):
+        if key in s:
+            return s[key]
+    return None
+
 def make_batch(model, batch, device, use_amp, head):
-    max_c = max(s['n_creatures'] for s in batch)
+    max_c = max(_get_n_items(s) for s in batch)
     max_c = max(max_c, 1)
     bs = len(batch)
     cd = CARD_DIM
@@ -379,11 +433,18 @@ def make_batch(model, batch, device, use_amp, head):
                        device=device)
 
     for i, s in enumerate(batch):
-        nc = s['n_creatures']
-        cf[i, :nc] = torch.from_numpy(
-            s['creature_features'])
+        nc = _get_n_items(s)
+        feats = _get_features(s)
+        if feats is not None:
+            cf[i, :nc] = torch.from_numpy(feats)
         cm[i, :nc] = True
-        tgt[i, :nc] = torch.from_numpy(s['action_mask'])
+        amask = s.get('action_mask')
+        if amask is not None:
+            tgt[i, :nc] = torch.from_numpy(amask)
+        else:
+            # Mulligan: keep=1.0 means all cards selected
+            keep = s.get('keep', 0.0)
+            tgt[i, :nc] = keep
 
         g, zones, masks = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -505,6 +566,195 @@ def make_priority_batch(model, batch, device, use_amp,
         total = bs
 
     return loss, correct, total
+
+
+def make_target_batch(model, batch, device, use_amp,
+                      head):
+    """Build a target batch with CrossEntropyLoss
+    (single-select softmax, 256-dim candidate features)."""
+    max_c = max(s['n_candidates'] for s in batch)
+    max_c = max(max_c, 1)
+    bs = len(batch)
+    cd = CARD_DIM
+
+    cf = torch.zeros(bs, max_c, cd, device=device)
+    cm = torch.zeros(bs, max_c, dtype=torch.bool,
+                      device=device)
+    tgt = torch.zeros(bs, dtype=torch.long, device=device)
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
+
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool, device=device)
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool, device=device)
+
+    for i, s in enumerate(batch):
+        nc = s['n_candidates']
+        cf[i, :nc] = torch.from_numpy(s['candidate_features'])
+        cm[i, :nc] = True
+        tgt[i] = s['selected_idx']
+
+        g, zones, masks = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(masks['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.no_grad():
+            state_emb = model.encode_state(
+                gf, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, st, stm)
+
+        logits = head(state_emb, cf, cm)
+        loss = nn.functional.cross_entropy(logits, tgt)
+
+    with torch.no_grad():
+        preds = logits.argmax(dim=1)
+        correct = (preds == tgt).sum().item()
+
+    return loss, correct, bs
+
+
+def make_mulligan_batch(model, batch, device, use_amp, head):
+    """Build a mulligan batch — binary keep/mull from hand features."""
+    max_c = max(s.get('n_cards', 7) for s in batch)
+    max_c = max(max_c, 1)
+    bs = len(batch)
+    cd = CARD_DIM
+
+    hf = torch.zeros(bs, max_c, cd, device=device)
+    hm = torch.zeros(bs, max_c, dtype=torch.bool, device=device)
+    tgt = torch.zeros(bs, device=device)
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
+
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
+    hmask = torch.zeros(bs, 15, dtype=torch.bool, device=device)
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool, device=device)
+
+    for i, s in enumerate(batch):
+        nc = s.get('n_cards', 0)
+        feats = s.get('hand_features')
+        if feats is not None and nc > 0:
+            hf[i, :nc] = torch.from_numpy(feats)
+        hm[i, :nc] = True
+        tgt[i] = s.get('keep', 0.0)
+
+        g, zones, masks = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(masks['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hmask[i] = torch.from_numpy(masks['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.no_grad():
+            state_emb = model.encode_state(
+                gf, mb, mbm, ob, obm, h, hmask,
+                mg, mgm, og, ogm, st, stm)
+
+        logits = head(state_emb, hf, hm)  # (bs,) keep logit
+        loss = nn.functional.binary_cross_entropy_with_logits(
+            logits, tgt)
+
+    with torch.no_grad():
+        preds = (logits > 0).float()
+        correct = (preds == tgt).sum().item()
+
+    return loss, correct, bs
+
+
+def make_binary_batch(model, batch, device, use_amp, head):
+    """Build a binary batch — yes/no from game state only."""
+    bs = len(batch)
+    cd = CARD_DIM
+
+    tgt = torch.zeros(bs, device=device)
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
+
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool, device=device)
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool, device=device)
+
+    for i, s in enumerate(batch):
+        tgt[i] = s.get('decision', 0.0)
+
+        g, zones, masks = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(masks['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.no_grad():
+            state_emb = model.encode_state(
+                gf, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, st, stm)
+
+        logits = head(state_emb)  # (bs,) binary logit
+        loss = nn.functional.binary_cross_entropy_with_logits(
+            logits, tgt)
+
+    with torch.no_grad():
+        preds = (logits > 0).float()
+        correct = (preds == tgt).sum().item()
+
+    return loss, correct, bs
 
 
 def make_block_batch(model, batch, device, use_amp,
@@ -999,16 +1249,14 @@ def train_head(model, head, head_name, samples, args,
         args.save_dir, f'best_{head_name}_model.pt')
 
     # Get the right metric lists
-    if head_name == 'attack':
-        tl_list = state.attack_train_losses
-        ta_list = state.attack_train_accs
-        vl_list = state.attack_val_losses
-        va_list = state.attack_val_accs
-    else:
-        tl_list = state.block_train_losses
-        ta_list = state.block_train_accs
-        vl_list = state.block_val_losses
-        va_list = state.block_val_accs
+    tl_list = getattr(state, f'{head_name}_train_losses',
+                      state.block_train_losses)
+    ta_list = getattr(state, f'{head_name}_train_accs',
+                      state.block_train_accs)
+    vl_list = getattr(state, f'{head_name}_val_losses',
+                      state.block_val_losses)
+    va_list = getattr(state, f'{head_name}_val_accs',
+                      state.block_val_accs)
 
     start = time.time()
 
@@ -1088,10 +1336,7 @@ def train_head(model, head, head_name, samples, args,
             best_acc = va
             model.save(save_path)
 
-        if head_name == 'attack':
-            state.attack_best_acc = best_acc
-        else:
-            state.block_best_acc = best_acc
+        setattr(state, f'{head_name}_best_acc', best_acc)
 
         status = ' *BEST*' if va == best_acc and va > 0 else ''
         log(state,
@@ -1168,16 +1413,14 @@ def train_head_mmap(model, head, head_name,
     save_path = os.path.join(
         args.save_dir, f'best_{head_name}_model.pt')
 
-    if head_name == 'attack':
-        tl_list = state.attack_train_losses
-        ta_list = state.attack_train_accs
-        vl_list = state.attack_val_losses
-        va_list = state.attack_val_accs
-    else:
-        tl_list = state.block_train_losses
-        ta_list = state.block_train_accs
-        vl_list = state.block_val_losses
-        va_list = state.block_val_accs
+    tl_list = getattr(state, f'{head_name}_train_losses',
+                      state.block_train_losses)
+    ta_list = getattr(state, f'{head_name}_train_accs',
+                      state.block_train_accs)
+    vl_list = getattr(state, f'{head_name}_val_losses',
+                      state.block_val_losses)
+    va_list = getattr(state, f'{head_name}_val_accs',
+                      state.block_val_accs)
 
     start = time.time()
 
@@ -1250,10 +1493,7 @@ def train_head_mmap(model, head, head_name,
             best_acc = va
             model.save(save_path)
 
-        if head_name == 'attack':
-            state.attack_best_acc = best_acc
-        else:
-            state.block_best_acc = best_acc
+        setattr(state, f'{head_name}_best_acc', best_acc)
 
         status = ' *BEST*' if va == best_acc and va > 0 \
             else ''
@@ -1456,9 +1696,12 @@ def trainer_thread(state, args):
         state.total_epochs = args.epochs
 
         # Load data via mmap or fallback to JSONL
+        all_heads = ['priority', 'attack', 'block',
+                     'target', 'card_select',
+                     'mulligan', 'binary']
         heads_list = (args.heads.split(',')
                  if args.heads != 'all'
-                 else ['priority', 'attack', 'block'])
+                 else all_heads)
 
         preprocessed_dir = os.path.join(
             os.path.dirname(args.data_dir),
@@ -1471,7 +1714,11 @@ def trainer_thread(state, args):
             from training.mmap_dataset import (
                 MmapPriorityDataset,
                 MmapAttackDataset,
-                MmapBlockDataset)
+                MmapBlockDataset,
+                MmapTargetDataset,
+                MmapCardSelectDataset,
+                MmapMulliganDataset,
+                MmapBinaryDataset)
             import json as json_mod
 
             state.status = "Loading preprocessed data..."
@@ -1520,6 +1767,66 @@ def trainer_thread(state, args):
                     f"Block: {len(block_train_ds)}"
                     f" train, {len(block_val_ds)}"
                     f" val samples (mmap)")
+
+            target_train_ds = target_val_ds = None
+            if 'target' in heads_list:
+                target_train_ds = MmapTargetDataset(
+                    preprocessed_dir, train=True)
+                target_val_ds = MmapTargetDataset(
+                    preprocessed_dir, train=False)
+                if len(target_train_ds) > 0:
+                    log(state,
+                        f"Target: {len(target_train_ds)}"
+                        f" train, {len(target_val_ds)}"
+                        f" val samples (mmap)")
+                else:
+                    log(state, "Target: no data")
+                    target_train_ds = None
+
+            card_select_train_ds = card_select_val_ds = None
+            if 'card_select' in heads_list:
+                card_select_train_ds = MmapCardSelectDataset(
+                    preprocessed_dir, train=True)
+                card_select_val_ds = MmapCardSelectDataset(
+                    preprocessed_dir, train=False)
+                if len(card_select_train_ds) > 0:
+                    log(state,
+                        f"Card Select: {len(card_select_train_ds)}"
+                        f" train, {len(card_select_val_ds)}"
+                        f" val samples (mmap)")
+                else:
+                    log(state, "Card Select: no data")
+                    card_select_train_ds = None
+
+            mulligan_train_ds = mulligan_val_ds = None
+            if 'mulligan' in heads_list:
+                mulligan_train_ds = MmapMulliganDataset(
+                    preprocessed_dir, train=True)
+                mulligan_val_ds = MmapMulliganDataset(
+                    preprocessed_dir, train=False)
+                if len(mulligan_train_ds) > 0:
+                    log(state,
+                        f"Mulligan: {len(mulligan_train_ds)}"
+                        f" train, {len(mulligan_val_ds)}"
+                        f" val samples (mmap)")
+                else:
+                    log(state, "Mulligan: no data")
+                    mulligan_train_ds = None
+
+            binary_train_ds = binary_val_ds = None
+            if 'binary' in heads_list:
+                binary_train_ds = MmapBinaryDataset(
+                    preprocessed_dir, train=True)
+                binary_val_ds = MmapBinaryDataset(
+                    preprocessed_dir, train=False)
+                if len(binary_train_ds) > 0:
+                    log(state,
+                        f"Binary: {len(binary_train_ds)}"
+                        f" train, {len(binary_val_ds)}"
+                        f" val samples (mmap)")
+                else:
+                    log(state, "Binary: no data")
+                    binary_train_ds = None
         else:
             # Fallback: load from JSONL (chunked)
             log(state,
@@ -1602,18 +1909,63 @@ def trainer_thread(state, args):
                     block_samples, args, state,
                     device, use_amp)
 
+        # Train target head (single-select CE, 256-dim candidates)
+        if 'target' in heads_list and use_mmap and target_train_ds:
+            state.epoch = 0
+            state.epoch_progress = 0
+            train_head_mmap(
+                model, model.target_head, 'target',
+                target_train_ds, target_val_ds,
+                args, state, device, use_amp,
+                make_target_batch)
+
+        # Train card select head (multi-select, like attack)
+        if 'card_select' in heads_list and use_mmap and card_select_train_ds:
+            state.epoch = 0
+            state.epoch_progress = 0
+            log(state, f"\n=== Training card_select head (mmap) ===")
+            log(state, f"Train: {len(card_select_train_ds)}, Val: {len(card_select_val_ds)}")
+            train_head_mmap(
+                model, model.card_select_head, 'card_select',
+                card_select_train_ds, card_select_val_ds,
+                args, state, device, use_amp,
+                make_batch)
+
+        # Train mulligan head (binary keep/mull)
+        if 'mulligan' in heads_list and use_mmap and mulligan_train_ds:
+            state.epoch = 0
+            state.epoch_progress = 0
+            train_head_mmap(
+                model, model.mulligan_head, 'mulligan',
+                mulligan_train_ds, mulligan_val_ds,
+                args, state, device, use_amp,
+                make_mulligan_batch)
+
+        # Train binary head (simple BCE from game state)
+        if 'binary' in heads_list and use_mmap and binary_train_ds:
+            state.epoch = 0
+            state.epoch_progress = 0
+            train_head_mmap(
+                model, model.binary_head, 'binary',
+                binary_train_ds, binary_val_ds,
+                args, state, device, use_amp,
+                make_binary_batch)
+
         # Save combined model
         save_path = os.path.join(
             args.save_dir, 'model_with_decisions.pt')
         model.save(save_path)
 
         log(state, f"\n=== Training Complete ===")
-        heads_trained = [h.strip() for h in args.heads.split(',')] if args.heads != 'all' else ['attack', 'block', 'priority']
-        for h, acc in [('attack', state.attack_best_acc), ('block', state.block_best_acc), ('priority', state.priority_best_acc)]:
-            if h in heads_trained:
-                log(state, f"{h.capitalize()} best val acc: {acc:.1%}")
+        heads_trained = [h.strip() for h in args.heads.split(',')] if args.heads != 'all' else all_heads
+        for h in all_heads:
+            acc = getattr(state, f'{h}_best_acc', 0.0)
+            if h in heads_trained and acc > 0:
+                log(state, f"{h}: best val acc {acc:.1%}")
+            elif h in heads_trained:
+                log(state, f"{h}: trained (no accuracy metric)")
             elif acc == 0.0:
-                log(state, f"{h.capitalize()}: not trained (weights from encoder checkpoint)")
+                log(state, f"{h}: not trained (weights from encoder checkpoint)")
         log(state, f"Model saved: {save_path}")
 
         state.status = "Training complete!"
@@ -1724,25 +2076,34 @@ class DecisionDashboard:
             self.fig = Figure(figsize=(8.5, 6), dpi=100,
                 facecolor='#1e1e2e')
 
-            self.ax_atk_loss = self.fig.add_subplot(231)
-            self.ax_atk_acc = self.fig.add_subplot(234)
-            self.ax_blk_loss = self.fig.add_subplot(232)
-            self.ax_blk_acc = self.fig.add_subplot(235)
-            self.ax_pri_loss = self.fig.add_subplot(233)
-            self.ax_pri_acc = self.fig.add_subplot(236)
+            # Dynamic chart grid — all possible heads
+            self.chart_heads = [
+                ('priority', 'Priority'),
+                ('attack', 'Attack'),
+                ('block', 'Block'),
+                ('target', 'Target'),
+                ('card_select', 'Card Select'),
+                ('mulligan', 'Mulligan'),
+                ('binary', 'Binary'),
+            ]
+            n_heads = len(self.chart_heads)
+            cols = min(n_heads, 4)
+            rows = 2  # loss + accuracy rows
+            self.fig.set_size_inches(2.5 * cols, 3 * rows)
 
-            for ax, title in [
-                    (self.ax_atk_loss, 'Attack Loss'),
-                    (self.ax_atk_acc, 'Attack Accuracy'),
-                    (self.ax_blk_loss, 'Block Loss'),
-                    (self.ax_blk_acc, 'Block Accuracy'),
-                    (self.ax_pri_loss, 'Priority Loss'),
-                    (self.ax_pri_acc, 'Priority Accuracy')]:
+            self.head_axes = {}
+            for i, (hname, htitle) in enumerate(self.chart_heads):
+                ax_loss = self.fig.add_subplot(rows, cols, i + 1)
+                self.head_axes[f'{hname}_loss'] = ax_loss
+
+            for ax_key, ax in self.head_axes.items():
+                hname = ax_key.replace('_loss', '')
+                htitle = dict(self.chart_heads).get(hname, hname)
                 ax.set_facecolor('#313244')
-                ax.set_title(title, color='#cdd6f4',
-                    fontsize=9)
+                ax.set_title(f'{htitle}', color='#cdd6f4',
+                    fontsize=8)
                 ax.tick_params(colors='#6c7086',
-                    labelsize=7)
+                    labelsize=6)
                 for spine in ax.spines.values():
                     spine.set_color('#45475a')
 
@@ -1818,63 +2179,35 @@ class DecisionDashboard:
         self.root.after(500, self._update_loop)
 
     def _draw_charts(self, s):
-        for ax, tl, ta, vl, va, title_l, title_a in [
-            (self.ax_atk_loss, s.attack_train_losses,
-             s.attack_train_accs, s.attack_val_losses,
-             s.attack_val_accs,
-             'Attack Loss', 'Attack Accuracy'),
-            (self.ax_blk_loss, s.block_train_losses,
-             s.block_train_accs, s.block_val_losses,
-             s.block_val_accs,
-             'Block Loss', 'Block Accuracy'),
-            (self.ax_pri_loss, s.priority_train_losses,
-             s.priority_train_accs, s.priority_val_losses,
-             s.priority_val_accs,
-             'Priority Loss', 'Priority Accuracy'),
-        ]:
-            # Loss chart
-            ax.clear()
-            ax.set_facecolor('#313244')
-            ax.set_title(title_l, color='#cdd6f4',
-                fontsize=9)
-            if tl:
-                ep = range(1, len(tl) + 1)
-                ax.plot(ep, tl, color='#89b4fa',
-                    linewidth=1.5, label='Train')
-                if vl:
-                    ax.plot(ep, vl, color='#f38ba8',
-                        linewidth=1.5, label='Val')
-                ax.legend(fontsize=7,
-                    facecolor='#313244',
-                    edgecolor='#45475a',
-                    labelcolor='#cdd6f4')
-            ax.tick_params(colors='#6c7086', labelsize=7)
-            for spine in ax.spines.values():
-                spine.set_color('#45475a')
+        # Draw loss + accuracy for each head that has data
+        for hname, htitle in self.chart_heads:
+            ax_key = f'{hname}_loss'
+            if ax_key not in self.head_axes:
+                continue
+            ax = self.head_axes[ax_key]
 
-        for ax, ta, va, title_a in [
-            (self.ax_atk_acc, s.attack_train_accs,
-             s.attack_val_accs, 'Attack Accuracy'),
-            (self.ax_blk_acc, s.block_train_accs,
-             s.block_val_accs, 'Block Accuracy'),
-            (self.ax_pri_acc, s.priority_train_accs,
-             s.priority_val_accs, 'Priority Accuracy'),
-        ]:
+            tl = getattr(s, f'{hname}_train_losses', [])
+            vl = getattr(s, f'{hname}_val_losses', [])
+            ta = getattr(s, f'{hname}_train_accs', [])
+            va = getattr(s, f'{hname}_val_accs', [])
+
             ax.clear()
             ax.set_facecolor('#313244')
-            ax.set_title(title_a, color='#cdd6f4',
-                fontsize=9)
+            ax.set_title(f'{htitle}', color='#cdd6f4',
+                fontsize=8)
+
             if ta:
                 ep = range(1, len(ta) + 1)
+                # Plot accuracy (primary metric)
                 ax.plot(ep, ta, color='#89b4fa',
-                    linewidth=1.5, label='Train')
+                    linewidth=1.5, label='Train Acc')
                 if va:
                     ax.plot(ep, va, color='#f38ba8',
-                        linewidth=1.5, label='Val')
-                ax.set_ylim(0.4, 1.05)
+                        linewidth=1.5, label='Val Acc')
+                ax.set_ylim(0, 1.05)
                 ax.axhline(y=0.5, color='#585b70',
                     linestyle='--', linewidth=0.8)
-                ax.legend(fontsize=7,
+                ax.legend(fontsize=6,
                     facecolor='#313244',
                     edgecolor='#45475a',
                     labelcolor='#cdd6f4')

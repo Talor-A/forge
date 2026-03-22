@@ -54,7 +54,7 @@ class MTGModel(nn.Module):
 
         # Decision heads (actors)
         self.priority_head = PriorityHead(state_dim, action_feature_dim, hidden_dim, num_heads, dropout)
-        self.target_head = TargetHead(state_dim, action_feature_dim, hidden_dim, dropout)
+        self.target_head = TargetHead(state_dim, card_feature_dim, hidden_dim, dropout)
         self.attack_head = AttackHead(state_dim, card_feature_dim, hidden_dim, num_heads, dropout)
         self.block_head = BlockHead(state_dim, card_feature_dim, hidden_dim, num_heads, dropout)
         self.card_select_head = CardSelectHead(state_dim, card_feature_dim, hidden_dim, num_heads, dropout)
@@ -98,7 +98,20 @@ class MTGModel(nn.Module):
         """Load model from saved weights."""
         checkpoint = torch.load(path, map_location=device)
         model = cls(**checkpoint['config'])
-        model.load_state_dict(checkpoint['state_dict'])
+        # Filter out keys with size mismatches (e.g. target_head
+        # expanded from 64 to 256-dim)
+        model_state = model.state_dict()
+        filtered = {}
+        skipped = []
+        for k, v in checkpoint['state_dict'].items():
+            if k in model_state and v.shape == model_state[k].shape:
+                filtered[k] = v
+            else:
+                skipped.append(k)
+        if skipped:
+            print(f"Skipped weights (shape mismatch): "
+                  f"{skipped[:5]}", flush=True)
+        model.load_state_dict(filtered, strict=False)
         model.to(device)
         return model
 

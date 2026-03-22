@@ -853,7 +853,7 @@ def draw_action_card_image(info, is_chosen=False,
 
 # ── Data loading ───────────────────────────────────
 
-def load_samples(data_dir, max_samples=200,
+def load_samples(data_dir, max_samples=500,
                   rl_only=False, source_tag="heuristic"):
     path = Path(data_dir)
     files = sorted(path.glob("traj_*.jsonl"))
@@ -879,10 +879,16 @@ def load_samples(data_dir, max_samples=200,
                 dt = rec.get("decisionType", "")
                 if dt not in ("DECLARE_ATTACKERS",
                               "DECLARE_BLOCKERS",
-                              "PRIORITY_ACTION"):
+                              "PRIORITY_ACTION",
+                              "TARGET_SELECTION",
+                              "CARD_SELECTION",
+                              "MULLIGAN",
+                              "BINARY_CHOICE"):
                     continue
                 cand = rec.get("candidateFeatures", [])
-                if len(cand) < 1:
+                # Binary and mulligan may have no/few candidates
+                if dt not in ("BINARY_CHOICE", "MULLIGAN") \
+                        and len(cand) < 1:
                     continue
 
                 samples.append({
@@ -968,6 +974,9 @@ class GameStateViewer:
         ttk.Button(nav, text="Priority", command=self._filter_priority).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="Pri Pass", command=self._filter_priority_pass).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="Pri Play", command=self._filter_priority_play).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Target", command=self._filter_target).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="CardSel", command=self._filter_card_select).pack(side=tk.LEFT, padx=3)
+        ttk.Button(nav, text="Mulligan", command=self._filter_mulligan).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="All", command=self._filter_all).pack(side=tk.LEFT, padx=3)
 
         tk.Frame(nav, bg="#45475a", width=2).pack(
@@ -1082,7 +1091,7 @@ class GameStateViewer:
 
         # Priority candidates (shown for PRIORITY_ACTION)
         self._make_section(board_col,
-                           "Priority Candidates", "#fab387")
+                           "Candidates", "#fab387")
         self.priority_frame = tk.Frame(
             board_col, bg="#252535")
         self.priority_frame.pack(
@@ -1160,19 +1169,42 @@ class GameStateViewer:
                     if s.get("source") == tag]
         return filtered if filtered else self.all_samples
 
-    def _filter_attacks(self):
-        self.samples = [s for s in self._mode_samples() if s["type"] == "DECLARE_ATTACKERS"]
-        if not self.samples:
-            self.samples = self._mode_samples()
+    def _filter_by_type(self, dtype):
+        f = [s for s in self._mode_samples() if s["type"] == dtype]
+        if f:
+            self.samples = f
+        else:
+            # Try the other mode
+            other = [s for s in self.all_samples if s["type"] == dtype]
+            if other:
+                self.samples = other
+                # Auto-switch mode
+                if other[0].get("source") == "ppo":
+                    self.mode = self.MODE_RL_REPLAY
+                else:
+                    self.mode = self.MODE_HEURISTIC
+                self._apply_mode_filter()
+                self.samples = [s for s in self._mode_samples()
+                                if s["type"] == dtype]
+            else:
+                self.samples = self._mode_samples()
         self.idx = 0
         self._show()
 
+    def _filter_attacks(self):
+        self._filter_by_type("DECLARE_ATTACKERS")
+
     def _filter_blocks(self):
-        self.samples = [s for s in self._mode_samples() if s["type"] == "DECLARE_BLOCKERS"]
-        if not self.samples:
-            self.samples = self._mode_samples()
-        self.idx = 0
-        self._show()
+        self._filter_by_type("DECLARE_BLOCKERS")
+
+    def _filter_target(self):
+        self._filter_by_type("TARGET_SELECTION")
+
+    def _filter_card_select(self):
+        self._filter_by_type("CARD_SELECTION")
+
+    def _filter_mulligan(self):
+        self._filter_by_type("MULLIGAN")
 
     def _filter_priority(self):
         f = [s for s in self._mode_samples()
@@ -1403,6 +1435,10 @@ class GameStateViewer:
             "DECLARE_ATTACKERS": "ATTACK",
             "DECLARE_BLOCKERS": "BLOCK",
             "PRIORITY_ACTION": "PRIORITY",
+            "TARGET_SELECTION": "TARGET",
+            "CARD_SELECTION": "CARD SELECT",
+            "MULLIGAN": "MULLIGAN",
+            "BINARY_CHOICE": "BINARY",
         }
         self.type_v.set(type_labels.get(dt, dt))
         self.info_v.set(s["info"])
@@ -1519,8 +1555,24 @@ class GameStateViewer:
         return images
 
     def _pre_render_priority(self, s):
-        """Pre-render priority candidate images."""
-        if not HAS_PIL or s.get("type") != "PRIORITY_ACTION":
+        """Pre-render candidate images for priority, target, card_select, mulligan."""
+        dt = s.get("type")
+        if not HAS_PIL:
+            return None
+        # For target/card_select/mulligan, render candidates as card images
+        if dt in ("TARGET_SELECTION", "CARD_SELECTION", "MULLIGAN"):
+            candidates = s.get("candidates", [])
+            selected = set(s.get("selected", []))
+            images = []
+            for i, cf in enumerate(candidates):
+                info = decode_card(cf)
+                if not info:
+                    images.append(None)
+                    continue
+                hl = "attack" if i in selected else None
+                images.append(draw_card_image(info, highlight=hl))
+            return images if images else None
+        if dt != "PRIORITY_ACTION":
             return None
         candidates = s.get("candidates", [])
         selected = s.get("selected", [])
@@ -1572,7 +1624,7 @@ class GameStateViewer:
 
         if images is None:
             tk.Label(frame,
-                     text="(not a priority decision)",
+                     text="(no candidates)",
                      bg=frame["bg"],
                      fg="#585b70",
                      font=("Consolas", 9)).pack(
@@ -1861,6 +1913,69 @@ class GameStateViewer:
                     else:
                         lines.append("DIFFERENT")
 
+            elif dt == "TARGET_SELECTION":
+                lines.append("=== Target Decision ===")
+                lines.append(f"Context: {s.get('info', '')}")
+                lines.append("")
+                sel_indices = set(s.get("selected", []))
+                for j, cf in enumerate(candidates):
+                    # Target candidates can be cards (256-dim)
+                    # or players (first few dims)
+                    is_player = len(cf) >= 5 and cf[4] > 0.5
+                    if is_player:
+                        life = int(cf[0] * 50 - 10)
+                        label = f"Player (life={life})"
+                    else:
+                        info = decode_card(cf)
+                        label = info["label"] if info else "?"
+                        if info and info["power"] is not None:
+                            label += f" {info['power']}/{info['toughness']}"
+                    sel = j in sel_indices
+                    marker = ">>" if sel else "  "
+                    lines.append(f"{marker} [{j}] {label}")
+                lines.append("")
+                lines.append(f"{self._get_choice_label()}: {list(s['selected'])}")
+
+            elif dt == "CARD_SELECTION":
+                lines.append("=== Card Selection ===")
+                lines.append(f"Context: {s.get('info', '')}")
+                lines.append("")
+                sel_indices = set(s.get("selected", []))
+                for j, cf in enumerate(candidates):
+                    info = decode_card(cf)
+                    label = info["label"] if info else "?"
+                    if info and info["power"] is not None:
+                        label += f" {info['power']}/{info['toughness']}"
+                    sel = j in sel_indices
+                    marker = ">>" if sel else "  "
+                    lines.append(f"{marker} [{j}] {label}")
+                lines.append("")
+                lines.append(f"{self._get_choice_label()}: {list(s['selected'])}")
+
+            elif dt == "MULLIGAN":
+                lines.append("=== Mulligan Decision ===")
+                lines.append(f"Context: {s.get('info', '')}")
+                lines.append("")
+                sel = s.get("selected", [])
+                keep = sel and sel[0] == 1
+                lines.append(f"Decision: {'KEEP' if keep else 'MULLIGAN'}")
+                lines.append("")
+                lines.append("Hand:")
+                for j, cf in enumerate(candidates):
+                    info = decode_card(cf)
+                    label = info["label"] if info else "?"
+                    if info and info.get("cmc", 0) > 0:
+                        label += f" [{info['cmc']}]"
+                    lines.append(f"  {label}")
+
+            elif dt == "BINARY_CHOICE":
+                lines.append("=== Binary Decision ===")
+                lines.append(f"Context: {s.get('info', '')}")
+                lines.append("")
+                sel = s.get("selected", [])
+                yes = sel and sel[0] == 1
+                lines.append(f"Decision: {'YES' if yes else 'NO'}")
+
             self.pred_text.insert("1.0", "\n".join(lines))
         self.pred_text.config(state=tk.DISABLED)
 
@@ -1874,7 +1989,7 @@ def main():
                 "model_with_decisions.pt")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max-samples", type=int,
-        default=200)
+        default=500)
     args = parser.parse_args()
 
     # Load both PPO and heuristic data — mode toggle switches between them
@@ -1907,8 +2022,12 @@ def main():
 
     n_ppo = sum(1 for s in samples if s.get("source") == "ppo")
     n_heur = sum(1 for s in samples if s.get("source") == "heuristic")
+    from collections import Counter
+    type_counts = Counter(s["type"] for s in samples)
     print(f"  {len(samples)} total ({n_ppo} RL replay, "
           f"{n_heur} heuristic)", flush=True)
+    for dt, c in type_counts.most_common():
+        print(f"    {dt}: {c}", flush=True)
 
     model_path = args.model
     model = None

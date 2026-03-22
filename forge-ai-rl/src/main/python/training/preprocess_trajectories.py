@@ -56,8 +56,12 @@ GAME_STATE_DIM = 37216  # 96 + 145*256
 def scan_files(files):
     """Pass 1: Count samples, find max candidate sizes."""
     counts = {'total': 0, 'priority': 0,
-              'attack': 0, 'block': 0}
-    max_cand = {'priority': 0, 'attack': 0, 'block': 0}
+              'attack': 0, 'block': 0,
+              'target': 0, 'card_select': 0,
+              'mulligan': 0, 'binary': 0}
+    max_cand = {'priority': 0, 'attack': 0, 'block': 0,
+                'target': 0, 'card_select': 0,
+                'mulligan': 0}
 
     print(f"  Pass 1: Scanning {len(files)} files...",
           flush=True)
@@ -90,6 +94,22 @@ def scan_files(files):
                         counts['block'] += 1
                         max_cand['block'] = max(
                             max_cand['block'], nc)
+                elif dt == 'TARGET_SELECTION':
+                    if nc > 1:  # skip trivial choices
+                        counts['target'] += 1
+                        max_cand['target'] = max(
+                            max_cand['target'], nc)
+                elif dt == 'CARD_SELECTION':
+                    if nc >= 1:  # scry 1 has 1 candidate (top or bottom)
+                        counts['card_select'] += 1
+                        max_cand['card_select'] = max(
+                            max_cand['card_select'], nc)
+                elif dt == 'MULLIGAN':
+                    counts['mulligan'] += 1
+                    max_cand['mulligan'] = max(
+                        max_cand['mulligan'], nc)
+                elif dt == 'BINARY_CHOICE':
+                    counts['binary'] += 1
         except Exception as e:
             print(f"    Warning: {filepath}: {e}",
                   flush=True)
@@ -114,9 +134,14 @@ def preprocess(files, output_dir, counts, max_cand):
     np_ = counts['priority']
     na = counts['attack']
     nb = counts['block']
+    n_tgt = counts['target']
+    n_cs = counts['card_select']
+    n_mul = counts['mulligan']
+    n_bin = counts['binary']
 
     # Create directories
-    for d in ['shared', 'priority', 'attack', 'block']:
+    for d in ['shared', 'priority', 'attack', 'block',
+              'target', 'card_select', 'mulligan', 'binary']:
         os.makedirs(os.path.join(output_dir, d),
                     exist_ok=True)
 
@@ -208,6 +233,86 @@ def preprocess(files, output_dir, counts, max_cand):
         os.path.join(bd, 'action_probs.npy'),
         mode='w+', dtype=np.float32, shape=(nb, mb))
 
+    # Target arrays (single-select from candidates, 256-dim features)
+    if n_tgt > 0:
+        mt = max_cand['target']
+        print(f"  Creating target arrays ({n_tgt} records, "
+              f"max_cand={mt})...", flush=True)
+        td = os.path.join(output_dir, 'target')
+        t_gs_idx = np.lib.format.open_memmap(
+            os.path.join(td, 'gs_index.npy'),
+            mode='w+', dtype=np.int64, shape=(n_tgt,))
+        t_cand = np.lib.format.open_memmap(
+            os.path.join(td, 'candidates.npy'),
+            mode='w+', dtype=np.float32,
+            shape=(n_tgt, mt, CARD_DIM))
+        t_cmask = np.lib.format.open_memmap(
+            os.path.join(td, 'candidate_mask.npy'),
+            mode='w+', dtype=np.bool_, shape=(n_tgt, mt))
+        t_sel = np.lib.format.open_memmap(
+            os.path.join(td, 'selected_idx.npy'),
+            mode='w+', dtype=np.int32, shape=(n_tgt,))
+    else:
+        mt = 0
+
+    # Card select arrays (multi-select, 256-dim features)
+    if n_cs > 0:
+        mcs = max_cand['card_select']
+        print(f"  Creating card_select arrays ({n_cs} records, "
+              f"max_cand={mcs})...", flush=True)
+        csd = os.path.join(output_dir, 'card_select')
+        cs_gs_idx = np.lib.format.open_memmap(
+            os.path.join(csd, 'gs_index.npy'),
+            mode='w+', dtype=np.int64, shape=(n_cs,))
+        cs_cand = np.lib.format.open_memmap(
+            os.path.join(csd, 'candidates.npy'),
+            mode='w+', dtype=np.float32,
+            shape=(n_cs, mcs, CARD_DIM))
+        cs_cmask = np.lib.format.open_memmap(
+            os.path.join(csd, 'candidate_mask.npy'),
+            mode='w+', dtype=np.bool_, shape=(n_cs, mcs))
+        cs_amask = np.lib.format.open_memmap(
+            os.path.join(csd, 'action_mask.npy'),
+            mode='w+', dtype=np.float32, shape=(n_cs, mcs))
+    else:
+        mcs = 0
+
+    # Mulligan arrays (hand features + keep/mull decision)
+    if n_mul > 0:
+        mmul = max_cand['mulligan']
+        if mmul == 0:
+            mmul = 7  # max hand size
+        print(f"  Creating mulligan arrays ({n_mul} records, "
+              f"max_hand={mmul})...", flush=True)
+        muld = os.path.join(output_dir, 'mulligan')
+        mul_gs_idx = np.lib.format.open_memmap(
+            os.path.join(muld, 'gs_index.npy'),
+            mode='w+', dtype=np.int64, shape=(n_mul,))
+        mul_hand = np.lib.format.open_memmap(
+            os.path.join(muld, 'hand_features.npy'),
+            mode='w+', dtype=np.float32,
+            shape=(n_mul, mmul, CARD_DIM))
+        mul_hmask = np.lib.format.open_memmap(
+            os.path.join(muld, 'hand_mask.npy'),
+            mode='w+', dtype=np.bool_, shape=(n_mul, mmul))
+        mul_keep = np.lib.format.open_memmap(
+            os.path.join(muld, 'keep_decision.npy'),
+            mode='w+', dtype=np.float32, shape=(n_mul,))
+    else:
+        mmul = 7
+
+    # Binary arrays (just game state + decision)
+    if n_bin > 0:
+        print(f"  Creating binary arrays ({n_bin} records)...",
+              flush=True)
+        bind = os.path.join(output_dir, 'binary')
+        bin_gs_idx = np.lib.format.open_memmap(
+            os.path.join(bind, 'gs_index.npy'),
+            mode='w+', dtype=np.int64, shape=(n_bin,))
+        bin_decision = np.lib.format.open_memmap(
+            os.path.join(bind, 'decision.npy'),
+            mode='w+', dtype=np.float32, shape=(n_bin,))
+
     # Pass 2: Fill arrays
     print(f"\n  Pass 2: Writing {len(files)} files...",
           flush=True)
@@ -215,6 +320,10 @@ def preprocess(files, output_dir, counts, max_cand):
     pi = 0  # priority index
     ai = 0  # attack index
     bi = 0  # block index
+    ti = 0  # target index
+    ci = 0  # card select index
+    mi = 0  # mulligan index
+    bni = 0  # binary index
 
     for fi, filepath in enumerate(files):
         if (fi + 1) % 200 == 0:
@@ -340,11 +449,63 @@ def preprocess(files, output_dir, counts, max_cand):
                         b_aprobs[bi, j] = aprobs[j]
                     bi += 1
 
+                elif dt == 'TARGET_SELECTION' and n_tgt > 0:
+                    if nc <= 1:
+                        continue  # trivial choice
+                    t_gs_idx[ti] = shared_row
+                    for j in range(min(nc, mt)):
+                        cf = cand[j]
+                        cl = min(len(cf), CARD_DIM)
+                        t_cand[ti, j, :cl] = sanitize(
+                            np.array(cf[:cl],
+                                     dtype=np.float32))
+                        t_cmask[ti, j] = True
+                    si_val = sel[0] if sel else 0
+                    if si_val >= mt:
+                        si_val = mt - 1
+                    t_sel[ti] = si_val
+                    ti += 1
+
+                elif dt == 'CARD_SELECTION' and n_cs > 0:
+                    if nc < 1:
+                        continue
+                    cs_gs_idx[ci] = shared_row
+                    for j in range(min(nc, mcs)):
+                        cf = cand[j]
+                        cl = min(len(cf), CARD_DIM)
+                        cs_cand[ci, j, :cl] = sanitize(
+                            np.array(cf[:cl],
+                                     dtype=np.float32))
+                        cs_cmask[ci, j] = True
+                    for s in sel:
+                        if 0 <= s < mcs:
+                            cs_amask[ci, s] = 1.0
+                    ci += 1
+
+                elif dt == 'MULLIGAN' and n_mul > 0:
+                    mul_gs_idx[mi] = shared_row
+                    for j in range(min(nc, mmul)):
+                        cf = cand[j]
+                        cl = min(len(cf), CARD_DIM)
+                        mul_hand[mi, j, :cl] = sanitize(
+                            np.array(cf[:cl],
+                                     dtype=np.float32))
+                        mul_hmask[mi, j] = True
+                    # sel[0]=1 means keep, sel[0]=0 means mull
+                    mul_keep[mi] = 1.0 if (sel and sel[0] == 1) else 0.0
+                    mi += 1
+
+                elif dt == 'BINARY_CHOICE' and n_bin > 0:
+                    bin_gs_idx[bni] = shared_row
+                    # sel[0]=1 means yes, sel[0]=0 means no
+                    bin_decision[bni] = 1.0 if (sel and sel[0] == 1) else 0.0
+                    bni += 1
+
         except Exception as e:
             print(f"    Warning: {filepath}: {e}",
                   flush=True)
 
-    # Flush
+    # Flush all arrays
     for arr in [gs, gf, outcome, file_id,
                 p_gs_idx, p_cand, p_cmask, p_sel,
                 p_aprobs,
@@ -353,9 +514,23 @@ def preprocess(files, output_dir, counts, max_cand):
                 b_gs_idx, b_pairs, b_pmask, b_amask,
                 b_aprobs]:
         arr.flush()
+    if n_tgt > 0:
+        for arr in [t_gs_idx, t_cand, t_cmask, t_sel]:
+            arr.flush()
+    if n_cs > 0:
+        for arr in [cs_gs_idx, cs_cand, cs_cmask, cs_amask]:
+            arr.flush()
+    if n_mul > 0:
+        for arr in [mul_gs_idx, mul_hand, mul_hmask, mul_keep]:
+            arr.flush()
+    if n_bin > 0:
+        for arr in [bin_gs_idx, bin_decision]:
+            arr.flush()
 
     return {'total': si, 'priority': pi,
-            'attack': ai, 'block': bi}
+            'attack': ai, 'block': bi,
+            'target': ti, 'card_select': ci,
+            'mulligan': mi, 'binary': bni}
 
 
 def main():
@@ -415,6 +590,10 @@ def main():
     print(f"  Priority: {final['priority']}", flush=True)
     print(f"  Attack: {final['attack']}", flush=True)
     print(f"  Block: {final['block']}", flush=True)
+    print(f"  Target: {final['target']}", flush=True)
+    print(f"  Card Select: {final['card_select']}", flush=True)
+    print(f"  Mulligan: {final['mulligan']}", flush=True)
+    print(f"  Binary: {final['binary']}", flush=True)
 
     # Disk usage
     total_bytes = 0
