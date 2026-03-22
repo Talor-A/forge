@@ -217,19 +217,30 @@ public class ONNXModelClient {
 
     // ── Priority ──
 
+    // Fixed sizes matching ONNX export dummy inputs
+    private static final int PRI_MAX = 10;
+    private static final int TGT_MAX = 5;
+    private static final int ATK_MAX = 5;
+    private static final int BLK_MAX = 3;
+    private static final int BLK_ATK_MAX = 2;
+    private static final int CS_MAX = 5;
+    private static final int MUL_MAX = 7;
+
     private DecisionResult handlePriority(float[] state, DecisionContext ctx, float value)
             throws OrtException {
         List<float[]> candidates = ctx.getCandidateFeatures();
         int n = candidates.size();
+        int padN = Math.max(n, PRI_MAX);  // pad to at least export size
 
-        float[][][] actionFeats = new float[1][n][ACTION_DIM];
-        float[][] mask = new float[1][n];
+        float[][][] actionFeats = new float[1][padN][ACTION_DIM];
+        float[][] mask = new float[1][padN];
         for (int i = 0; i < n; i++) {
             float[] cf = candidates.get(i);
             System.arraycopy(cf, 0, actionFeats[0][i], 0,
                     Math.min(cf.length, ACTION_DIM));
             mask[0][i] = 1.0f;
         }
+        // Remaining slots have mask=0, features=0 (padding)
 
         Map<String, OnnxTensor> inputs = new HashMap<>();
         inputs.put("state_embedding", OnnxTensor.createTensor(env, new float[][]{state}));
@@ -240,6 +251,16 @@ public class ONNXModelClient {
             float[][] logits = (float[][]) result.get(0).getValue();
             float[] probs = softmax(logits[0], n);
             int action = argmax(probs, n);
+            // Debug: log probabilities for first few decisions
+            StringBuilder sb = new StringBuilder();
+            sb.append("ONNX_PRIORITY: n=").append(n).append(" pick=").append(action);
+            sb.append(" probs=[");
+            for (int i = 0; i < n; i++) {
+                if (i > 0) sb.append(",");
+                sb.append(String.format("%.2f", probs[i]));
+            }
+            sb.append("] value=").append(String.format("%.3f", value));
+            Logger.info(sb.toString());
             return new DecisionResult(List.of(action), probs, value, false);
         } finally {
             for (OnnxTensor t : inputs.values()) t.close();
@@ -252,9 +273,10 @@ public class ONNXModelClient {
             throws OrtException {
         List<float[]> candidates = ctx.getCandidateFeatures();
         int n = candidates.size();
+        int padN = Math.max(n, TGT_MAX);
 
-        float[][][] feats = new float[1][n][CARD_DIM];
-        float[][] mask = new float[1][n];
+        float[][][] feats = new float[1][padN][CARD_DIM];
+        float[][] mask = new float[1][padN];
         for (int i = 0; i < n; i++) {
             float[] cf = candidates.get(i);
             System.arraycopy(cf, 0, feats[0][i], 0,
@@ -289,9 +311,10 @@ public class ONNXModelClient {
             throws OrtException {
         List<float[]> candidates = ctx.getCandidateFeatures();
         int n = candidates.size();
+        int padN = Math.max(n, ATK_MAX);
 
-        float[][][] feats = new float[1][n][CARD_DIM];
-        float[][] mask = new float[1][n];
+        float[][][] feats = new float[1][padN][CARD_DIM];
+        float[][] mask = new float[1][padN];
         for (int i = 0; i < n; i++) {
             float[] cf = candidates.get(i);
             System.arraycopy(cf, 0, feats[0][i], 0,
@@ -353,10 +376,12 @@ public class ONNXModelClient {
             return new DecisionResult(List.of(), new float[0], value, false);
         }
 
-        float[][][] bf = new float[1][nBlockers][CARD_DIM];
-        float[][] bm = new float[1][nBlockers];
-        float[][][] af = new float[1][nAttackers][CARD_DIM];
-        float[][] am = new float[1][nAttackers];
+        int padB = Math.max(nBlockers, BLK_MAX);
+        int padA = Math.max(nAttackers, BLK_ATK_MAX);
+        float[][][] bf = new float[1][padB][CARD_DIM];
+        float[][] bm = new float[1][padB];
+        float[][][] af = new float[1][padA][CARD_DIM];
+        float[][] am = new float[1][padA];
 
         for (int b = 0; b < nBlockers; b++) {
             int pairIdx = b * nAttackers;
@@ -420,9 +445,10 @@ public class ONNXModelClient {
             throws OrtException {
         List<float[]> candidates = ctx.getCandidateFeatures();
         int n = candidates.size();
+        int padN = Math.max(n, CS_MAX);
 
-        float[][][] feats = new float[1][n][CARD_DIM];
-        float[][] mask = new float[1][n];
+        float[][][] feats = new float[1][padN][CARD_DIM];
+        float[][] mask = new float[1][padN];
         for (int i = 0; i < n; i++) {
             float[] cf = candidates.get(i);
             System.arraycopy(cf, 0, feats[0][i], 0,
@@ -453,9 +479,10 @@ public class ONNXModelClient {
             throws OrtException {
         List<float[]> candidates = ctx.getCandidateFeatures();
         int n = candidates.size();
+        int padN = Math.max(n, MUL_MAX);
 
-        float[][][] feats = new float[1][n][CARD_DIM];
-        float[][] mask = new float[1][n];
+        float[][][] feats = new float[1][padN][CARD_DIM];
+        float[][] mask = new float[1][padN];
         for (int i = 0; i < n; i++) {
             float[] cf = candidates.get(i);
             System.arraycopy(cf, 0, feats[0][i], 0,
