@@ -111,6 +111,23 @@ public class FDeckChooser extends JPanel implements IDecksComboBoxListener {
     }
 
     public DeckType getSelectedDeckType() { return selectedDeckType; }
+
+    /**
+     * Lock the deck chooser to show only the given decks.
+     * Used by RL AI to restrict to supported decks.
+     */
+    public void setFixedDecks(final java.util.List<DeckProxy> decks) {
+        selectedDeckType = DeckType.CONSTRUCTED_DECK;
+        lstDecks.setAllowMultipleSelections(false);
+        lstDecks.setPool(decks);
+        lstDecks.setup(forge.itemmanager.ItemManagerConfig.CONSTRUCTED_DECKS);
+        lstDecks.setSelectedIndex(0);
+        // Hide the deck type selector so user can't switch away
+        if (decksComboBox != null) {
+            decksComboBox.setVisible(false);
+        }
+    }
+
     public void setSelectedDeckType(final DeckType selectedDeckType0) {
         refreshDecksList(selectedDeckType0, false, null);
     }
