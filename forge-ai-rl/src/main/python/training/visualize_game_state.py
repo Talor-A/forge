@@ -1209,10 +1209,14 @@ class GameStateViewer:
         """Reload model from disk (picks up PPO updates)."""
         if not self.model_path:
             return
-        # Try PPO best first, then the specified path
+        # Try best available in order of preference
+        ckpt_dir = os.path.dirname(self.model_path)
         candidates = [
-            os.path.join(os.path.dirname(self.model_path),
-                         'best_ppo_model.pt'),
+            os.path.join(ckpt_dir, 'best_ppo_model.pt'),
+            os.path.join(ckpt_dir, 'model_with_decisions.pt'),
+            os.path.join(ckpt_dir, 'best_priority_model.pt'),
+            os.path.join(ckpt_dir, 'best_attack_model.pt'),
+            os.path.join(ckpt_dir, 'best_block_model.pt'),
             self.model_path,
         ]
         for path in candidates:
@@ -1715,11 +1719,16 @@ def main():
         # User specified a model — use exactly that
         candidates = [model_path]
     else:
-        # Auto-detect: try PPO best, then default
-        ppo_model = os.path.join(
-            os.path.dirname(model_path),
-            'best_ppo_model.pt')
-        candidates = [ppo_model, model_path]
+        # Auto-detect: try best available in order of preference
+        ckpt_dir = os.path.dirname(model_path)
+        candidates = [
+            os.path.join(ckpt_dir, 'best_ppo_model.pt'),
+            os.path.join(ckpt_dir, 'model_with_decisions.pt'),
+            os.path.join(ckpt_dir, 'best_priority_model.pt'),
+            os.path.join(ckpt_dir, 'best_attack_model.pt'),
+            os.path.join(ckpt_dir, 'best_block_model.pt'),
+            model_path,
+        ]
     for p in candidates:
         if p and os.path.exists(p):
             print(f"Loading model: {p}", flush=True)
