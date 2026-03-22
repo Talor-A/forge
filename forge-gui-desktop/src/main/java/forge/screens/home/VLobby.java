@@ -214,10 +214,34 @@ public class VLobby implements ILobbyView {
         return playerPanels.get(slot);
     }
 
+    /** RL AI supported deck names — must match files in constructed deck folder */
+    private static final java.util.Set<String> RL_SUPPORTED_DECKS = new java.util.HashSet<>(
+            java.util.Arrays.asList("Red Aggro", "Green Stompy", "White Weenie", "Blue Tempo"));
+
     @Override
+
     public void update(final int slot, final LobbySlotType type) {
         final FDeckChooser deckChooser = getDeckChooser(slot);
         deckChooser.setIsAi(type==LobbySlotType.AI || type==LobbySlotType.RL_AI);
+
+        // For RL AI, show only the 4 supported decks
+        if (type == LobbySlotType.RL_AI) {
+            deckChooser.setSelectedDeckType(DeckType.CONSTRUCTED_DECK);
+            // Filter to only RL-supported decks
+            final Iterable<DeckProxy> allDecks = DeckProxy.getAllConstructedDecks();
+            final java.util.List<DeckProxy> rlDecks = new java.util.ArrayList<>();
+            for (DeckProxy dp : allDecks) {
+                if (RL_SUPPORTED_DECKS.contains(dp.getName())) {
+                    rlDecks.add(dp);
+                }
+            }
+            if (!rlDecks.isEmpty()) {
+                deckChooser.getLstDecks().setPool(rlDecks);
+                deckChooser.getLstDecks().setSelectedIndex(0);
+            }
+            return;
+        }
+
         DeckType selectedDeckType = deckChooser.getSelectedDeckType();
         switch (selectedDeckType){
             case STANDARD_CARDGEN_DECK:
