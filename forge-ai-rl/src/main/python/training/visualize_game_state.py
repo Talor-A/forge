@@ -477,7 +477,7 @@ def decode_action(feats):
 
 # ── Card rendering (MTG card style) ───────────────
 
-CARD_W, CARD_H = 100, 170
+CARD_W, CARD_H = 100, 140
 ACTION_W, ACTION_H = 100, 140
 
 
@@ -854,7 +854,7 @@ def draw_action_card_image(info, is_chosen=False,
 # ── Data loading ───────────────────────────────────
 
 def load_samples(data_dir, max_samples=200,
-                  rl_only=False):
+                  rl_only=False, source_tag="heuristic"):
     path = Path(data_dir)
     files = sorted(path.glob("traj_*.jsonl"))
     if rl_only:
@@ -898,6 +898,7 @@ def load_samples(data_dir, max_samples=200,
                     "selected": rec.get(
                         "selectedIndices", []),
                     "won": won,
+                    "source": source_tag,
                 })
                 if len(samples) >= max_samples:
                     break
@@ -909,6 +910,10 @@ def load_samples(data_dir, max_samples=200,
 # ── Main Viewer ────────────────────────────────────
 
 class GameStateViewer:
+    # Viewing modes
+    MODE_RL_REPLAY = "rl_replay"        # PPO trajectories — RL decisions at collection time
+    MODE_HEURISTIC = "heuristic"        # Base trajectories — heuristic decisions
+
     def __init__(self, root, samples, model, device,
                  model_path=None, data_dir=None):
         self.root = root
@@ -922,18 +927,36 @@ class GameStateViewer:
         self.card_photos = []  # keep references
         self._pending_show = None  # for buffered updates
 
+        # Determine initial mode from data
+        has_rl = any(s.get("source") == "ppo" for s in samples)
+        has_heur = any(s.get("source") == "heuristic" for s in samples)
+        self.mode = self.MODE_RL_REPLAY if has_rl else self.MODE_HEURISTIC
+
         root.title("MTG RL — Game State Visualizer")
         root.geometry("1500x950")
         root.configure(bg="#1e1e2e")
 
         self._build(root)
-        if samples:
+        self._apply_mode_filter()
+        if self.samples:
             self._show()
 
     def _build(self, root):
         # Nav bar
         nav = tk.Frame(root, bg="#1e1e2e")
         nav.pack(fill=tk.X, padx=10, pady=5)
+
+        # Mode toggle — prominent indicator
+        self.mode_v = tk.StringVar()
+        self.mode_lbl = tk.Label(nav, textvariable=self.mode_v,
+                                  bg="#1e1e2e",
+                                  font=("Consolas", 11, "bold"),
+                                  padx=8, pady=2)
+        self.mode_lbl.pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(nav, text="Switch Mode",
+                   command=self._toggle_mode).pack(side=tk.LEFT, padx=3)
+
+        tk.Frame(nav, bg="#45475a", width=2).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
         ttk.Button(nav, text="< Prev", command=self._prev).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="Next >", command=self._next).pack(side=tk.LEFT, padx=3)
@@ -993,11 +1016,33 @@ class GameStateViewer:
                  fg="#cdd6f4", font=("Consolas", 11), anchor="w",
                  padx=10, pady=4).pack(fill=tk.X)
 
-        # Main: board on left, predictions on right
+        # Main: eval bar | board | predictions
         main = tk.Frame(root, bg="#1e1e2e")
         main.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Left: board areas
+        # Eval bar (lichess-style vertical bar)
+        eval_frame = tk.Frame(main, bg="#1e1e2e", width=36)
+        eval_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+        eval_frame.pack_propagate(False)
+
+        self.eval_label = tk.Label(eval_frame, text="",
+                                    bg="#1e1e2e", fg="#cdd6f4",
+                                    font=("Consolas", 9))
+        self.eval_label.pack(side=tk.TOP, pady=(2, 2))
+
+        self.eval_canvas = tk.Canvas(eval_frame, width=28,
+                                      bg="#333333", highlightthickness=0)
+        self.eval_canvas.pack(fill=tk.Y, expand=True, padx=4)
+        self.eval_canvas.bind("<Configure>",
+                              lambda e: self._update_eval_bar(self._last_value))
+        self._last_value = None
+
+        self.eval_label_btm = tk.Label(eval_frame, text="",
+                                        bg="#1e1e2e", fg="#cdd6f4",
+                                        font=("Consolas", 9))
+        self.eval_label_btm.pack(side=tk.BOTTOM, pady=(2, 2))
+
+        # Board areas
         board_col = tk.Frame(main, bg="#1e1e2e")
         board_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -1048,7 +1093,8 @@ class GameStateViewer:
         pred_col.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
         pred_col.pack_propagate(False)
 
-        tk.Label(pred_col, text="Model Prediction",
+        self.pred_title_v = tk.StringVar(value="Model Prediction")
+        tk.Label(pred_col, textvariable=self.pred_title_v,
                  bg="#181825", fg="#89b4fa",
                  font=("Consolas", 12, "bold")).pack(padx=5, pady=5)
 
@@ -1062,42 +1108,96 @@ class GameStateViewer:
                  fg=color, font=("Consolas", 10, "bold"),
                  anchor="w").pack(fill=tk.X, padx=5)
 
+    def _toggle_mode(self):
+        """Switch between RL Replay and Heuristic Analysis modes."""
+        if self.mode == self.MODE_RL_REPLAY:
+            self.mode = self.MODE_HEURISTIC
+        else:
+            self.mode = self.MODE_RL_REPLAY
+        self._apply_mode_filter()
+        if self.samples:
+            self._show()
+
+    def _apply_mode_filter(self):
+        """Filter samples to current mode and update mode indicator."""
+        if self.mode == self.MODE_RL_REPLAY:
+            filtered = [s for s in self.all_samples
+                        if s.get("source") == "ppo"]
+            self.mode_v.set("RL REPLAY")
+            self.mode_lbl.configure(fg="#a6e3a1", bg="#2a3a2a")
+        else:
+            filtered = [s for s in self.all_samples
+                        if s.get("source") == "heuristic"]
+            self.mode_v.set("HEURISTIC ANALYSIS")
+            self.mode_lbl.configure(fg="#f9e2af", bg="#3a3520")
+
+        if filtered:
+            self.samples = filtered
+        else:
+            # No data for this mode — keep all and warn
+            self.samples = self.all_samples
+            self.mode_v.set(self.mode_v.get() + " (no data — showing all)")
+        self.idx = 0
+
+    def _get_choice_label(self):
+        """Label for the recorded choice based on mode."""
+        if self.mode == self.MODE_RL_REPLAY:
+            return "RL chose"
+        else:
+            return "Heuristic"
+
+    def _get_compare_label(self):
+        """Label for the model comparison based on mode."""
+        if self.mode == self.MODE_RL_REPLAY:
+            return "Current model"
+        else:
+            return "Model would"
+
+    def _mode_samples(self):
+        """Get samples for the current mode."""
+        tag = "ppo" if self.mode == self.MODE_RL_REPLAY else "heuristic"
+        filtered = [s for s in self.all_samples
+                    if s.get("source") == tag]
+        return filtered if filtered else self.all_samples
+
     def _filter_attacks(self):
-        self.filtered = [s for s in self.all_samples if s["type"] == "DECLARE_ATTACKERS"]
-        self.samples = self.filtered if self.filtered else self.all_samples
+        self.samples = [s for s in self._mode_samples() if s["type"] == "DECLARE_ATTACKERS"]
+        if not self.samples:
+            self.samples = self._mode_samples()
         self.idx = 0
         self._show()
 
     def _filter_blocks(self):
-        self.filtered = [s for s in self.all_samples if s["type"] == "DECLARE_BLOCKERS"]
-        self.samples = self.filtered if self.filtered else self.all_samples
+        self.samples = [s for s in self._mode_samples() if s["type"] == "DECLARE_BLOCKERS"]
+        if not self.samples:
+            self.samples = self._mode_samples()
         self.idx = 0
         self._show()
 
     def _filter_priority(self):
-        f = [s for s in self.all_samples
+        f = [s for s in self._mode_samples()
              if s["type"] == "PRIORITY_ACTION"]
-        self.samples = f if f else self.all_samples
+        self.samples = f if f else self._mode_samples()
         self.idx = 0
         self._show()
 
     def _filter_priority_pass(self):
-        f = [s for s in self.all_samples
+        f = [s for s in self._mode_samples()
              if s["type"] == "PRIORITY_ACTION"
              and s["selected"]
              and s["selected"][0] == len(
                  s["candidates"]) - 1]
-        self.samples = f if f else self.all_samples
+        self.samples = f if f else self._mode_samples()
         self.idx = 0
         self._show()
 
     def _filter_priority_play(self):
-        f = [s for s in self.all_samples
+        f = [s for s in self._mode_samples()
              if s["type"] == "PRIORITY_ACTION"
              and s["selected"]
              and s["selected"][0] < len(
                  s["candidates"]) - 1]
-        self.samples = f if f else self.all_samples
+        self.samples = f if f else self._mode_samples()
         self.idx = 0
         self._show()
 
@@ -1177,12 +1277,12 @@ class GameStateViewer:
         return None
 
     def _filter_disagree(self):
-        """Show only samples where model disagrees
-        with heuristic."""
+        """Show only samples where current model disagrees
+        with the recorded choice."""
         if self.model is None:
             return
         disagree = []
-        for s in self.all_samples:
+        for s in self._mode_samples():
             dt = s.get("type", "")
             pick = self._get_model_pick(s)
             if pick is None:
@@ -1190,18 +1290,18 @@ class GameStateViewer:
 
             if dt == "PRIORITY_ACTION":
                 sel = s["selected"]
-                heur_pick = sel[0] if sel else -1
-                if pick != heur_pick:
+                recorded_pick = sel[0] if sel else -1
+                if pick != recorded_pick:
                     disagree.append(s)
             elif dt == "DECLARE_ATTACKERS":
-                heur_pick = set(s.get("selected", []))
-                if pick != heur_pick:
+                recorded_pick = set(s.get("selected", []))
+                if pick != recorded_pick:
                     disagree.append(s)
 
         if disagree:
             self.samples = disagree
         else:
-            self.samples = self.all_samples
+            self.samples = self._mode_samples()
         self.idx = 0
         self._show()
 
@@ -1225,14 +1325,18 @@ class GameStateViewer:
                     self.model = MTGModel.load(
                         path, device=self.device)
                     self.model.eval()
+                    self.model_path = path
                     self.model_v.set(
                         os.path.basename(path) +
                         " (reloaded)")
+                    print(f"Reloaded model: {path}",
+                          flush=True)
                     if self.samples:
                         self._show()
                     return
                 except Exception as e:
-                    print(f"Reload failed: {e}")
+                    print(f"Skipping {os.path.basename(path)}: {e}",
+                          flush=True)
 
     def _reload_data(self):
         """Reload trajectory data from disk."""
@@ -1252,17 +1356,18 @@ class GameStateViewer:
         all_samples = []
         for d in dirs:
             is_ppo = 'ppo' in d
+            tag = "ppo" if is_ppo else "heuristic"
             all_samples.extend(
                 load_samples(d, max_samples=100,
-                             rl_only=is_ppo))
+                             rl_only=is_ppo,
+                             source_tag=tag))
         if all_samples:
             self.all_samples = all_samples
-            self.samples = all_samples
-            self.idx = 0
+            self._apply_mode_filter()
             self._show()
 
     def _filter_all(self):
-        self.samples = self.all_samples
+        self.samples = self._mode_samples()
         self.idx = 0
         self._show()
 
@@ -1482,13 +1587,60 @@ class GameStateViewer:
                                bg=frame["bg"])
                 lbl.pack(side=tk.LEFT, padx=1, pady=2)
 
+    def _update_eval_bar(self, value=None):
+        """Draw a lichess-style vertical eval bar.
+        value: float in [-1, 1], where +1 = player winning."""
+        self.eval_canvas.update_idletasks()
+        w = self.eval_canvas.winfo_width()
+        h = self.eval_canvas.winfo_height()
+        self.eval_canvas.delete("all")
+
+        if value is None or h < 10:
+            self.eval_canvas.create_rectangle(
+                0, 0, w, h, fill="#555555", outline="")
+            self.eval_label.config(text="--")
+            self.eval_label_btm.config(text="--")
+            return
+
+        # win_pct: 0.0 (opp winning) to 1.0 (player winning)
+        win_pct = (value + 1) / 2
+        # Split point: opponent (top, black) vs player (bottom, white)
+        split_y = int(h * (1 - win_pct))
+
+        # Opponent portion (top) — dark
+        if split_y > 0:
+            self.eval_canvas.create_rectangle(
+                0, 0, w, split_y, fill="#2b2b2b", outline="")
+        # Player portion (bottom) — white
+        if split_y < h:
+            self.eval_canvas.create_rectangle(
+                0, split_y, w, h, fill="#e8e8e8", outline="")
+
+        # Center line
+        mid = h // 2
+        self.eval_canvas.create_line(
+            0, mid, w, mid, fill="#666666", width=1, dash=(2, 2))
+
+        # Labels
+        pct = int(win_pct * 100)
+        self.eval_label.config(text=f"{100-pct}%",
+                                fg="#f38ba8")
+        self.eval_label_btm.config(text=f"{pct}%",
+                                    fg="#a6e3a1")
+
     def _predict(self, s):
+        if self.mode == self.MODE_RL_REPLAY:
+            self.pred_title_v.set("Current Model vs RL Policy")
+        else:
+            self.pred_title_v.set("Model vs Heuristic")
+
         self.pred_text.config(state=tk.NORMAL)
         self.pred_text.delete("1.0", tk.END)
 
         if self.model is None:
             self.pred_text.insert("1.0", "No model loaded")
             self.pred_text.config(state=tk.DISABLED)
+            self._update_eval_bar(None)
             return
 
         gf = s["global_features"]
@@ -1515,6 +1667,8 @@ class GameStateViewer:
                 t(zones["stack"]), t(masks["stack_mask"]))
 
             value = self.model.get_value(state).item()
+            self._last_value = value
+            self._update_eval_bar(value)
 
             lines = []
             lines.append(f"Win probability: {(value+1)/2:.0%}")
@@ -1555,9 +1709,9 @@ class GameStateViewer:
                     lines.append(f"   [{bar:20s}] {p:.0%}")
                     lines.append("")
 
-                lines.append(f"Heuristic: {list(s['selected'])}")
+                lines.append(f"{self._get_choice_label()}: {list(s['selected'])}")
                 model_sel = [j for j in range(n) if probs[0,j].item() > 0.5]
-                lines.append(f"Model:     {model_sel}")
+                lines.append(f"{self._get_compare_label()}:     {model_sel}")
                 if set(s["selected"]) == set(model_sel):
                     lines.append("MATCH!")
                 else:
@@ -1607,9 +1761,9 @@ class GameStateViewer:
                 heur_label = heur_info["label"] \
                     if heur_info else "PASS"
                 lines.append(
-                    f"Heuristic: [{sel_idx}] {heur_label}")
+                    f"{self._get_choice_label()}: [{sel_idx}] {heur_label}")
                 lines.append(
-                    f"Model:     [{model_pick}] "
+                    f"{self._get_compare_label()}:     [{model_pick}] "
                     f"{model_label}")
                 if model_pick == sel_idx:
                     lines.append("MATCH!")
@@ -1617,43 +1771,95 @@ class GameStateViewer:
                     lines.append("DIFFERENT")
 
             elif candidates and dt == "DECLARE_BLOCKERS":
-                n = len(candidates)
-                cf_t = torch.zeros(1, n, CARD_DIM, device=self.device)
-                cm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
-                for j, cf in enumerate(candidates):
-                    cl = min(len(cf), CARD_DIM)
-                    cf_t[0, j, :cl] = torch.tensor(cf[:cl], dtype=torch.float32)
+                # Candidates are (blocker, attacker) concatenated pairs
+                # Last candidate is "no block" zero vector
+                real_pairs = candidates[:-1] if len(candidates) > 1 else candidates
+                n_pairs = len(real_pairs)
 
-                # Block head uses card_select_head (softmax)
-                logits = self.model.card_select_head(state, cf_t, cm_t)
-                probs = torch.softmax(logits, dim=-1)
+                if n_pairs > 0:
+                    card_dim = CARD_DIM
+                    # Infer n_attackers: consecutive pairs with same blocker features
+                    first_blocker = np.array(real_pairs[0][:card_dim])
+                    n_attackers = 1
+                    for j in range(1, n_pairs):
+                        other = np.array(real_pairs[j][:card_dim])
+                        if np.allclose(first_blocker, other, atol=0.01):
+                            n_attackers += 1
+                        else:
+                            break
+                    n_blockers = n_pairs // max(n_attackers, 1)
 
-                lines.append("=== Block Decision ===")
-                lines.append("")
-                for j in range(n):
-                    p = probs[0, j].item()
-                    info = decode_card(candidates[j])
-                    sel = j in s["selected"]
-                    marker = ">>" if sel else "  "
-                    label = info["label"] if info else "?"
-                    if info and info["power"] is not None:
-                        label += f" {info['power']}/{info['toughness']}"
-                    bar = "#" * int(p * 20)
-                    lines.append(f"{marker} {label}")
-                    lines.append(f"   [{bar:20s}] {p:.0%}")
-                    if sel:
-                        lines.append(f"   >> BLOCKING")
+                    # Build separate blocker/attacker tensors
+                    bf = torch.zeros(1, n_blockers, card_dim, device=self.device)
+                    bm = torch.ones(1, n_blockers, dtype=torch.bool, device=self.device)
+                    af = torch.zeros(1, n_attackers, card_dim, device=self.device)
+                    am = torch.ones(1, n_attackers, dtype=torch.bool, device=self.device)
+
+                    for b in range(n_blockers):
+                        pair_idx = b * n_attackers
+                        if pair_idx < n_pairs:
+                            feats = real_pairs[pair_idx]
+                            bf[0, b, :min(card_dim, len(feats))] = \
+                                torch.tensor(feats[:card_dim], dtype=torch.float32)
+                    for a in range(n_attackers):
+                        if a < n_pairs:
+                            feats = real_pairs[a]
+                            af[0, a, :min(card_dim, len(feats)-card_dim)] = \
+                                torch.tensor(feats[card_dim:card_dim*2], dtype=torch.float32)
+
+                    # BlockHead: (batch, n_blockers, n_attackers+1)
+                    logits = self.model.block_head(
+                        state, bf, bm, af, am)
+
+                    lines.append("=== Block Decision ===")
+                    lines.append(f"({n_blockers} blockers × {n_attackers} attackers)")
                     lines.append("")
 
-                lines.append(f"Heuristic: {list(s['selected'])}")
-                # Model picks highest prob candidates
-                model_sel = [j for j in range(n)
-                             if probs[0,j].item() > 1.0/n]
-                lines.append(f"Model:     {model_sel}")
-                if set(s["selected"]) == set(model_sel):
-                    lines.append("MATCH!")
-                else:
-                    lines.append("DIFFERENT")
+                    for b in range(n_blockers):
+                        probs_b = torch.softmax(logits[0, b], dim=-1)
+                        blocker_info = decode_card(real_pairs[b * n_attackers][:card_dim])
+                        b_label = blocker_info["label"] if blocker_info else "?"
+                        if blocker_info and blocker_info["power"] is not None:
+                            b_label += f" {blocker_info['power']}/{blocker_info['toughness']}"
+                        lines.append(f"Blocker: {b_label}")
+
+                        best_a = probs_b.argmax().item()
+                        for a in range(n_attackers):
+                            pair_idx = b * n_attackers + a
+                            p = probs_b[a].item()
+                            atk_info = decode_card(real_pairs[a][card_dim:card_dim*2])
+                            a_label = atk_info["label"] if atk_info else "?"
+                            if atk_info and atk_info["power"] is not None:
+                                a_label += f" {atk_info['power']}/{atk_info['toughness']}"
+                            sel = pair_idx in s["selected"]
+                            marker = ">>" if sel else "  "
+                            pick = " <MODEL" if a == best_a and best_a < n_attackers else ""
+                            bar = "#" * int(p * 20)
+                            lines.append(f"  {marker} → {a_label}{pick}")
+                            lines.append(f"     [{bar:20s}] {p:.0%}")
+
+                        # "Don't block" option
+                        no_block_p = probs_b[-1].item()
+                        pick = " <MODEL" if best_a == n_attackers else ""
+                        bar = "#" * int(no_block_p * 20)
+                        lines.append(f"     → Don't block{pick}")
+                        lines.append(f"     [{bar:20s}] {no_block_p:.0%}")
+                        lines.append("")
+
+                    # Model picks
+                    model_sel = []
+                    for b in range(n_blockers):
+                        probs_b = torch.softmax(logits[0, b], dim=-1)
+                        best_a = probs_b.argmax().item()
+                        if best_a < n_attackers:
+                            model_sel.append(b * n_attackers + best_a)
+
+                    lines.append(f"{self._get_choice_label()}: {list(s['selected'])}")
+                    lines.append(f"{self._get_compare_label()}:     {model_sel}")
+                    if set(s["selected"]) == set(model_sel):
+                        lines.append("MATCH!")
+                    else:
+                        lines.append("DIFFERENT")
 
             self.pred_text.insert("1.0", "\n".join(lines))
         self.pred_text.config(state=tk.DISABLED)
@@ -1671,41 +1877,38 @@ def main():
         default=200)
     args = parser.parse_args()
 
-    # Load PPO data first (RL player only), fall back
-    # to base trajectories if no PPO data exists
+    # Load both PPO and heuristic data — mode toggle switches between them
     print("Loading samples...", flush=True)
     samples = []
     base_dir = os.path.dirname(args.data_dir)
-    ppo_eval_dir = os.path.join(
-        base_dir, 'ppo_trajectories_eval')
-    ppo_dir = os.path.join(
-        base_dir, 'ppo_trajectories')
+
+    # PPO trajectories (RL decisions)
+    ppo_eval_dir = os.path.join(base_dir, 'ppo_trajectories_eval')
+    ppo_dir = os.path.join(base_dir, 'ppo_trajectories')
     for d, label in [(ppo_eval_dir, "PPO eval"),
                      (ppo_dir, "PPO collect")]:
         if os.path.isdir(d):
             ppo_samples = load_samples(
-                d, args.max_samples, rl_only=True)
+                d, args.max_samples, rl_only=True,
+                source_tag="ppo")
             if ppo_samples:
                 samples.extend(ppo_samples)
                 print(f"  + {len(ppo_samples)} {label} "
-                      f"samples (RL only)", flush=True)
+                      f"samples (RL replay)", flush=True)
 
-    # Fall back to base trajectories if no PPO data
-    if not samples:
-        print("  No PPO data — loading base "
-              "trajectories", flush=True)
-        samples = load_samples(args.data_dir,
-                               args.max_samples)
+    # Base trajectories (heuristic decisions)
+    heur_samples = load_samples(args.data_dir,
+                                args.max_samples,
+                                source_tag="heuristic")
+    if heur_samples:
+        samples.extend(heur_samples)
+        print(f"  + {len(heur_samples)} heuristic "
+              f"samples", flush=True)
 
-    attacks = sum(1 for s in samples
-                  if s["type"] == "DECLARE_ATTACKERS")
-    blocks = sum(1 for s in samples
-                 if s["type"] == "DECLARE_BLOCKERS")
-    priority = sum(1 for s in samples
-                   if s["type"] == "PRIORITY_ACTION")
-    print(f"  {len(samples)} total samples "
-          f"({attacks} attacks, {blocks} blocks, "
-          f"{priority} priority)", flush=True)
+    n_ppo = sum(1 for s in samples if s.get("source") == "ppo")
+    n_heur = sum(1 for s in samples if s.get("source") == "heuristic")
+    print(f"  {len(samples)} total ({n_ppo} RL replay, "
+          f"{n_heur} heuristic)", flush=True)
 
     model_path = args.model
     model = None
@@ -1714,7 +1917,9 @@ def main():
     explicitly_set = (
         args.model != default_model and
         not args.model.endswith(
-            'model_with_decisions.pt'))
+            'model_with_decisions.pt') and
+        not args.model.endswith(
+            'best_value_model.pt'))
     if explicitly_set:
         # User specified a model — use exactly that
         candidates = [model_path]

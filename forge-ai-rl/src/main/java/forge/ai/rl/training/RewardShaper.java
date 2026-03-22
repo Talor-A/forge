@@ -64,7 +64,7 @@ public class RewardShaper {
             prevCardDelta = cardDelta;
             prevBoardDelta = boardDelta;
             prevTotalPowerDelta = powerDelta;
-            initialized = false;
+            initialized = true;
             return 0;
         }
 

@@ -1608,9 +1608,12 @@ def trainer_thread(state, args):
         model.save(save_path)
 
         log(state, f"\n=== Training Complete ===")
-        log(state, f"Attack best val acc: {state.attack_best_acc:.1%}")
-        log(state, f"Block best val acc: {state.block_best_acc:.1%}")
-        log(state, f"Priority best val acc: {state.priority_best_acc:.1%}")
+        heads_trained = [h.strip() for h in args.heads.split(',')] if args.heads != 'all' else ['attack', 'block', 'priority']
+        for h, acc in [('attack', state.attack_best_acc), ('block', state.block_best_acc), ('priority', state.priority_best_acc)]:
+            if h in heads_trained:
+                log(state, f"{h.capitalize()} best val acc: {acc:.1%}")
+            elif acc == 0.0:
+                log(state, f"{h.capitalize()}: not trained (weights from encoder checkpoint)")
         log(state, f"Model saved: {save_path}")
 
         state.status = "Training complete!"

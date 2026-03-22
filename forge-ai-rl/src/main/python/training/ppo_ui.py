@@ -92,6 +92,7 @@ def ppo_thread(state, args):
     try:
         from training.ppo_trainer import (
             load_ppo_data, compute_ppo_batch,
+            compute_ppo_block_batch,
             compute_ppo_priority_batch,
             run_games, start_model_server,
             find_free_port,
@@ -250,8 +251,8 @@ def ppo_thread(state, args):
             n_updates = 0
 
             for ppo_ep in range(args.ppo_epochs):
-                # Train on attack/block data if available
-                for data in [attack_data, block_data]:
+                # Train on attack data
+                for data, head in [(attack_data, model.attack_head)]:
                     if not data:
                         continue
                     random.shuffle(data)
@@ -264,7 +265,44 @@ def ppo_thread(state, args):
 
                         loss, metrics, _ = \
                             compute_ppo_batch(
-                                model, model.attack_head,
+                                model, head,
+                                batch, device, use_amp)
+
+                        if torch.isnan(loss):
+                            continue
+
+                        optimizer.zero_grad()
+                        if scaler:
+                            scaler.scale(loss).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            optimizer.step()
+
+                        total_pl += metrics['policy_loss']
+                        total_vl += metrics['value_loss']
+                        total_ent += metrics['entropy']
+                        n_updates += 1
+
+                # Block head (separate blocker/attacker tensors)
+                if block_data:
+                    random.shuffle(block_data)
+                    for bi in range(0, len(block_data),
+                                    args.batch_size):
+                        batch = block_data[
+                            bi:bi + args.batch_size]
+                        if len(batch) < 2:
+                            continue
+
+                        loss, metrics, _ = \
+                            compute_ppo_block_batch(
+                                model,
                                 batch, device, use_amp)
 
                         if torch.isnan(loss):

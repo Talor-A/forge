@@ -150,6 +150,15 @@ public class AiController {
      * @return true if the spell is ready to play (targets configured)
      */
     public boolean canPlayAndPayForFacade(SpellAbility sa) {
+        AiPlayDecision result = canPlayAndPayForFacadeWithReason(sa);
+        return result == AiPlayDecision.WillPlay;
+    }
+
+    /**
+     * Like canPlayAndPayForFacade but returns the AiPlayDecision reason.
+     * Used by RL controller to distinguish mechanical failures from strategic vetoes.
+     */
+    public AiPlayDecision canPlayAndPayForFacadeWithReason(SpellAbility sa) {
         sa.setActivatingPlayer(player);
         SpellAbility root = sa.getRootAbility();
         if (root.isSpell() || root.isTrigger() || root.isReplacementAbility()) {
@@ -158,7 +167,186 @@ public class AiController {
         }
         AiPlayDecision result = canPlayAndPayFor(sa);
         sa.clearLastState();
-        return result == AiPlayDecision.WillPlay;
+        return result;
+    }
+
+    /**
+     * RL-specific: try the normal heuristic evaluation first (which sets up
+     * targets as a side effect). If the heuristic agrees, great. If it
+     * strategically vetoes, we still want to play the spell — so we need
+     * valid targets. Three strategies in order:
+     *
+     * 1. Check if the first call left valid targets (some handlers do)
+     * 2. Use doTrigger(mandatory=true) to force the handler to pick targets
+     * 3. Simple fallback: target the opponent player
+     */
+    public AiPlayDecision canPlayForRL(SpellAbility sa) {
+        // First try: normal heuristic evaluation
+        boolean accepted = canPlayAndPayForFacade(sa);
+        if (accepted) {
+            return AiPlayDecision.WillPlay;
+        }
+
+        // Heuristic said no. We want to override, but need valid targets.
+        // canPlayAndPayForFacade already set up and cleared lastState,
+        // so we need to set it up again for our targeting attempts.
+        sa.setActivatingPlayer(player);
+        SpellAbility root = sa.getRootAbility();
+        if (root.isSpell() || root.isTrigger() || root.isReplacementAbility()) {
+            sa.setLastStateBattlefield(game.getLastStateBattlefield());
+            sa.setLastStateGraveyard(game.getLastStateGraveyard());
+        }
+
+        // Check basic mechanical prerequisites
+        if (sa instanceof Spell sp) {
+            if (sp.canPlayFromHost() == null) {
+                sa.clearLastState();
+                return AiPlayDecision.CantPlaySa;
+            }
+        }
+        if (!ComputerUtilCost.canPayCost(sa, player, sa.isTrigger())) {
+            sa.clearLastState();
+            return AiPlayDecision.CantAfford;
+        }
+
+        // If spell doesn't need targeting, we're good
+        if (!sa.usesTargeting()) {
+            sa.clearLastState();
+            return AiPlayDecision.CantPlayAi; // strategic veto, but no targeting needed
+        }
+
+        // Strategy 1: check if the first call left valid targets
+        if (sa.isTargetNumberValid()) {
+            sa.clearLastState();
+            return AiPlayDecision.CantPlayAi; // strategic veto, but targets are set
+        }
+
+        // Strategy 2: use the mandatory trigger path to force targeting
+        sa.resetTargets();
+        if (sa.getApi() != null) {
+            SpellApiToAi.Converter.get(sa).doTrigger(player, sa, true);
+        }
+        if (sa.isTargetNumberValid()) {
+            sa.clearLastState();
+            return AiPlayDecision.CantPlayAi; // strategic veto, forced targets set
+        }
+
+        // Strategy 3: fallback — try opponent player directly
+        sa.resetTargets();
+        Player opp = player.getWeakestOpponent();
+        if (opp != null && sa.canTarget(opp)) {
+            sa.getTargets().add(opp);
+            if (sa.isTargetNumberValid()) {
+                sa.clearLastState();
+                return AiPlayDecision.CantPlayAi; // strategic veto, fallback target
+            }
+        }
+
+        // Strategy 4: try any creature on the battlefield
+        sa.resetTargets();
+        for (forge.game.card.Card c : game.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+            if (sa.canTarget(c)) {
+                sa.getTargets().add(c);
+                if (sa.isTargetNumberValid()) {
+                    sa.clearLastState();
+                    return AiPlayDecision.CantPlayAi; // strategic veto, creature target
+                }
+                break;
+            }
+        }
+
+        // Genuinely can't target anything
+        sa.clearLastState();
+        return AiPlayDecision.TargetingFailed;
+    }
+
+    /**
+     * Set up targets for a spell the RL model chose, after the heuristic vetoed
+     * and cleared targets. Uses the AI handler's mandatory targeting path,
+     * which picks reasonable targets (opponent for damage, own creature for pump, etc.)
+     * without applying strategic opinion.
+     *
+     * @return true if valid targets were set up
+     */
+    public boolean setupRLTargeting(SpellAbility sa) {
+        if (!sa.usesTargeting()) return true;  // no targeting needed
+
+        sa.setActivatingPlayer(player);
+
+        // Try the AI handler in mandatory mode — forces it to pick targets
+        if (sa.getApi() != null) {
+            SpellAbilityAi handler = SpellApiToAi.Converter.get(sa);
+            if (handler.doTrigger(player, sa, true) && sa.isTargetNumberValid()) {
+                return true;
+            }
+        }
+
+        // Fallback: try to target opponent player (works for damage spells)
+        if (sa.canTarget(player.getWeakestOpponent())) {
+            sa.resetTargets();
+            sa.getTargets().add(player.getWeakestOpponent());
+            return true;
+        }
+
+        // Fallback: try to target any valid creature
+        for (forge.game.card.Card c : game.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+            if (sa.canTarget(c)) {
+                sa.resetTargets();
+                sa.getTargets().add(c);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Mechanical-only validation: checks timing, cost, and targeting legality
+     * WITHOUT the heuristic AI's strategic opinion (SpellApiToAi checks).
+     * Used by RL controller so the model's spell choices aren't vetoed by heuristic logic.
+     * Sets up targeting via the AI handlers but accepts the play regardless of strategic opinion.
+     */
+    public boolean canPlayMechanically(SpellAbility sa) {
+        sa.setActivatingPlayer(player);
+        SpellAbility root = sa.getRootAbility();
+        if (root.isSpell() || root.isTrigger() || root.isReplacementAbility()) {
+            sa.setLastStateBattlefield(game.getLastStateBattlefield());
+            sa.setLastStateGraveyard(game.getLastStateGraveyard());
+        }
+
+        try {
+            // Check basic playability
+            if (sa instanceof Spell sp) {
+                Card altHost = sp.canPlayFromHost();
+                if (altHost == null) return false;
+            } else if (!sa.canPlay()) {
+                return false;
+            }
+
+            // Check timing
+            if (!sa.canCastTiming(player)) return false;
+
+            // Check cost
+            if (!ComputerUtilCost.canPayCost(sa, player, sa.isTrigger())) return false;
+
+            // Set up targeting via AI handlers — we want the targeting side effects
+            // (target selection) but don't care about the strategic verdict
+            if (sa.getApi() != null) {
+                // Call the AI handler to set up targets, but ignore the strategic decision
+                SpellApiToAi.Converter.get(sa).canPlayWithSubs(player, sa);
+            }
+
+            // Verify targets are valid if spell uses targeting
+            if (sa.usesTargeting()) {
+                if (!sa.isTargetNumberValid() && sa.getTargetRestrictions().getNumCandidates(sa, true) == 0) {
+                    return false; // genuinely no valid targets
+                }
+            }
+
+            return true;
+        } finally {
+            sa.clearLastState();
+        }
     }
 
     /**

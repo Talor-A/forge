@@ -160,7 +160,9 @@ public class GameRunner {
 
             // Notify RL controller of game end
             if (rlPlayer != null && rlPlayer.getController() instanceof PlayerControllerRL) {
-                ((PlayerControllerRL) rlPlayer.getController()).getRLController().onGameEnd(rlWon);
+                PlayerControllerRL ctrl = (PlayerControllerRL) rlPlayer.getController();
+                ctrl.getRLController().onGameEnd(rlWon);
+                ctrl.logDiagnostics();
             }
 
             long duration = System.currentTimeMillis() - startTime;

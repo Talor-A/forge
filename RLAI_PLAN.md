@@ -390,4 +390,32 @@ The final card representation is the **concatenation of all four**, projected to
 4. **Stretch goal**: RL agent discovers non-obvious strategies that surprise experienced players
 
 
-claude --resume 97af074f-b317-4e20-b335-03a1e87a07ae
+---
+
+## Known Bugs (fix before next data collection)
+
+### Critical — FIXED
+
+- **~~ppo_ui.py used attack_head for block data~~** — FIXED 2026-03-22. Line 268 always used `model.attack_head` for both attack and block data. Block decisions were trained through the wrong head. Fixed to use `(data, head)` tuple pairing.
+
+- **~~RewardShaper.initialized never set to true~~** — FIXED 2026-03-22. Line 68 had `initialized = false` instead of `initialized = true`. Intermediate rewards always returned 0.
+
+### Critical — Open
+
+- **Duplicate ApiType.ChangeZone in feature encoding**: In both `ActionEncoder.java` (lines 77-86) and `CardFeatures.java` (lines 88-97), `ApiType.ChangeZone` appears at index 3 AND index 29 of the `TOP_API_TYPES` array. This wastes a feature slot, causes ChangeZone spells to light up two features, and means the API type that should be at index 29 is completely missing. Fix: replace the duplicate at index 29 with the correct ApiType. **Requires data regeneration** since the encoding changes.
+
+- **Aura targeting flags wrong in ActionEncoder**: Aura spells (e.g. Rancor) encode `targets_creatures=0, targets_players=1` in the 64-dim action features despite targeting creatures via `K:Enchant:Creature`. The `getValidTgts()` for aura spells returns a string that doesn't match `contains("Creature")` but does match `contains("Player")`. The model learns that auras target players, which is incorrect. Fix: handle aura targeting correctly in `ActionEncoder.java` (check enchant keyword or adjust string matching).
+
+### Moderate
+
+- **Block candidate maxSelections constraint**: In `RLController.java` (lines 216-218), blocking `maxSelections` is set to `possibleBlockers.size()`, but candidates are (blocker × attacker) pairs. With 3 blockers and 2 attackers there are 7 candidates but max=3. This may prevent valid multi-block assignments. Review whether this is intentional or a bug.
+
+### Diagnostics Added (2026-03-22)
+
+- **Priority decision tracking**: `PlayerControllerRL` now logs per-game counts of: model_asked, model_play, model_pass, targeting_rejected, heuristic_bypass. Look for `RL_DIAG:` and `RL_TARGETING_REJECTED:` in logs.
+
+## Known Limitations (v2 enhancements)
+
+- **Trigger effect encoding**: The model sees boolean flags for trigger presence (has_etb, has_death, has_combat, has_upkeep) but not what those triggers DO. An ETB that draws a card and one that deals 2 damage both just show `has_etb=1`. Fix: extract ApiType + effect params from each trigger's `getOverridingAbility()` in CardFeatures.java.
+
+- **Aura/equipment association**: Cards encode attachments count [27] and auras show as separate board cards, but there is no explicit "card X is attached to card Y" pointer. The model sees P/T effects (getNetPower/getNetToughness include bonuses) but cannot reason about what happens if an aura is removed. Fix: encode host card index in aura's feature vector.

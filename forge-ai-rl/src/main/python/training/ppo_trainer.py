@@ -344,6 +344,178 @@ def compute_ppo_batch(model, head, samples, device,
     return total_loss, metrics, bs
 
 
+def compute_ppo_block_batch(model, samples, device,
+                            use_amp, clip_eps=0.2):
+    """
+    Compute PPO loss for block decisions using the proper BlockHead.
+
+    Block candidates are concatenated (blocker, attacker) pairs.
+    We reconstruct separate blocker/attacker tensors and compute
+    per-blocker categorical PPO loss.
+    """
+    if not samples:
+        return torch.tensor(0.0, device=device), {}, 0
+
+    cd = CARD_DIM
+    bs = len(samples)
+
+    # Parse each sample to extract blocker/attacker structure
+    parsed = []
+    for s in samples:
+        creatures = s['creature_features']  # (n_pairs, card_dim*2) or (n_pairs, card_dim)
+        n_total = s['n_creatures']
+        action_mask = s['action_mask']  # which pairs are active
+
+        # Candidates are (blocker||attacker) pairs, last is "no block" zero vector
+        real_pairs = n_total - 1 if n_total > 1 else n_total
+        if real_pairs <= 0:
+            continue
+
+        # Infer n_attackers from pair structure
+        first_blocker = creatures[0, :cd]
+        n_attackers = 1
+        for j in range(1, real_pairs):
+            if np.allclose(first_blocker, creatures[j, :cd], atol=0.01):
+                n_attackers += 1
+            else:
+                break
+        n_blockers = real_pairs // max(n_attackers, 1)
+        if n_blockers == 0 or n_attackers == 0:
+            continue
+
+        # Extract unique blocker and attacker features
+        bf = np.zeros((n_blockers, cd), dtype=np.float32)
+        af = np.zeros((n_attackers, cd), dtype=np.float32)
+        for b in range(n_blockers):
+            pidx = b * n_attackers
+            if pidx < real_pairs:
+                bf[b] = creatures[pidx, :cd]
+        for a in range(n_attackers):
+            if a < real_pairs and creatures.shape[1] >= cd * 2:
+                af[a] = creatures[a, cd:cd*2]
+            elif a < real_pairs:
+                af[a] = creatures[a, :cd]  # fallback
+
+        # Convert action_mask to per-blocker assignments
+        # assignments[b] = attacker index, or n_attackers for "don't block"
+        assignments = np.full(n_blockers, n_attackers, dtype=np.int64)
+        for pidx in range(real_pairs):
+            if action_mask[pidx] > 0.5:
+                b = pidx // n_attackers
+                a = pidx % n_attackers
+                if b < n_blockers:
+                    assignments[b] = a
+
+        parsed.append({
+            'blocker_features': bf,
+            'attacker_features': af,
+            'n_blockers': n_blockers,
+            'n_attackers': n_attackers,
+            'assignments': assignments,
+            'outcome': s['outcome'],
+            'old_log_prob': s.get('old_log_prob', 0.0),
+            'global_features': s['global_features'],
+            'game_state_flat': s['game_state_flat'],
+        })
+
+    if not parsed:
+        return torch.tensor(0.0, device=device), {}, 0
+
+    bs = len(parsed)
+    max_b = max(p['n_blockers'] for p in parsed)
+    max_a = max(p['n_attackers'] for p in parsed)
+
+    bf_t = torch.zeros(bs, max_b, cd, device=device)
+    bm_t = torch.zeros(bs, max_b, dtype=torch.bool, device=device)
+    af_t = torch.zeros(bs, max_a, cd, device=device)
+    am_t = torch.zeros(bs, max_a, dtype=torch.bool, device=device)
+    assign_t = torch.full((bs, max_b), max_a, dtype=torch.long, device=device)
+    outcomes = torch.zeros(bs, device=device)
+    old_log_probs = torch.zeros(bs, device=device)
+
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool, device=device)
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool, device=device)
+    st_t = torch.zeros(bs, 10, cd, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool, device=device)
+
+    for i, p in enumerate(parsed):
+        nb, na = p['n_blockers'], p['n_attackers']
+        bf_t[i, :nb] = torch.from_numpy(p['blocker_features'])
+        bm_t[i, :nb] = True
+        af_t[i, :na] = torch.from_numpy(p['attacker_features'])
+        am_t[i, :na] = True
+        assign_t[i, :nb] = torch.from_numpy(p['assignments'])
+        outcomes[i] = p['outcome']
+        old_log_probs[i] = p['old_log_prob']
+
+        g, zones, masks_d = parse_game_state(
+            p['game_state_flat'], p['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks_d['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(masks_d['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks_d['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks_d['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks_d['opp_gy_mask'])
+        st_t[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks_d['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        state = model.encode_state(
+            gf, mb, mbm, ob, obm, h, hm,
+            mg, mgm, og, ogm, st_t, stm)
+
+        value = model.get_value(state.detach()).squeeze(-1)
+
+        # BlockHead: (bs, max_b, max_a + 1)
+        logits = model.block_head(state, bf_t, bm_t, af_t, am_t)
+
+        # Per-blocker categorical log prob for the chosen assignment
+        total_log_prob = torch.zeros(bs, device=device)
+        total_entropy = torch.zeros(bs, device=device)
+        for b in range(max_b):
+            dist = torch.distributions.Categorical(logits=logits[:, b, :])
+            lp = dist.log_prob(assign_t[:, b])
+            total_log_prob += lp * bm_t[:, b].float()
+            total_entropy += dist.entropy() * bm_t[:, b].float()
+
+        advantage = (outcomes - value.detach())
+        if advantage.numel() > 1:
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
+        ratio = torch.exp(total_log_prob - old_log_probs)
+        surr1 = ratio * advantage
+        surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantage
+        policy_loss = -torch.min(surr1, surr2).mean()
+        value_loss = F.mse_loss(value, outcomes)
+        entropy = total_entropy.mean()
+
+        total_loss = policy_loss + 0.25 * value_loss - 0.01 * entropy
+
+    metrics = {
+        'policy_loss': policy_loss.item(),
+        'value_loss': value_loss.item(),
+        'entropy': entropy.item(),
+        'mean_advantage': advantage.mean().item(),
+        'mean_value': value.mean().item(),
+        'win_rate': (outcomes > 0).float().mean().item(),
+    }
+    return total_loss, metrics, bs
+
+
 def compute_ppo_priority_batch(model, head, samples,
                                device, use_amp,
                                clip_eps=0.2):

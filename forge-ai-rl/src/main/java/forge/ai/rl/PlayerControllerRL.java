@@ -9,6 +9,8 @@ import forge.game.player.*;
 import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 
+import org.tinylog.Logger;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -27,12 +29,35 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     private final RLController rl;
 
+    // Diagnostic counters (per game)
+    private int priorityModelAsked = 0;
+    private int priorityModelPass = 0;
+    private int priorityModelPlay = 0;
+    private int priorityTargetingRejected = 0;
+    private int priorityHeuristicBypass = 0;
+
     public PlayerControllerRL(Game game, Player p, LobbyPlayer lp, RLConfig config) {
         super(game, p, lp instanceof forge.ai.LobbyPlayerAi
                 ? (forge.ai.LobbyPlayerAi) lp
                 : createFallbackLobby(lp.getName()));
         this.rl = new RLController(config);
         this.rl.setPlayer(p);
+    }
+
+    public void logDiagnostics() {
+        if (priorityModelAsked > 0 || priorityHeuristicBypass > 0) {
+            Logger.info("RL_DIAG: priority: asked={} play={} pass={} targeting_rejected={} heuristic_bypass={}",
+                    priorityModelAsked, priorityModelPlay, priorityModelPass,
+                    priorityTargetingRejected, priorityHeuristicBypass);
+        }
+    }
+
+    public void resetDiagnostics() {
+        priorityModelAsked = 0;
+        priorityModelPass = 0;
+        priorityModelPlay = 0;
+        priorityTargetingRejected = 0;
+        priorityHeuristicBypass = 0;
     }
 
     private static forge.ai.LobbyPlayerAi createFallbackLobby(String name) {
@@ -57,22 +82,54 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             // Get all mechanically legal spells (broad candidate set)
             List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
             if (candidates == null || candidates.isEmpty()) {
+                priorityHeuristicBypass++;
                 return heuristicResult; // land play or early-return — use heuristic
             }
 
+            priorityModelAsked++;
             int idx = rl.decidePriorityAction(candidates);
             if (idx < 0 || idx >= candidates.size()) {
+                priorityModelPass++;
                 return null; // model chose pass — null signals "pass priority"
             }
 
-            // RL picked a spell — use heuristic to set up targeting
+            // RL picked a spell — let heuristic set up targeting, but ignore strategic vetoes
             SpellAbility chosen = candidates.get(idx);
-            if (getAi().canPlayAndPayForFacade(chosen)) {
+            forge.ai.AiPlayDecision reason = getAi().canPlayForRL(chosen);
+
+            // Strategic vetoes we override — RL model decides strategy
+            boolean isStrategicVeto = (reason == forge.ai.AiPlayDecision.CantPlayAi
+                    || reason == forge.ai.AiPlayDecision.BadEtbEffects
+                    || reason == forge.ai.AiPlayDecision.NeedsToPlayCriteriaNotMet
+                    || reason == forge.ai.AiPlayDecision.CurseEffects
+                    || reason == forge.ai.AiPlayDecision.MissingPhaseRestrictions);
+
+            if (reason == forge.ai.AiPlayDecision.WillPlay || isStrategicVeto) {
+                // Check targets are valid (canPlayForRL preserves/restores them)
+                if (chosen.usesTargeting() && !chosen.isTargetNumberValid()) {
+                    priorityTargetingRejected++;
+                    Logger.info("RL_SPELL_REJECTED: {} ({}) reason=no_valid_targets",
+                            chosen.getHostCard().getName(),
+                            chosen.getApi() != null ? chosen.getApi().name() : "null");
+                    return null;
+                }
+                if (isStrategicVeto) {
+                    Logger.info("RL_OVERRIDE: {} ({}) heuristic_said={}",
+                            chosen.getHostCard().getName(),
+                            chosen.getApi() != null ? chosen.getApi().name() : "null",
+                            reason.name());
+                }
+                priorityModelPlay++;
                 List<SpellAbility> rlResult = new ArrayList<>();
                 rlResult.add(chosen);
                 return rlResult;
             }
-            // Targeting failed — fall back to pass
+            // Genuine mechanical failure
+            priorityTargetingRejected++;
+            Logger.info("RL_SPELL_REJECTED: {} ({}) reason={}",
+                    chosen.getHostCard().getName(),
+                    chosen.getApi() != null ? chosen.getApi().name() : "null",
+                    reason.name());
             return null;
         } else {
             // Heuristic decides — record the decision
