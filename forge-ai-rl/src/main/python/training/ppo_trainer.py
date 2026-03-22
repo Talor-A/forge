@@ -309,9 +309,9 @@ def compute_ppo_batch(model, head, samples, device,
         cm[i, :nc] = True
         actions[i, :nc] = torch.from_numpy(
             s['action_mask'])
-        outcomes[i] = s['outcome']
-        gae_advantages[i] = s.get('advantage', s['outcome'])
-        old_log_probs[i] = s.get('old_log_prob', 0.0)
+        outcomes[i] = float(s['outcome'])
+        gae_advantages[i] = float(s.get('advantage', s['outcome']))
+        old_log_probs[i] = float(s.get('old_log_prob', 0.0))
 
         g, zones, masks_d = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -509,9 +509,9 @@ def compute_ppo_block_batch(model, samples, device,
         af_t[i, :na] = torch.from_numpy(p['attacker_features'])
         am_t[i, :na] = True
         assign_t[i, :nb] = torch.from_numpy(p['assignments'])
-        outcomes[i] = p['outcome']
-        gae_advantages_b[i] = p.get('advantage', p['outcome'])
-        old_log_probs[i] = p['old_log_prob']
+        outcomes[i] = float(p['outcome'])
+        gae_advantages_b[i] = float(p.get('advantage', p['outcome']))
+        old_log_probs[i] = float(p['old_log_prob'])
 
         g, zones, masks_d = parse_game_state(
             p['game_state_flat'], p['global_features'])
@@ -625,9 +625,9 @@ def compute_ppo_priority_batch(model, head, samples,
             s['action_features'])
         am[i, :na] = True
         actions[i] = s['selected_idx']
-        outcomes[i] = s['outcome']
-        gae_advantages[i] = s.get('advantage', s['outcome'])
-        old_log_probs[i] = s.get('old_log_prob', 0.0)
+        outcomes[i] = float(s['outcome'])
+        gae_advantages[i] = float(s.get('advantage', s['outcome']))
+        old_log_probs[i] = float(s.get('old_log_prob', 0.0))
 
         g, zones, masks_d = parse_game_state(
             s['game_state_flat'], s['global_features'])
