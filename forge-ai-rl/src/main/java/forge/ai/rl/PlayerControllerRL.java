@@ -333,7 +333,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                 "spell_target_" + spellName + "_" + apiName);
     }
 
-    // ===== TARGET SELECTION — record heuristic's interactive targeting choices =====
+    // ===== TARGET SELECTION =====
 
     @Override
     @SuppressWarnings("unchecked")
@@ -343,10 +343,26 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             SpellAbility sa, String title,
             boolean isOptional, Player targetedPlayer,
             Map<String, Object> params) {
+
+        if (rl.getConfig().getMode() == RLModelMode.GRPC
+                && rl.isModelServerAvailable()
+                && optionList.size() > 1) {
+            // RL model picks the target
+            List<GameEntity> targets = new ArrayList<>(optionList);
+            List<Integer> selected = rl.decideTargets(targets, 1, 1);
+            if (!selected.isEmpty()) {
+                int idx = selected.get(0);
+                if (idx >= 0 && idx < optionList.size()) {
+                    return optionList.get(idx);
+                }
+            }
+            // Fallback to heuristic if model fails
+        }
+
         T result = super.chooseSingleEntityForEffect(
                 optionList, delayedReveal, sa, title,
                 isOptional, targetedPlayer, params);
-        // Record targeting decision (only when there's a meaningful choice)
+        // Record heuristic's choice
         if (result != null && optionList.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (T entity : optionList) {
@@ -474,6 +490,12 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     @Override
     public boolean mulliganKeepHand(
             Player firstPlayer, int cardsToReturn) {
+        if (rl.getConfig().getMode() == RLModelMode.GRPC
+                && rl.isModelServerAvailable()) {
+            CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
+            return rl.decideMulligan(hand, cardsToReturn);
+        }
+
         List<float[]> handFeats = new ArrayList<>();
         CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
         for (Card c : hand) {
@@ -496,6 +518,11 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             String message, List<String> options,
             Card cardToShow,
             Map<String, Object> params) {
+        if (rl.getConfig().getMode() == RLModelMode.GRPC
+                && rl.isModelServerAvailable()) {
+            return rl.decideBinary("confirm_" + mode);
+        }
+
         boolean result = super.confirmAction(
                 sa, mode, message, options, cardToShow, params);
         rl.recordDecisionDirect(DecisionType.BINARY_CHOICE,
@@ -506,6 +533,11 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     @Override
     public boolean confirmTrigger(WrappedAbility wrapper) {
+        if (rl.getConfig().getMode() == RLModelMode.GRPC
+                && rl.isModelServerAvailable()) {
+            return rl.decideBinary("trigger");
+        }
+
         boolean result = super.confirmTrigger(wrapper);
         rl.recordDecisionDirect(DecisionType.BINARY_CHOICE,
                 2, List.of(result ? 1 : 0), null,

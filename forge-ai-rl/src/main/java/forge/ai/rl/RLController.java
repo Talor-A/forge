@@ -131,7 +131,15 @@ public class RLController {
         GameStateFeatures gameState = stateEncoder.encode(game, player);
         List<float[]> candidates = new ArrayList<>();
         for (GameEntity entity : targets) {
-            candidates.add(ActionEncoder.encodeTarget(entity));
+            if (entity instanceof Card) {
+                candidates.add(forge.ai.rl.features.CardFeatures.encode((Card) entity));
+            } else {
+                // Player targets — pad to card_feature_dim (256)
+                float[] playerFeats = ActionEncoder.encodeTarget(entity);
+                float[] padded = new float[256];
+                System.arraycopy(playerFeats, 0, padded, 0, Math.min(playerFeats.length, 256));
+                candidates.add(padded);
+            }
         }
 
         DecisionContext context = DecisionContext.multiSelect(

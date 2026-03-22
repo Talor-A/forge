@@ -286,7 +286,8 @@ class ModelServer:
         if not candidates:
             return {'selectedIndices': [0], 'actionProbabilities': [], 'valueEstimate': 0.0}
 
-        target_features = self._to_tensor_2d(candidates, len(candidates), 64)
+        card_dim = self.model.config.get('card_feature_dim', 256)
+        target_features = self._to_tensor_2d(candidates, len(candidates), card_dim)
         target_mask = torch.ones(1, len(candidates), dtype=torch.bool, device=self.device)
 
         logits = self.model.target_head(state, target_features, target_mask)
