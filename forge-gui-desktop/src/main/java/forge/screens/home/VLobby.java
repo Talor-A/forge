@@ -238,19 +238,14 @@ public class VLobby implements ILobbyView {
         final FDeckChooser deckChooser = getDeckChooser(slot);
         deckChooser.setIsAi(type==LobbySlotType.AI || type==LobbySlotType.RL_AI);
 
-        // When any player is RL AI, lock ALL players to the 4 supported decks
-        boolean anyRlAi = false;
-        for (int i = 0; i < activePlayersNum; i++) {
-            if (playerPanels.get(i).getType() == LobbySlotType.RL_AI) {
-                anyRlAi = true;
-                break;
-            }
-        }
-        if (anyRlAi) {
-            // Filter all players' deck choosers to RL decks
-            for (int i = 0; i < activePlayersNum; i++) {
-                final FDeckChooser dc = getDeckChooser(i);
-                filterToRlDecks(dc);
+        // When RL AI is selected, lock this player AND all others to RL decks
+        if (type == LobbySlotType.RL_AI) {
+            filterToRlDecks(deckChooser);
+            // Also filter other players
+            for (int i = 0; i < playerPanels.size(); i++) {
+                if (i != slot) {
+                    filterToRlDecks(getDeckChooser(i));
+                }
             }
             return;
         }
