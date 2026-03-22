@@ -31,5 +31,5 @@ python tools/export_onnx.py \
 # Copy to Forge data directory for GUI access
 FORGE_DIR="$HOME/.forge/res/rl/models"
 mkdir -p "$FORGE_DIR"
-cp "$OUTPUT"/*.onnx "$FORGE_DIR/"
+cp "$OUTPUT"/*.onnx "$OUTPUT"/*.data "$FORGE_DIR/" 2>/dev/null
 echo "Copied ONNX files to $FORGE_DIR"
