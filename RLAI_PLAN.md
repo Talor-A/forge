@@ -336,18 +336,22 @@ The final card representation is the **concatenation of all four**, projected to
 7. ✅ JSON-over-TCP bridge with batched inference server
 8. ✅ Python project with PyTorch, MTGModel (11M params), training dashboards
 
-### Phase 2: Imitation Learning (weeks 5-8) ✅ COMPLETE
-1. ✅ Run 1,000 heuristic AI vs AI games, recording all decisions (153K records)
-2. ✅ Train game state encoder + value network (99.6% accuracy)
-3. ✅ Train attack head (BCE, 9,750 samples) + block head (BCE, 2,830 samples)
-4. ✅ Priority head training (CE softmax, 140,603 samples) — IN PROGRESS
-5. ✅ Validated: RL agent achieves 53% win rate vs heuristic after PPO (combat only)
+### Phase 2: Imitation Learning (weeks 5-8) 🔄 IN PROGRESS
+1. ✅ Run 1,000 heuristic AI vs AI games, recording all decisions (~137K records)
+2. ✅ Train game state encoder + value network (stopped early, overfitting observed)
+   - *Note: Previous 99.6% accuracy was from a version with feature leakage (tapped flag leaked attack decisions). Not comparable to current run.*
+3. 🔄 Train decision heads with 256-dim card features (training in progress)
+   - Priority: 126,172 samples (CE softmax) — TBD accuracy
+   - Attack: 8,576 samples (BCE per-creature) — TBD accuracy
+   - Block: 2,478 samples (CE per-blocker assignment) — TBD accuracy
+4. ⬜ Validate RL agent win rate vs heuristic
+   - *Note: Previous 53% win rate was from 128-dim leaked-feature model. Not comparable.*
 
-### Phase 3: RL Training — Simple Cards (weeks 9-14) 🔄 IN PROGRESS
+### Phase 3: RL Training — Simple Cards (weeks 9-14) ⬜ NOT STARTED (with 256-dim model)
 1. ⬜ Curriculum card pools (currently using 4 aggro decks)
 2. ✅ PPO training loop implemented (ppo_trainer.py + ppo_ui.py)
 3. ✅ Reward shaping implemented (life/card/board advantage signals with decay)
-4. 🔄 Training with priority + combat heads (first run with all three decision types)
+4. ⬜ PPO training with 256-dim model (after decision heads converge)
 5. ⬜ Progress through curriculum stages
 6. ⬜ Elo tracking and benchmarking
 

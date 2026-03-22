@@ -32,11 +32,37 @@ except ImportError:
 
 # ── Feature decoding ───────────────────────────────
 
-KEYWORDS = [
+# 30 keywords — set 1 (indices 29-58)
+KEYWORDS_SET1 = [
     "Flying", "First Strike", "Double Strike", "Trample",
     "Haste", "Vigilance", "Deathtouch", "Lifelink", "Reach",
-    "Hexproof", "Indestructible", "Flash", "Menace", "Defender",
-    "Prowess",
+    "Menace", "Hexproof", "Shroud", "Indestructible", "Flash",
+    "Defender", "Fear", "Ward", "Prowess", "Wither", "Infect",
+    "Protection", "Shadow", "Undying", "Persist",
+    "Convoke", "Delve", "Cascade", "Equip", "Enchant", "Flanking",
+]
+
+# 30 keywords — set 2 (indices 139-168)
+KEYWORDS_SET2 = [
+    "Horsemanship", "Intimidate", "Skulk", "Annihilator",
+    "Absorb", "Bushido", "Exalted", "Battle Cry", "Modular",
+    "Toxic", "Afflict", "Phasing", "Cumulative Upkeep", "Echo",
+    "Fading", "Vanishing", "Storm", "Affinity", "Changeling",
+    "Devoid", "Emerge", "Improvise", "Spectacle", "Riot",
+    "Companion", "Foretell", "Entwine", "Disturb",
+    "Daybound", "Nightbound",
+]
+
+# Top 30 ApiTypes (indices 69-98 primary, 109-138 secondary)
+API_TYPE_NAMES = [
+    "DealDamage", "Draw", "Counter", "ChangeZone",
+    "Pump", "PumpAll", "Destroy", "DestroyAll",
+    "Sacrifice", "Discard", "GainLife", "LoseLife",
+    "Token", "Animate", "Attach", "Tap",
+    "Untap", "Mill", "Regenerate", "Protection",
+    "Fight", "Charm", "Scry", "Explore",
+    "AddOrRemoveCounter", "ManaReflected", "Mana",
+    "ChangeTargets", "Fog", "ChangeZone2",
 ]
 
 COLOR_HEX = {
@@ -58,23 +84,39 @@ def decode_card(feats):
     """Decode a 256-dim CardFeatures vector.
 
     Layout (from CardFeatures.java):
-    [0-6]   card types
-    [7-12]  colors (W,U,B,R,G,C)
-    [13]    CMC (normalized 0-16)
-    [14-15] power/toughness (normalized -5 to 20)
-    [16]    loyalty (normalized 0-10)
-    [17]    tapped
-    [18]    summoning sick
-    [19]    attacking
-    [20]    blocking
-    [21]    face down
-    [22-26] counters (+1/+1, -1/-1, loyalty, charge, other)
-    [27]    attachments count
-    [28]    damage marked
-    [29-58] 30 keyword flags
-    [59-68] zone (one-hot)
-    [69-96] ability type flags (reserved)
-    [97-127] reserved / card hash
+    === BASIC CARD INFO [0-68] ===
+    [0-6]    card types (creature, instant, sorcery, enchantment, artifact, planeswalker, land)
+    [7-12]   colors (W, U, B, R, G, colorless)
+    [13]     CMC (normalized 0-16)
+    [14-15]  power/toughness (normalized -5 to 20)
+    [16]     loyalty (normalized 0-10)
+    [17-21]  state flags (tapped, summoning sick, attacking, blocking, face down)
+    [22-26]  counters (+1/+1, -1/-1, loyalty, charge, other)
+    [27]     attachments count (normalized 0-5)
+    [28]     damage marked (normalized 0-20)
+    [29-58]  keyword flags set 1 (30 keywords)
+    [59-68]  zone encoding (one-hot)
+
+    === PRIMARY ABILITY [69-108] ===
+    [69-98]  ApiType one-hot (30 types)
+    [99-102] ability summary (has_activated, has_triggered, has_mana_ability, n_abilities)
+    [103-106] effect magnitude (est_damage, est_draw, est_life, est_tokens)
+    [107-108] targeting (requires_target, targets_creatures)
+
+    === SECOND ABILITY [109-138] ===
+    [109-138] ApiType one-hot (30 types)
+
+    === EXTENDED KEYWORDS [139-168] ===
+    [139-168] keyword flags set 2 (30 keywords)
+
+    === MANA + SPEED + TRIGGERS [169-199] ===
+    [169-173] mana production (W, U, B, R, G)
+    [174-177] spell speed (is_instant_speed, has_flash, is_modal, has_kicker)
+    [178-181] trigger summary (has_etb, has_death, has_combat, has_upkeep)
+    [182-189] mana cost (W, U, B, R, G, generic, total, has_X)
+
+    === RESERVED + HASH [200-255] ===
+    [252-255] card identity hash
     """
     if len(feats) < 30:
         return None
@@ -108,18 +150,34 @@ def decode_card(feats):
         if len(feats) > 19 else False
     blocking = feats[20] > 0.5 \
         if len(feats) > 20 else False
+    face_down = feats[21] > 0.5 \
+        if len(feats) > 21 else False
 
+    # Counters [22-26]
     p1p1 = int(round(feats[22] * 20)) \
         if len(feats) > 22 else 0
     m1m1 = int(round(feats[23] * 10)) \
         if len(feats) > 23 else 0
+    loyalty_counters = int(round(feats[24] * 10)) \
+        if len(feats) > 24 else 0
+    charge_counters = int(round(feats[25] * 10)) \
+        if len(feats) > 25 else 0
+    other_counters = int(round(feats[26] * 10)) \
+        if len(feats) > 26 else 0
+
+    # Attachments [27]
+    attachments = int(round(feats[27] * 5)) \
+        if len(feats) > 27 else 0
+
+    # Damage [28]
     damage = int(round(feats[28] * 20)) \
         if len(feats) > 28 else 0
 
-    kws = [kw for i, kw in enumerate(KEYWORDS)
+    # Keywords set 1 [29-58]
+    kws = [kw for i, kw in enumerate(KEYWORDS_SET1)
            if 29+i < len(feats) and feats[29+i] > 0.5]
 
-    # Zone
+    # Zone [59-68]
     zone_names = ["Battlefield", "Hand", "Library",
                   "Graveyard", "Exile", "Stack",
                   "Command", "Sideboard", "Ante",
@@ -129,6 +187,69 @@ def decode_card(feats):
         if 59+i < len(feats) and feats[59+i] > 0.5:
             zone = zn
             break
+
+    # === PRIMARY ABILITY [69-108] ===
+    primary_api = None
+    if len(feats) > 98:
+        for i, name in enumerate(API_TYPE_NAMES):
+            if feats[69+i] > 0.5:
+                primary_api = name
+                break
+
+    # Ability summary [99-102]
+    has_activated = feats[99] > 0.5 if len(feats) > 99 else False
+    has_triggered = feats[100] > 0.5 if len(feats) > 100 else False
+    has_mana_ability = feats[101] > 0.5 if len(feats) > 101 else False
+    n_abilities = int(round(feats[102] * 10)) if len(feats) > 102 else 0
+
+    # Effect magnitude [103-106]
+    est_damage = int(round(feats[103] * 20)) if len(feats) > 103 else 0
+    est_draw = int(round(feats[104] * 10)) if len(feats) > 104 else 0
+    est_life = int(round(feats[105] * 20)) if len(feats) > 105 else 0
+    est_tokens = int(round(feats[106] * 5)) if len(feats) > 106 else 0
+
+    # Targeting [107-108]
+    requires_target = feats[107] > 0.5 if len(feats) > 107 else False
+    targets_creatures = feats[108] > 0.5 if len(feats) > 108 else False
+
+    # === SECOND ABILITY [109-138] ===
+    secondary_api = None
+    if len(feats) > 138:
+        for i, name in enumerate(API_TYPE_NAMES):
+            if feats[109+i] > 0.5:
+                secondary_api = name
+                break
+
+    # === EXTENDED KEYWORDS [139-168] ===
+    kws2 = [kw for i, kw in enumerate(KEYWORDS_SET2)
+            if 139+i < len(feats) and feats[139+i] > 0.5]
+
+    # === MANA + SPEED + TRIGGERS [169-199] ===
+    mana_colors = ["W", "U", "B", "R", "G"]
+    produces_mana = [c for i, c in enumerate(mana_colors)
+                     if 169+i < len(feats) and feats[169+i] > 0.5]
+
+    is_instant_speed = feats[174] > 0.5 if len(feats) > 174 else False
+    has_flash = feats[175] > 0.5 if len(feats) > 175 else False
+    is_modal = feats[176] > 0.5 if len(feats) > 176 else False
+    has_kicker = feats[177] > 0.5 if len(feats) > 177 else False
+
+    has_etb = feats[178] > 0.5 if len(feats) > 178 else False
+    has_death = feats[179] > 0.5 if len(feats) > 179 else False
+    has_combat_trigger = feats[180] > 0.5 if len(feats) > 180 else False
+    has_upkeep = feats[181] > 0.5 if len(feats) > 181 else False
+
+    # Mana cost breakdown [182-189]
+    cost_colors = {}
+    cost_labels = ["W", "U", "B", "R", "G"]
+    for i, cl in enumerate(cost_labels):
+        if 182+i < len(feats):
+            v = int(round(feats[182+i] * 5))
+            if v > 0:
+                cost_colors[cl] = v
+    cost_generic = int(round(feats[187] * 10)) if len(feats) > 187 else 0
+    cost_total = int(round(feats[188] * 16)) if len(feats) > 188 else 0
+    has_x = feats[189] > 0.5 if len(feats) > 189 else False
 
     # Type label
     if "Land" in types:
@@ -140,14 +261,54 @@ def decode_card(feats):
     else:
         label = "?"
 
+    # Build mana cost string
+    mana_cost_str = ""
+    if has_x:
+        mana_cost_str += "X"
+    if cost_generic > 0:
+        mana_cost_str += str(cost_generic)
+    for cl in cost_labels:
+        if cl in cost_colors:
+            mana_cost_str += cl * cost_colors[cl]
+    if not mana_cost_str and cost_total > 0:
+        mana_cost_str = str(cost_total)
+
     return {
         "label": label, "types": types, "colors": colors,
         "cmc": cmc, "power": power, "toughness": toughness,
         "loyalty": loyalty,
         "tapped": tapped, "sick": sick,
         "attacking": attacking, "blocking": blocking,
+        "face_down": face_down,
         "p1p1": p1p1, "m1m1": m1m1, "damage": damage,
-        "keywords": kws, "zone": zone,
+        "loyalty_counters": loyalty_counters,
+        "charge_counters": charge_counters,
+        "other_counters": other_counters,
+        "attachments": attachments,
+        "keywords": kws + kws2, "zone": zone,
+        # Ability info
+        "primary_api": primary_api,
+        "secondary_api": secondary_api,
+        "has_activated": has_activated,
+        "has_triggered": has_triggered,
+        "has_mana_ability": has_mana_ability,
+        "n_abilities": n_abilities,
+        "est_damage": est_damage, "est_draw": est_draw,
+        "est_life": est_life, "est_tokens": est_tokens,
+        "requires_target": requires_target,
+        "targets_creatures": targets_creatures,
+        # Mana production
+        "produces_mana": produces_mana,
+        # Speed
+        "is_instant_speed": is_instant_speed,
+        "has_flash": has_flash,
+        "is_modal": is_modal, "has_kicker": has_kicker,
+        # Triggers
+        "has_etb": has_etb, "has_death": has_death,
+        "has_combat_trigger": has_combat_trigger,
+        "has_upkeep": has_upkeep,
+        # Mana cost
+        "mana_cost_str": mana_cost_str,
     }
 
 
@@ -170,6 +331,7 @@ API_DESCRIPTIONS = {
     "Draw": "Draw cards",
     "Counter": "Counter spell",
     "ChangeZone": "Move card (bounce/exile/reanimate)",
+    "ChangeZone2": "Move card",
     "Pump": "Pump creature (+X/+X)",
     "PumpAll": "Pump all creatures",
     "Destroy": "Destroy permanent",
@@ -315,8 +477,20 @@ def decode_action(feats):
 
 # ── Card rendering (MTG card style) ───────────────
 
-CARD_W, CARD_H = 90, 140
+CARD_W, CARD_H = 100, 170
 ACTION_W, ACTION_H = 100, 140
+
+
+def _load_fonts():
+    try:
+        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 8)
+        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 8)
+        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 10)
+    except (IOError, OSError):
+        font_sm = ImageFont.load_default()
+        font_md = font_sm
+        font_lg = font_sm
+    return font_sm, font_md, font_lg
 
 
 def draw_card_image(info, highlight=None):
@@ -342,23 +516,21 @@ def draw_card_image(info, highlight=None):
     m = 3  # border margin
     draw.rectangle([m, m, CARD_W-m-1, CARD_H-m-1], fill=bg_color)
 
-    # Try to load a small font, fall back to default
-    try:
-        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 8)
-        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 8)
-        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 10)
-    except (IOError, OSError):
-        font_sm = ImageFont.load_default()
-        font_md = font_sm
-        font_lg = font_sm
+    font_sm, font_md, font_lg = _load_fonts()
 
     y = 4
 
-    # Title bar: type + CMC
+    # Title bar: type + mana cost
     type_str = "/".join(info["types"])[:12]
     draw.text((4, y), type_str, fill=fg_color, font=font_md)
-    cmc_str = f"{{{info['cmc']}}}"
-    draw.text((CARD_W - 22, y), cmc_str, fill=fg_color, font=font_md)
+    mana_str = info.get("mana_cost_str", "")
+    if mana_str:
+        draw.text((CARD_W - 4, y), mana_str,
+                  fill=fg_color, font=font_md, anchor='ra')
+    else:
+        cmc_str = f"{{{info['cmc']}}}"
+        draw.text((CARD_W - 4, y), cmc_str,
+                  fill=fg_color, font=font_md, anchor='ra')
     y += 12
 
     # Color identity
@@ -370,25 +542,94 @@ def draw_card_image(info, highlight=None):
     draw.line([(4, y), (CARD_W-4, y)], fill=fg_color, width=1)
     y += 3
 
-    # Art area (just colored block)
-    art_h = 24
+    # Art area — show ability info
+    art_h = 30
     darker = _darken(bg_color, 0.8)
     draw.rectangle([4, y, CARD_W-4, y+art_h], fill=darker)
 
-    # Show land name in art area for lands
     if "Land" in info["types"]:
-        draw.text((6, y+6), info["label"],
+        draw.text((6, y+2), info["label"],
                   fill=fg_color, font=font_lg)
+        if info.get("produces_mana"):
+            draw.text((6, y+14),
+                      f"Tap: {' '.join(info['produces_mana'])}",
+                      fill="#ffdd00", font=font_sm)
+    elif info.get("primary_api"):
+        api_desc = API_DESCRIPTIONS.get(
+            info["primary_api"], info["primary_api"])
+        draw.text((6, y+2), api_desc[:16],
+                  fill=fg_color, font=font_sm)
+        # Effect magnitude
+        effects = []
+        if info.get("est_damage"):
+            effects.append(f"{info['est_damage']}dmg")
+        if info.get("est_draw"):
+            effects.append(f"draw {info['est_draw']}")
+        if info.get("est_life"):
+            effects.append(f"+{info['est_life']}life")
+        if info.get("est_tokens"):
+            effects.append(f"{info['est_tokens']}tok")
+        if effects:
+            draw.text((6, y+12), " ".join(effects),
+                      fill="#ffdd00", font=font_sm)
+        # Secondary ability
+        if info.get("secondary_api"):
+            api2 = API_DESCRIPTIONS.get(
+                info["secondary_api"], info["secondary_api"])
+            draw.text((6, y+22), f"+ {api2[:14]}",
+                      fill="#aaaaaa", font=font_sm)
     y += art_h + 3
 
     # Separator
     draw.line([(4, y), (CARD_W-4, y)], fill=fg_color, width=1)
     y += 3
 
-    # Keywords (compact)
-    for kw in info.get("keywords", [])[:3]:
+    # Keywords (compact, up to 4)
+    all_kws = info.get("keywords", [])
+    for kw in all_kws[:4]:
         draw.text((4, y), kw, fill=fg_color, font=font_sm)
-        y += 10
+        y += 9
+    if len(all_kws) > 4:
+        draw.text((4, y), f"+{len(all_kws)-4} more",
+                  fill="#888888", font=font_sm)
+        y += 9
+
+    # Triggers line
+    triggers = []
+    if info.get("has_etb"):
+        triggers.append("ETB")
+    if info.get("has_death"):
+        triggers.append("Dies")
+    if info.get("has_combat_trigger"):
+        triggers.append("Combat")
+    if info.get("has_upkeep"):
+        triggers.append("Upkeep")
+    if triggers:
+        draw.text((4, y), " ".join(triggers),
+                  fill="#cba6f7", font=font_sm)
+        y += 9
+
+    # Speed flags
+    speed = []
+    if info.get("has_flash"):
+        speed.append("Flash")
+    elif info.get("is_instant_speed"):
+        speed.append("Instant")
+    if info.get("is_modal"):
+        speed.append("Modal")
+    if info.get("has_kicker"):
+        speed.append("Kicker")
+    if speed:
+        draw.text((4, y), " ".join(speed),
+                  fill="#89b4fa", font=font_sm)
+        y += 9
+
+    # Mana production (for non-lands)
+    if info.get("produces_mana") and "Land" not in info["types"]:
+        draw.text((4, y),
+                  f"Tap: {' '.join(info['produces_mana'])}",
+                  fill="#ffdd00", font=font_sm)
+        y += 9
 
     # Counters
     p1p1 = info.get("p1p1", 0)
@@ -396,43 +637,55 @@ def draw_card_image(info, highlight=None):
     if p1p1 > 0:
         draw.text((4, y), f"+{p1p1}/+{p1p1}",
                   fill="#ffdd00", font=font_sm)
-        y += 10
+        y += 9
     if m1m1 > 0:
         draw.text((4, y), f"-{m1m1}/-{m1m1}",
                   fill="#ff4444", font=font_sm)
-        y += 10
+        y += 9
+    if info.get("charge_counters", 0) > 0:
+        draw.text((4, y),
+                  f"Charge: {info['charge_counters']}",
+                  fill="#ffdd00", font=font_sm)
+        y += 9
+
+    # Attachments
+    if info.get("attachments", 0) > 0:
+        draw.text((4, y),
+                  f"{info['attachments']} attached",
+                  fill="#aaaaaa", font=font_sm)
+        y += 9
 
     # Damage marked
     dmg = info.get("damage", 0)
     if dmg > 0:
         draw.text((4, y), f"{dmg} dmg",
                   fill="#ff6666", font=font_sm)
-        y += 10
+        y += 9
 
     # Loyalty (planeswalkers)
     loyalty = info.get("loyalty")
     if loyalty is not None and loyalty > 0:
         draw.text((4, y), f"Loyalty: {loyalty}",
                   fill="#ccccff", font=font_sm)
-        y += 10
+        y += 9
 
     # State flags
     if info.get("tapped"):
         draw.text((4, y), "TAPPED",
                   fill="#ff6666", font=font_sm)
-        y += 10
+        y += 9
     if info.get("sick"):
         draw.text((4, y), "SICK",
                   fill="#ffaa44", font=font_sm)
-        y += 10
+        y += 9
     if info.get("attacking"):
         draw.text((4, y), "ATTACKING",
                   fill="#00ff00", font=font_sm)
-        y += 10
+        y += 9
     if info.get("blocking"):
         draw.text((4, y), "BLOCKING",
                   fill="#4488ff", font=font_sm)
-        y += 10
+        y += 9
 
     # P/T box (bottom right for creatures)
     if info.get("power") is not None:
@@ -507,20 +760,7 @@ def draw_action_card_image(info, is_chosen=False,
     d.rectangle([m, m, ACTION_W-m-1, ACTION_H-m-1],
                  fill=bg_color)
 
-    try:
-        font_sm = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/"
-            "DejaVuSansMono.ttf", 8)
-        font_md = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/"
-            "DejaVuSansMono-Bold.ttf", 8)
-        font_lg = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/"
-            "DejaVuSansMono-Bold.ttf", 10)
-    except (IOError, OSError):
-        font_sm = ImageFont.load_default()
-        font_md = font_sm
-        font_lg = font_sm
+    font_sm, font_md, font_lg = _load_fonts()
 
     y = 4
 
@@ -680,6 +920,7 @@ class GameStateViewer:
         self.data_dir = data_dir
         self.idx = 0
         self.card_photos = []  # keep references
+        self._pending_show = None  # for buffered updates
 
         root.title("MTG RL — Game State Visualizer")
         root.geometry("1500x950")
@@ -868,8 +1109,8 @@ class GameStateViewer:
         try:
             gf = s["global_features"]
             flat = s["game_state_flat"]
-            g = np.zeros(64, dtype=np.float32)
-            gl = min(len(gf), 64)
+            g = np.zeros(GLOBAL_DIM, dtype=np.float32)
+            gl = min(len(gf), GLOBAL_DIM)
             if gl > 0:
                 g[:gl] = gf[:gl]
             np.clip(g, -10, 10, out=g)
@@ -1023,19 +1264,29 @@ class GameStateViewer:
 
     def _prev(self):
         self.idx = max(0, self.idx - 1)
-        self._show()
+        self._schedule_show()
 
     def _next(self):
         self.idx = min(len(self.samples) - 1, self.idx + 1)
-        self._show()
+        self._schedule_show()
 
     def _rand(self):
         self.idx = random.randint(0, len(self.samples) - 1)
+        self._schedule_show()
+
+    def _schedule_show(self):
+        """Buffer rapid navigation — only render the last request."""
+        if self._pending_show is not None:
+            self.root.after_cancel(self._pending_show)
+        self._pending_show = self.root.after(16, self._do_show)
+
+    def _do_show(self):
+        self._pending_show = None
         self._show()
 
     def _show(self):
         s = self.samples[self.idx]
-        self.card_photos = []  # clear references
+        new_photos = []  # build new list, swap at end
 
         self.nav_v.set(f"{self.idx+1}/{len(self.samples)}")
         dt = s.get("type", "?")
@@ -1115,32 +1366,70 @@ class GameStateViewer:
 
         hand = zones.get("my_hand", [])
 
-        # Render
-        self._render_cards(self.opp_creatures, opp_creatures)
-        self._render_cards(self.opp_lands, opp_lands)
-
-        # For my creatures, mark attackers based on candidate index
-        # The candidates list maps to creatures that can attack
+        # Pre-render all images before touching the UI
         cand_highlights = {}
         for i in selected:
             cand_highlights[i] = "attack"
-        self._render_cards(self.my_creatures, my_creatures,
-                           candidate_highlights=cand_highlights)
-        self._render_cards(self.my_lands, my_lands)
 
-        self._render_cards(self.hand_frame, hand)
+        opp_creature_imgs = self._pre_render_cards(opp_creatures)
+        opp_land_imgs = self._pre_render_cards(opp_lands)
+        my_creature_imgs = self._pre_render_cards(
+            my_creatures, candidate_highlights=cand_highlights)
+        my_land_imgs = self._pre_render_cards(my_lands)
+        hand_imgs = self._pre_render_cards(hand)
+        stack_imgs = self._pre_render_cards(
+            zones.get("stack", []))
+        priority_imgs = self._pre_render_priority(s)
 
-        # Stack
-        stack_cards = zones.get("stack", [])
-        self._render_cards(self.stack_frame, stack_cards)
+        # Now do all UI updates in one batch
+        self._apply_cards(self.opp_creatures, opp_creature_imgs, opp_creatures, new_photos)
+        self._apply_cards(self.opp_lands, opp_land_imgs, opp_lands, new_photos)
+        self._apply_cards(self.my_creatures, my_creature_imgs, my_creatures, new_photos)
+        self._apply_cards(self.my_lands, my_land_imgs, my_lands, new_photos)
+        self._apply_cards(self.hand_frame, hand_imgs, hand, new_photos)
+        self._apply_cards(self.stack_frame, stack_imgs,
+                          zones.get("stack", []), new_photos)
+        self._apply_priority(self.priority_frame, priority_imgs, new_photos)
 
-        # Priority candidates
-        self._render_priority(s)
+        # Swap photo references atomically
+        self.card_photos = new_photos
 
         # Model prediction
         self._predict(s)
 
-    def _render_cards(self, frame, cards, candidate_highlights=None):
+    def _pre_render_cards(self, cards, candidate_highlights=None):
+        """Render card images off-screen, return list of PIL images."""
+        if not HAS_PIL or not cards:
+            return []
+        images = []
+        for i, info in enumerate(cards):
+            hl = None
+            if candidate_highlights and i in candidate_highlights:
+                hl = candidate_highlights[i]
+            images.append(draw_card_image(info, highlight=hl))
+        return images
+
+    def _pre_render_priority(self, s):
+        """Pre-render priority candidate images."""
+        if not HAS_PIL or s.get("type") != "PRIORITY_ACTION":
+            return None
+        candidates = s.get("candidates", [])
+        selected = s.get("selected", [])
+        sel_idx = selected[0] if selected else -1
+        images = []
+        for i, cf in enumerate(candidates):
+            info = decode_action(cf)
+            if not info:
+                images.append(None)
+                continue
+            is_chosen = (i == sel_idx)
+            is_pass = info.get("is_pass", False)
+            images.append(draw_action_card_image(
+                info, is_chosen=is_chosen, is_pass=is_pass))
+        return images
+
+    def _apply_cards(self, frame, images, cards, photos_out):
+        """Apply pre-rendered images to a frame, minimizing flicker."""
         for w in frame.winfo_children():
             w.destroy()
 
@@ -1151,95 +1440,43 @@ class GameStateViewer:
             return
 
         for i, info in enumerate(cards):
-            hl = None
-            if candidate_highlights and i in candidate_highlights:
-                hl = candidate_highlights[i]
+            if HAS_PIL and images and i < len(images) and images[i]:
+                photo = ImageTk.PhotoImage(images[i])
+                photos_out.append(photo)
+                lbl = tk.Label(frame, image=photo, bg=frame["bg"])
+                lbl.pack(side=tk.LEFT, padx=1, pady=2)
+            else:
+                c = info["colors"][0] if info["colors"] else "C"
+                bg, fg = COLOR_HEX.get(c, COLOR_HEX["C"])
+                text = info["label"]
+                if info["power"] is not None:
+                    text += f"\n{info['power']}/{info['toughness']}"
+                lbl = tk.Label(frame, text=text, bg=bg, fg=fg,
+                               font=("Consolas", 8), width=14, height=5,
+                               relief="raised", borderwidth=2)
+                lbl.pack(side=tk.LEFT, padx=1, pady=2)
 
-            if HAS_PIL:
-                pil_img = draw_card_image(info, highlight=hl)
-                if pil_img:
-                    photo = ImageTk.PhotoImage(pil_img)
-                    self.card_photos.append(photo)
-                    lbl = tk.Label(frame, image=photo, bg=frame["bg"])
-                    lbl.pack(side=tk.LEFT, padx=1, pady=2)
-                    continue
-
-            # Text fallback
-            c = info["colors"][0] if info["colors"] else "C"
-            bg, fg = COLOR_HEX.get(c, COLOR_HEX["C"])
-            text = info["label"]
-            if info["power"] is not None:
-                text += f"\n{info['power']}/{info['toughness']}"
-            lbl = tk.Label(frame, text=text, bg=bg, fg=fg,
-                           font=("Consolas", 8), width=14, height=5,
-                           relief="raised", borderwidth=2)
-            lbl.pack(side=tk.LEFT, padx=1, pady=2)
-
-    def _render_priority(self, s):
-        """Render priority candidates as card images."""
-        for w in self.priority_frame.winfo_children():
+    def _apply_priority(self, frame, images, photos_out):
+        """Apply pre-rendered priority images."""
+        for w in frame.winfo_children():
             w.destroy()
 
-        if s.get("type") != "PRIORITY_ACTION":
-            tk.Label(self.priority_frame,
+        if images is None:
+            tk.Label(frame,
                      text="(not a priority decision)",
-                     bg=self.priority_frame["bg"],
+                     bg=frame["bg"],
                      fg="#585b70",
                      font=("Consolas", 9)).pack(
                          side=tk.LEFT, padx=10, pady=8)
             return
 
-        candidates = s.get("candidates", [])
-        selected = s.get("selected", [])
-        sel_idx = selected[0] if selected else -1
-
-        for i, cf in enumerate(candidates):
-            info = decode_action(cf)
-            if not info:
-                continue
-
-            is_chosen = (i == sel_idx)
-            is_pass = info.get("is_pass", False)
-
-            if HAS_PIL:
-                pil_img = draw_action_card_image(
-                    info, is_chosen=is_chosen,
-                    is_pass=is_pass)
-                if pil_img:
-                    photo = ImageTk.PhotoImage(pil_img)
-                    self.card_photos.append(photo)
-                    lbl = tk.Label(
-                        self.priority_frame,
-                        image=photo,
-                        bg=self.priority_frame["bg"])
-                    lbl.pack(side=tk.LEFT, padx=1,
-                             pady=2)
-                    continue
-
-            # Text fallback
-            if is_chosen:
-                bg = "#a6e3a1" if not is_pass \
-                    else "#f9e2af"
-                fg = "#1e1e2e"
-            elif is_pass:
-                bg = "#45475a"
-                fg = "#a6adc8"
-            else:
-                bg = "#313244"
-                fg = "#cdd6f4"
-
-            text = info["label"]
-            if is_chosen:
-                text = f">> {text}"
-
-            lbl = tk.Label(
-                self.priority_frame, text=text,
-                bg=bg, fg=fg,
-                font=("Consolas", 9, "bold"
-                      if is_chosen else ""),
-                padx=6, pady=3, relief="raised",
-                borderwidth=1)
-            lbl.pack(side=tk.LEFT, padx=2, pady=4)
+        for img in images:
+            if img and HAS_PIL:
+                photo = ImageTk.PhotoImage(img)
+                photos_out.append(photo)
+                lbl = tk.Label(frame, image=photo,
+                               bg=frame["bg"])
+                lbl.pack(side=tk.LEFT, padx=1, pady=2)
 
     def _predict(self, s):
         self.pred_text.config(state=tk.NORMAL)
@@ -1253,8 +1490,8 @@ class GameStateViewer:
         gf = s["global_features"]
         flat = s["game_state_flat"]
 
-        g = np.zeros(64, dtype=np.float32)
-        gl = min(len(gf), 64)
+        g = np.zeros(GLOBAL_DIM, dtype=np.float32)
+        gl = min(len(gf), GLOBAL_DIM)
         if gl > 0:
             g[:gl] = gf[:gl]
         np.clip(g, -10, 10, out=g)

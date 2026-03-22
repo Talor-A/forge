@@ -8,7 +8,7 @@
 
 ## Abstract
 
-We present a reinforcement learning system for playing Magic: The Gathering (MTG), arguably the most complex widely-played strategy card game in existence. MTG presents unique challenges for AI: a combinatorial action space with over 32,000 unique cards, hidden information, stochastic elements, and deeply nested interactions between game mechanics. Our approach employs a hierarchical architecture with a shared transformer-based game state encoder and specialized decision heads for each major action type (spell casting, combat, card selection). We bootstrap the system through imitation learning on a heuristic AI opponent, then improve via Proximal Policy Optimization (PPO) self-play with curriculum learning. We describe the full system architecture, feature engineering, training pipeline, and preliminary results on the open-source Forge MTG game engine, where our value network achieves 99.6% accuracy in predicting game outcomes from mid-game board states after training on 28,828 decision snapshots from 1,000 games.
+We present a reinforcement learning system for playing Magic: The Gathering (MTG), arguably the most complex widely-played strategy card game in existence. MTG presents unique challenges for AI: a combinatorial action space with over 32,000 unique cards, hidden information, stochastic elements, and deeply nested interactions between game mechanics. Our approach employs a hierarchical architecture with a shared transformer-based game state encoder and specialized decision heads for each major action type (spell casting, combat, card selection). We bootstrap the system through imitation learning on a heuristic AI opponent, then improve via Proximal Policy Optimization (PPO) self-play with curriculum learning. We describe the full system architecture, feature engineering, training pipeline, and preliminary results on the open-source Forge MTG game engine, where our value network learns meaningful board evaluation from ~153,000 decision snapshots from 1,000 games. Decision head training results are pending the current training run.
 
 ---
 
@@ -122,16 +122,15 @@ Each card in any zone is encoded as a 256-dimensional vector:
 | 29-58 | Keyword abilities (30 common: flying, first strike, trample, deathtouch, lifelink, haste, vigilance, reach, menace, hexproof, shroud, indestructible, flash, defender, fear, ward, prowess, wither, infect, protection, shadow, undying, persist, convoke, delve, cascade, equip, enchant, flanking) | Binary flags |
 | 59-68 | Zone (one-hot) | Binary flags |
 | 69-98 | Primary ability ApiType flags (30 ability types: Mana, ManaReflected, Pump, PumpAll, DealDamage, Destroy, Counter, Draw, ChangeZone, Token, Attach, Animate, Protection, Regenerate, Sacrifice, Tap, Untap, Proliferate, Gain/LoseLife, Mill, Discard, Fight, Explore, Scry, Transform, Bounce, Copy, Exile, Surveil, Adapt) | Binary flags |
-| 97-100 | Ability summary (has_activated, has_triggered, has_mana, n_abilities) | Mixed |
-| 101-104 | Primary ability effects (est. damage, cards drawn, life gained, tokens) | Normalized |
-| 105-108 | Targeting (requires_target, targets_creatures, targets_players, n_targets) | Mixed |
-| 109-127 | Reserved | 0 |
-| 128-157 | Secondary ability ApiType flags (same 30 types) | Binary flags |
+| 99-102 | Ability summary (has_activated, has_triggered, has_mana, n_abilities) | Mixed |
+| 103-106 | Primary ability effects (est. damage, cards drawn, life gained, tokens) | Normalized |
+| 107-108 | Targeting (requires_target, targets_creatures) | Binary flags |
+| 109-138 | Secondary ability ApiType flags (same 30 types) | Binary flags |
 | 139-168 | Extended keywords (30 more: horsemanship, intimidate, skulk, annihilator, absorb, bushido, exalted, melee, modular, toxic, afflict, phasing, cumulative_upkeep, echo, fading, vanishing, storm, affinity, changeling, devoid, emerge, improvise, spectacle, revolt, riot, entwine, companion, foretell, disturb, daybound) | Binary flags |
 | 169-173 | Mana production (produces W, U, B, R, G) | Binary flags |
-| 174-177 | Spell speed (instant_speed, has_flash, can_respond, is_modal) | Binary flags |
+| 174-177 | Spell speed (instant_speed, has_flash, is_modal, has_kicker) | Binary flags |
 | 178-181 | Trigger summary (ETB, death, combat, upkeep) | Binary flags |
-| 182-189 | Mana cost breakdown (W, U, B, R, G, colorless, generic, total) | Normalized |
+| 182-189 | Mana cost breakdown (W, U, B, R, G, generic, total, has_X) | Normalized / Binary |
 | 190-251 | Reserved | 0 |
 | 252-255 | Card identity hash (4 bytes, normalized) | [0,1] per byte |
 
@@ -156,7 +155,7 @@ Each zone produces a (max_cards, 256) tensor with a boolean mask indicating whic
 
 The complete model architecture is shown in Figure 1. Data flows left-to-right: raw game state inputs are encoded by the shared transformer encoder into a 512-dimensional state embedding, which then fans out to the value network (critic) and seven specialized decision heads (actors). Heads shown at full opacity are trained; greyed heads are architecturally complete but currently fall through to the heuristic AI.
 
-![Model Architecture](forge-ai-rl/src/main/python/tools/mtg_model_architecture.png)
+![Model Architecture](forge-ai-rl/src/main/python/tools/mtg_model_architecture.svg)
 
 *Figure 1: MTG RL Model Architecture. The shared game state encoder (3.5M parameters) processes 7 input zones through per-zone self-attention and cross-zone attention, producing a 512-dimensional state embedding. This embedding is consumed by the value network (critic, providing PPO advantage baseline) and decision heads (actors). Each head is specialized for its decision type: the priority head uses cross-attention between game state and available spells to select which spell to play; the attack head uses self-attention among creatures for coordinated attack decisions; the block head uses cross-attention between blockers and attackers for assignment. Currently trained heads: Value, Priority, Attack, Block. Untrained heads (Target, Card Select, Mulligan, Binary) fall through to the heuristic AI.*
 
@@ -265,11 +264,11 @@ Games are run headlessly using the Forge engine's `SimulateRLTraining` runner, w
 
 The `PlayerControllerRL` class extends `PlayerControllerAi` and overrides key decision methods to capture training data:
 
-- **`declareAttackers`**: Captures pre-decision creature features (128-dim per creature), delegates to heuristic, reads back which creatures were selected as attackers from the combat object.
+- **`declareAttackers`**: Captures pre-decision creature features (256-dim per creature), delegates to heuristic, reads back which creatures were selected as attackers from the combat object.
 - **`declareBlockers`**: Same pattern — pre-decision capture, heuristic execution, post-decision readback of blocking assignments.
 - **`chooseSpellAbilityToPlay`**: Leverages a modified `AiController.chooseSpellAbilityToPlayFromList` that evaluates ALL candidates through the engine's full `canPlayAndPayFor()` validation (timing, cost, targeting, AI logic) rather than short-circuiting at the first playable spell. The mechanically-legal candidate list (spells passing timing + cost checks) is cached separately from the heuristic-approved list (spells the AI considers worth playing). This gives the RL model visibility into options the heuristic would reject — enabling it to discover unconventional plays.
 
-Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 21,184-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and the eventual game outcome.
+Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 37,216-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and the eventual game outcome.
 
 Data is collected in parallel across 16 threads, achieving 1.3 games/second on a 16-core machine. A batch of 1,000 games produces approximately 2,000 trajectory files with ~153,000 decision records.
 
@@ -280,22 +279,22 @@ We note a critical implementation constraint discovered during development: the 
 The value network is trained first as it provides the foundation for all subsequent training:
 
 - **Task.** Predict game outcome (+1 win, -1 loss) from any mid-game state.
-- **Data.** 28,828 state snapshots from 1,000 games, captured at every attack, block, spell, and main phase.
+- **Data.** ~153,000 decision snapshots from 1,000 games, captured at every attack, block, spell, and main phase.
 - **Loss.** Mean squared error between predicted value and game outcome.
 - **Optimization.** AdamW (lr=3×10⁻⁴, weight decay=10⁻⁴), cosine annealing schedule, gradient clipping at 1.0.
 - **Hardware.** NVIDIA RTX 3080 (10GB VRAM), automatic mixed precision (fp16), batch size 64.
 
-In preliminary experiments with 1,710 end-game-only samples, the value network achieved 99.6% accuracy in predicting the correct winner, with validation loss converging to near zero within 4 epochs. Training on the richer mid-game dataset with 28,828 samples is expected to produce more nuanced evaluation, as mid-game positions are inherently more ambiguous than end-game states.
+An early version achieved 99.6% accuracy, but this was inflated by a feature leakage bug (the "tapped" flag leaked attack decisions before they were made). After fixing the encoding to capture pre-decision state, training was stopped early when overfitting was observed. The value network still learns meaningful board evaluation — accuracy figures will be updated from the current training run.
 
 #### 3.1.3 Decision Head Training
 
 After the value network converges, we freeze the encoder weights and train each decision head independently:
 
-**Attack Head.** Binary cross-entropy loss per creature, trained on 13,918 attack decisions. The model learns to predict which creatures the heuristic AI chose to attack with, given the board state and available attackers.
+**Attack Head.** Binary cross-entropy loss per creature, trained on ~8,600 attack decisions. The model learns to predict which creatures the heuristic AI chose to attack with, given the board state and available attackers.
 
-**Block Head.** Same architecture and loss as the attack head, trained on 6,546 blocking decisions.
+**Block Head.** Cross-entropy per blocker over attacker assignment options, trained on ~2,500 blocking decisions.
 
-**Priority Head.** Cross-entropy loss over available actions (softmax single-select, distinct from combat's binary BCE). Trained on 140,603 priority decisions captured with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority 88.8% of the time even with playable spells available, providing rich timing data — the model learns both *what* to play and *when* to wait.
+**Priority Head.** Cross-entropy loss over available actions (softmax single-select, distinct from combat's binary BCE). Trained on ~126,000 priority decisions captured with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority ~89% of the time even with playable spells available, providing rich timing data — the model learns both *what* to play and *when* to wait.
 
 ### 3.2 Phase 2: Reinforcement Learning via Self-Play
 
@@ -422,18 +421,19 @@ We collected 1,000 games between four constructed decks (Red Aggro, Green Stompy
 
 | Metric | Value |
 |--------|-------|
-| Trajectory files | 1,998 (475 P1 wins, 525 P2 wins) |
-| Total decision records | ~153,000 |
-| Attack decisions | 9,750 |
-| Block decisions | 2,830 |
-| Priority decisions | 140,603 |
-| Priority: play a spell | 15,679 (11.2%) |
-| Priority: pass with options | 124,924 (88.8%) |
+| Trajectory files | ~2,000 |
+| Total decision records | ~137,000 |
+| Attack decisions | 8,576 |
+| Block decisions | 2,478 |
+| Priority decisions | 126,172 |
+| Priority: pass with options | ~89% |
 | Candidate distribution | 1-7 options per decision |
 
 ### 5.2 Value Network Performance
 
-The value network was trained for 100 epochs on ~153,000 mid-game decision snapshots from 1,000 games. An early version achieved 99.6% accuracy, but this was later found to be inflated by a feature leakage bug: the "tapped" flag in creature features leaked the attack decision before it was made, allowing the value network to trivially predict outcomes from the tapped state rather than learning genuine board evaluation. After fixing the feature encoding to capture pre-decision state (creatures untapped before attack declaration), the value network still converges to reasonable accuracy but with more meaningful learned representations.
+The value network was trained on ~153,000 mid-game decision snapshots from 1,000 games using the expanded 256-dim card features. An early version (with 128-dim features) achieved 99.6% accuracy, but this was later found to be inflated by a feature leakage bug: the "tapped" flag in creature features leaked the attack decision before it was made, allowing the value network to trivially predict outcomes from the tapped state rather than learning genuine board evaluation.
+
+After fixing the feature encoding to capture pre-decision state (creatures untapped before attack declaration) and expanding to 256-dim features, the value network was retrained and stopped early when overfitting was observed. Accuracy figures from the current (leak-free, 256-dim) training run are **TBD — training in progress**.
 
 ### 5.3 Decision Head Training (Imitation Learning)
 
@@ -441,23 +441,21 @@ After the value network converges, the encoder weights are frozen and each decis
 
 | Head | Samples | Loss Function | Val Accuracy | Epochs |
 |------|---------|---------------|-------------|--------|
-| Priority | 142,721 | CrossEntropy (softmax) | 95.5% | 10 |
-| Attack | 9,618 | BCE (per-creature sigmoid) | 84.4% | 10 |
-| Block | 2,781 | CE per-blocker (assignment) | 61.0% | 10 |
+| Priority | 126,172 | CrossEntropy (softmax) | TBD | 50 |
+| Attack | 8,576 | BCE (per-creature sigmoid) | TBD | 50 |
+| Block | 2,478 | CE per-blocker (assignment) | TBD | 50 |
 
-**Priority Head (95.5%).** Trained on 142K priority decisions with 64-dim action features per candidate. The high accuracy reflects that the heuristic's spell choices are learnable patterns — the model successfully predicts both *which* spell to play and *when* to pass. The 88.8% pass rate in training data means a naive "always pass" baseline achieves ~89%, so the model's 95.5% demonstrates genuine learning of play decisions beyond the pass baseline.
+*Note: Previous training run (128-dim, leaked features) reported 95.5% priority, 84.4% attack, 61.0% block. These numbers are not comparable to the current run due to the feature leakage fix and 256-dim expansion. Results will be updated when the current training completes.*
 
-**Attack Head (84.4%).** Binary cross-entropy per creature, predicting which creatures the heuristic attacks with. The model learns coordinated attack patterns — e.g., attacking with all creatures when ahead on board, holding back a defender when behind.
-
-**Block Head (61.0%).** The lowest accuracy reflects the hardest problem: blocking is a (blocker, attacker) assignment problem with a "don't block" option per blocker. With only 2,781 samples and a combinatorial action space, this head has the most room for improvement through additional data and training.
+The ~89% pass rate in priority training data means a naive "always pass" baseline achieves ~89%, so the priority head accuracy should be evaluated relative to this baseline.
 
 ### 5.4 PPO Self-Play Training
 
-After imitation learning, we apply Proximal Policy Optimization (PPO) to improve beyond the heuristic baseline. The RL agent plays against the heuristic AI, collecting trajectories with action probabilities for importance sampling, then performs clipped policy gradient updates.
+After imitation learning, we will apply Proximal Policy Optimization (PPO) to improve beyond the heuristic baseline. The RL agent plays against the heuristic AI, collecting trajectories with action probabilities for importance sampling, then performs clipped policy gradient updates.
 
 **Implementation.** We store the old policy's action probabilities (`actionProbabilities`) in each trajectory record during data collection. During PPO updates, the importance sampling ratio `r = π_new / π_old` is computed and clipped to [1-ε, 1+ε] with ε=0.2. Advantages are normalized per batch for stability. The entropy coefficient is set to 0.01 to encourage mild exploration without destabilizing the learned policy.
 
-**Initial results.** Starting from the imitation-learned checkpoint, the RL agent achieves a 30-40% win rate against the heuristic AI across the first rounds of PPO training. This is below the 50% parity target, reflecting several challenges:
+**Results.** PPO training has not yet been conducted with the current 256-dim model. A previous run (128-dim, leaked features) achieved 30-40% win rate against the heuristic AI, below the 50% parity target. Key challenges identified:
 
 1. **Targeting gap.** The RL model selects which spell to play but relies on the heuristic AI for target selection via a `canPlayAndPayForFacade` call. When the heuristic's targeting logic rejects the RL's spell choice, the RL effectively passes, losing tempo.
 
@@ -465,7 +463,7 @@ After imitation learning, we apply Proximal Policy Optimization (PPO) to improve
 
 3. **Value calibration.** The value network frequently outputs extreme values (±0.998) even in ambiguous positions, suggesting overconfidence that may hinder advantage estimation.
 
-PPO training is ongoing with 20 rounds of 100 games each. We expect win rate to stabilize as the policy converges, with improvement contingent on training the remaining decision heads (particularly targeting).
+PPO results with the 256-dim model will be reported after decision head training completes.
 
 ---
 
@@ -509,9 +507,9 @@ Our approach aims to match and eventually exceed this performance through learne
 
 We have presented a hierarchical reinforcement learning system for Magic: The Gathering, implemented as a 11M-parameter model with a shared transformer encoder and 7 specialized decision heads. The system integrates with the Forge game engine (32,300 cards) through a minimal set of modifications: a cached spell evaluation list in `AiController` and a `PlayerControllerRL` that overrides priority, attack, and block decisions.
 
-Our imitation learning pipeline successfully trains three decision heads from heuristic AI trajectories: the priority head (95.5% accuracy on 142K samples) learns spell timing and selection; the attack head (84.4% on 9.6K samples) learns coordinated creature attacks; and the block head (61.0% on 2.8K samples) learns blocker-attacker assignment. The priority head's ability to predict both spell choices and pass timing from mechanically-legal candidate sets — including options the heuristic would reject — provides a foundation for discovering non-obvious plays through PPO self-play.
+Our imitation learning pipeline trains three decision heads from heuristic AI trajectories: the priority head learns spell timing and selection from ~126K samples; the attack head learns coordinated creature attacks from ~8.6K samples; and the block head learns blocker-attacker assignment from ~2.5K samples. Training with the current 256-dim card features (expanded from 128-dim to include ability types, mana production, triggers, and cost breakdown) is in progress — accuracy figures will be reported upon completion. The priority head's ability to predict both spell choices and pass timing from mechanically-legal candidate sets — including options the heuristic would reject — provides a foundation for discovering non-obvious plays through PPO self-play.
 
-PPO training with proper clipped importance sampling produces a 30-40% win rate against the heuristic AI after initial rounds, compared to 50% baseline (heuristic vs heuristic). The gap is attributable to incomplete head coverage (4 of 8 heads untrained) and the targeting gap (RL chooses spells but heuristic handles targeting). We expect this gap to close as additional heads are trained and the PPO policy converges.
+PPO training will follow decision head convergence. A previous run (128-dim features, since invalidated by a feature leakage fix) achieved 30-40% win rate against the heuristic AI, with the gap attributable to incomplete head coverage (4 of 8 heads untrained) and the targeting gap (RL chooses spells but heuristic handles targeting). We expect this gap to narrow as additional heads are trained and the expanded feature set provides richer state information.
 
 The key architectural insights are: (1) decomposing the MTG decision space into specialized heads — each with appropriate loss functions (softmax CE for single-select priority, BCE for multi-select combat, per-blocker CE for assignment) — is more tractable than a monolithic policy; (2) the transformer's set-attention mechanism naturally handles variable-size card collections; and (3) recording the full mechanically-legal candidate set (not just the heuristic's choice) gives the RL model visibility into creative plays the heuristic would never consider.
 
@@ -551,7 +549,7 @@ Ward, C. D. & Cowling, P. I. (2009). Monte Carlo search applied to card selectio
 |-----------|-------|
 | State embedding dimension | 512 |
 | Zone embedding dimension | 128 |
-| Card feature dimension | 128 |
+| Card feature dimension | 256 |
 | Action feature dimension | 64 |
 | Hidden dimension | 256 |
 | Attention heads | 4 |
@@ -573,7 +571,7 @@ Ward, C. D. & Cowling, P. I. (2009). Monte Carlo search applied to card selectio
 
 ## Appendix B: Card Feature Index Reference
 
-Full 128-dimension card feature vector specification is provided in `CardFeatures.java` with inline documentation for each index range.
+Full 256-dimension card feature vector specification is provided in `CardFeatures.java` with inline documentation for each index range.
 
 ## Appendix C: Software Availability
 
