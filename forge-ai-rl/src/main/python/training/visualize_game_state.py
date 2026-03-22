@@ -1913,14 +1913,24 @@ class GameStateViewer:
                     else:
                         lines.append("DIFFERENT")
 
-            elif dt == "TARGET_SELECTION":
+            elif dt == "TARGET_SELECTION" and candidates:
+                n = len(candidates)
+                cf_t = torch.zeros(1, n, CARD_DIM, device=self.device)
+                cm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
+                for j, cf in enumerate(candidates):
+                    cl = min(len(cf), CARD_DIM)
+                    cf_t[0, j, :cl] = torch.tensor(cf[:cl], dtype=torch.float32)
+
+                logits = self.model.target_head(state, cf_t, cm_t)
+                probs = torch.softmax(logits, dim=-1)
+
                 lines.append("=== Target Decision ===")
                 lines.append(f"Context: {s.get('info', '')}")
                 lines.append("")
                 sel_indices = set(s.get("selected", []))
+                model_pick = probs[0].argmax().item()
                 for j, cf in enumerate(candidates):
-                    # Target candidates can be cards (256-dim)
-                    # or players (first few dims)
+                    p = probs[0, j].item()
                     is_player = len(cf) >= 5 and cf[4] > 0.5
                     if is_player:
                         life = int(cf[0] * 50 - 10)
@@ -1932,33 +1942,78 @@ class GameStateViewer:
                             label += f" {info['power']}/{info['toughness']}"
                     sel = j in sel_indices
                     marker = ">>" if sel else "  "
-                    lines.append(f"{marker} [{j}] {label}")
+                    pick = " <MODEL" if j == model_pick else ""
+                    bar = "#" * int(p * 20)
+                    lines.append(f"{marker} {label}{pick}")
+                    lines.append(f"   [{bar:20s}] {p:.0%}")
                 lines.append("")
+                sel_idx = list(sel_indices)[0] if sel_indices else -1
                 lines.append(f"{self._get_choice_label()}: {list(s['selected'])}")
+                lines.append(f"{self._get_compare_label()}: [{model_pick}]")
+                if model_pick == sel_idx:
+                    lines.append("MATCH!")
+                else:
+                    lines.append("DIFFERENT")
 
-            elif dt == "CARD_SELECTION":
+            elif dt == "CARD_SELECTION" and candidates:
+                n = len(candidates)
+                cf_t = torch.zeros(1, n, CARD_DIM, device=self.device)
+                cm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
+                for j, cf in enumerate(candidates):
+                    cl = min(len(cf), CARD_DIM)
+                    cf_t[0, j, :cl] = torch.tensor(cf[:cl], dtype=torch.float32)
+
+                logits = self.model.card_select_head(state, cf_t, cm_t)
+                probs = torch.sigmoid(logits)
+
                 lines.append("=== Card Selection ===")
                 lines.append(f"Context: {s.get('info', '')}")
                 lines.append("")
                 sel_indices = set(s.get("selected", []))
                 for j, cf in enumerate(candidates):
+                    p = probs[0, j].item()
                     info = decode_card(cf)
                     label = info["label"] if info else "?"
                     if info and info["power"] is not None:
                         label += f" {info['power']}/{info['toughness']}"
                     sel = j in sel_indices
                     marker = ">>" if sel else "  "
-                    lines.append(f"{marker} [{j}] {label}")
+                    bar = "#" * int(p * 20)
+                    lines.append(f"{marker} {label}")
+                    lines.append(f"   [{bar:20s}] {p:.0%}")
                 lines.append("")
                 lines.append(f"{self._get_choice_label()}: {list(s['selected'])}")
+                model_sel = [j for j in range(n) if probs[0,j].item() > 0.5]
+                lines.append(f"{self._get_compare_label()}: {model_sel}")
 
-            elif dt == "MULLIGAN":
+            elif dt == "MULLIGAN" and candidates:
+                n = len(candidates)
+                hf_t = torch.zeros(1, n, CARD_DIM, device=self.device)
+                hm_t = torch.ones(1, n, dtype=torch.bool, device=self.device)
+                for j, cf in enumerate(candidates):
+                    cl = min(len(cf), CARD_DIM)
+                    hf_t[0, j, :cl] = torch.tensor(cf[:cl], dtype=torch.float32)
+
+                keep_logit = self.model.mulligan_head(state, hf_t, hm_t)
+                keep_prob = torch.sigmoid(keep_logit).item()
+
+                sel = s.get("selected", [])
+                keep = sel and sel[0] == 1
+                model_keep = keep_prob > 0.5
+
                 lines.append("=== Mulligan Decision ===")
                 lines.append(f"Context: {s.get('info', '')}")
                 lines.append("")
-                sel = s.get("selected", [])
-                keep = sel and sel[0] == 1
-                lines.append(f"Decision: {'KEEP' if keep else 'MULLIGAN'}")
+                bar = "#" * int(keep_prob * 20)
+                lines.append(f"Keep probability:")
+                lines.append(f"   [{bar:20s}] {keep_prob:.0%}")
+                lines.append("")
+                lines.append(f"{self._get_choice_label()}: {'KEEP' if keep else 'MULLIGAN'}")
+                lines.append(f"{self._get_compare_label()}: {'KEEP' if model_keep else 'MULLIGAN'}")
+                if keep == model_keep:
+                    lines.append("MATCH!")
+                else:
+                    lines.append("DIFFERENT")
                 lines.append("")
                 lines.append("Hand:")
                 for j, cf in enumerate(candidates):
@@ -1969,12 +2024,26 @@ class GameStateViewer:
                     lines.append(f"  {label}")
 
             elif dt == "BINARY_CHOICE":
+                logit = self.model.binary_head(state)
+                prob = torch.sigmoid(logit).item()
+
+                sel = s.get("selected", [])
+                yes = sel and sel[0] == 1
+                model_yes = prob > 0.5
+
                 lines.append("=== Binary Decision ===")
                 lines.append(f"Context: {s.get('info', '')}")
                 lines.append("")
-                sel = s.get("selected", [])
-                yes = sel and sel[0] == 1
-                lines.append(f"Decision: {'YES' if yes else 'NO'}")
+                bar = "#" * int(prob * 20)
+                lines.append(f"Yes probability:")
+                lines.append(f"   [{bar:20s}] {prob:.0%}")
+                lines.append("")
+                lines.append(f"{self._get_choice_label()}: {'YES' if yes else 'NO'}")
+                lines.append(f"{self._get_compare_label()}: {'YES' if model_yes else 'NO'}")
+                if yes == model_yes:
+                    lines.append("MATCH!")
+                else:
+                    lines.append("DIFFERENT")
 
             self.pred_text.insert("1.0", "\n".join(lines))
         self.pred_text.config(state=tk.DISABLED)
