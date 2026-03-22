@@ -219,7 +219,7 @@ public class VLobby implements ILobbyView {
             java.util.Arrays.asList("Red Aggro", "Green Stompy", "White Weenie", "Blue Tempo"));
 
     private void filterToRlDecks(FDeckChooser deckChooser) {
-        deckChooser.setSelectedDeckType(DeckType.CONSTRUCTED_DECK);
+        // Build the filtered deck list
         final Iterable<DeckProxy> allDecks = DeckProxy.getAllConstructedDecks();
         final java.util.List<DeckProxy> rlDecks = new java.util.ArrayList<>();
         for (DeckProxy dp : allDecks) {
@@ -227,10 +227,14 @@ public class VLobby implements ILobbyView {
                 rlDecks.add(dp);
             }
         }
-        if (!rlDecks.isEmpty()) {
+        if (rlDecks.isEmpty()) return;
+
+        // Set pool directly and defer to avoid being overwritten by refresh
+        javax.swing.SwingUtilities.invokeLater(() -> {
             deckChooser.getLstDecks().setPool(rlDecks);
+            deckChooser.getLstDecks().setup(forge.itemmanager.ItemManagerConfig.CONSTRUCTED_DECKS);
             deckChooser.getLstDecks().setSelectedIndex(0);
-        }
+        });
     }
 
     @Override
