@@ -132,12 +132,25 @@ def ppo_thread(state, args):
             model = MTGModel().to(device)
         log(state, "Model loaded.")
 
-        for p in model.parameters():
-            p.requires_grad = True
+        # Freeze encoder — protect imitation-trained representations
+        for p in model.state_encoder.parameters():
+            p.requires_grad = False
 
-        optimizer = optim.AdamW(
-            model.parameters(), lr=args.lr,
-            weight_decay=1e-5)
+        # Separate param groups with different learning rates
+        head_params = (
+            list(model.priority_head.parameters()) +
+            list(model.attack_head.parameters()) +
+            list(model.block_head.parameters()) +
+            list(model.target_head.parameters()) +
+            list(model.card_select_head.parameters()) +
+            list(model.mulligan_head.parameters()) +
+            list(model.binary_head.parameters()))
+        value_params = list(model.value_network.parameters())
+
+        optimizer = optim.AdamW([
+            {'params': head_params, 'lr': args.lr * 3},      # heads: 3e-5
+            {'params': value_params, 'lr': args.lr * 10},     # value: 1e-4
+        ], weight_decay=1e-5)
         scaler = (torch.amp.GradScaler('cuda')
                   if use_amp else None)
 

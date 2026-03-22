@@ -62,10 +62,49 @@ DECKS = ['green_stompy.dck', 'white_weenie.dck',
 
 # ── Data loading for PPO ─────────────────────────────
 
+GAE_GAMMA = 0.999  # discount factor
+GAE_LAMBDA = 0.95  # GAE lambda for bias-variance tradeoff
+
+
+def _compute_gae_returns(records, won):
+    """Compute per-decision discounted returns using GAE.
+    Uses intermediate rewards + terminal reward."""
+    n = len(records)
+    if n == 0:
+        return []
+
+    # Extract rewards and value estimates
+    rewards = np.zeros(n, dtype=np.float32)
+    values = np.zeros(n, dtype=np.float32)
+    for i, rec in enumerate(records):
+        rewards[i] = rec.get('intermediateReward', 0.0)
+        values[i] = rec.get('valueEstimate', 0.0)
+
+    # Terminal reward on last step
+    terminal = 1.0 if won else -1.0
+    rewards[-1] += terminal
+
+    # GAE: delta_t = r_t + gamma * V(t+1) - V(t)
+    # A_t = sum_{l=0}^{T-t} (gamma*lambda)^l * delta_l
+    advantages = np.zeros(n, dtype=np.float32)
+    last_gae = 0.0
+    for t in range(n - 1, -1, -1):
+        if t == n - 1:
+            next_value = 0.0  # terminal
+        else:
+            next_value = values[t + 1]
+        delta = rewards[t] + GAE_GAMMA * next_value - values[t]
+        last_gae = delta + GAE_GAMMA * GAE_LAMBDA * last_gae
+        advantages[t] = last_gae
+
+    # Returns = advantages + values (for value network training)
+    returns = advantages + values
+    return list(zip(advantages, returns))
+
+
 def load_ppo_data(traj_dir):
     """Load trajectory data for PPO training.
-    Returns game-level samples with state and outcome.
-    Works with both mid-game and end-game-only recordings."""
+    Computes per-decision GAE advantages from intermediate rewards."""
     path = Path(traj_dir)
     files = sorted(path.glob('traj_*.jsonl'))
 
@@ -82,13 +121,23 @@ def load_ppo_data(traj_dir):
                 continue
             header = json.loads(lines[0])
             won = header.get('won', False)
-            outcome = 1.0 if won else -1.0
 
-            for line in lines[1:]:
-                rec = json.loads(line)
+            # Parse all records first to compute GAE
+            all_records = [json.loads(line) for line in lines[1:]]
+            gae_data = _compute_gae_returns(all_records, won)
+
+            for rec_idx, rec in enumerate(all_records):
                 dt = rec.get('decisionType', '')
                 cand = rec.get('candidateFeatures', [])
                 sel = rec.get('selectedIndices', [])
+
+                # Per-decision advantage and return from GAE
+                if rec_idx < len(gae_data):
+                    advantage, gae_return = gae_data[rec_idx]
+                else:
+                    advantage = 1.0 if won else -1.0
+                    gae_return = advantage
+                outcome = gae_return  # use GAE return for value training
 
                 gf = np.array(
                     rec.get('globalFeatures', []),
@@ -149,6 +198,7 @@ def load_ppo_data(traj_dir):
                         'selected_idx': selected_idx,
                         'n_actions': n,
                         'outcome': outcome,
+                        'advantage': advantage,
                         'old_log_prob': old_lp,
                     })
                     continue
@@ -190,6 +240,7 @@ def load_ppo_data(traj_dir):
                     'action_mask': action_mask,
                     'n_creatures': n,
                     'outcome': outcome,
+                    'advantage': advantage,
                     'old_log_prob': old_lp,
                 }
                 if dt == 'DECLARE_ATTACKERS':
@@ -227,6 +278,7 @@ def compute_ppo_batch(model, head, samples, device,
                       device=device)
     actions = torch.zeros(bs, max_c, device=device)
     outcomes = torch.zeros(bs, device=device)
+    gae_advantages = torch.zeros(bs, device=device)
     old_log_probs = torch.zeros(bs, device=device)
     gf = torch.zeros(bs, GLOBAL_DIM, device=device)
 
@@ -258,6 +310,7 @@ def compute_ppo_batch(model, head, samples, device,
         actions[i, :nc] = torch.from_numpy(
             s['action_mask'])
         outcomes[i] = s['outcome']
+        gae_advantages[i] = s.get('advantage', s['outcome'])
         old_log_probs[i] = s.get('old_log_prob', 0.0)
 
         g, zones, masks_d = parse_game_state(
@@ -304,8 +357,8 @@ def compute_ppo_batch(model, head, samples, device,
             F.logsigmoid(-safe_logits) * (1 - actions))
         log_probs = (log_probs * cm.float()).sum(dim=1)
 
-        # Advantage: outcome - value estimate
-        advantage = (outcomes - value.detach())
+        # Use pre-computed GAE advantages
+        advantage = gae_advantages
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
@@ -331,7 +384,7 @@ def compute_ppo_batch(model, head, samples, device,
         total_loss = (
             policy_loss +
             0.25 * value_loss -
-            0.01 * entropy)
+            0.005 * entropy)
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -413,6 +466,7 @@ def compute_ppo_block_batch(model, samples, device,
             'n_attackers': n_attackers,
             'assignments': assignments,
             'outcome': s['outcome'],
+            'advantage': s.get('advantage', s['outcome']),
             'old_log_prob': s.get('old_log_prob', 0.0),
             'global_features': s['global_features'],
             'game_state_flat': s['game_state_flat'],
@@ -431,6 +485,7 @@ def compute_ppo_block_batch(model, samples, device,
     am_t = torch.zeros(bs, max_a, dtype=torch.bool, device=device)
     assign_t = torch.full((bs, max_b), max_a, dtype=torch.long, device=device)
     outcomes = torch.zeros(bs, device=device)
+    gae_advantages_b = torch.zeros(bs, device=device)
     old_log_probs = torch.zeros(bs, device=device)
 
     gf = torch.zeros(bs, GLOBAL_DIM, device=device)
@@ -455,6 +510,7 @@ def compute_ppo_block_batch(model, samples, device,
         am_t[i, :na] = True
         assign_t[i, :nb] = torch.from_numpy(p['assignments'])
         outcomes[i] = p['outcome']
+        gae_advantages_b[i] = p.get('advantage', p['outcome'])
         old_log_probs[i] = p['old_log_prob']
 
         g, zones, masks_d = parse_game_state(
@@ -492,7 +548,7 @@ def compute_ppo_block_batch(model, samples, device,
             total_log_prob += lp * bm_t[:, b].float()
             total_entropy += dist.entropy() * bm_t[:, b].float()
 
-        advantage = (outcomes - value.detach())
+        advantage = gae_advantages_b
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
@@ -503,7 +559,7 @@ def compute_ppo_block_batch(model, samples, device,
         value_loss = F.mse_loss(value, outcomes)
         entropy = total_entropy.mean()
 
-        total_loss = policy_loss + 0.25 * value_loss - 0.01 * entropy
+        total_loss = policy_loss + 0.5 * value_loss - 0.005 * entropy
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -518,7 +574,7 @@ def compute_ppo_block_batch(model, samples, device,
 
 def compute_ppo_priority_batch(model, head, samples,
                                device, use_amp,
-                               clip_eps=0.2):
+                               clip_eps=0.1):
     """
     Compute PPO loss for a batch of priority decisions.
 
@@ -539,6 +595,7 @@ def compute_ppo_priority_batch(model, head, samples,
     actions = torch.zeros(bs, dtype=torch.long,
                           device=device)
     outcomes = torch.zeros(bs, device=device)
+    gae_advantages = torch.zeros(bs, device=device)
     old_log_probs = torch.zeros(bs, device=device)
     gf = torch.zeros(bs, GLOBAL_DIM, device=device)
 
@@ -569,6 +626,7 @@ def compute_ppo_priority_batch(model, head, samples,
         am[i, :na] = True
         actions[i] = s['selected_idx']
         outcomes[i] = s['outcome']
+        gae_advantages[i] = s.get('advantage', s['outcome'])
         old_log_probs[i] = s.get('old_log_prob', 0.0)
 
         g, zones, masks_d = parse_game_state(
@@ -611,8 +669,8 @@ def compute_ppo_priority_batch(model, head, samples,
             logits=logits)
         log_probs = dist.log_prob(actions)
 
-        # Advantage
-        advantage = (outcomes - value.detach())
+        # Use pre-computed GAE advantages
+        advantage = gae_advantages
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
@@ -624,7 +682,7 @@ def compute_ppo_priority_batch(model, head, samples,
                             1.0 + clip_eps) * advantage
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        # Value loss (encoder detached)
+        # Value loss — train to predict GAE returns
         value_loss = F.mse_loss(value, outcomes)
 
         # Entropy bonus
@@ -633,7 +691,7 @@ def compute_ppo_priority_batch(model, head, samples,
         total_loss = (
             policy_loss +
             0.25 * value_loss -
-            0.01 * entropy)
+            0.005 * entropy)
 
     metrics = {
         'policy_loss': policy_loss.item(),

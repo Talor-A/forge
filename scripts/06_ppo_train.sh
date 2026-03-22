@@ -31,8 +31,8 @@ else
     echo "Starting from imitation-learned model"
 fi
 
-ROUNDS=${2:-20}
-GAMES=${3:-100}
+ROUNDS=${2:-50}
+GAMES=${3:-400}
 
 echo "PPO Training: $ROUNDS rounds, $GAMES games/round"
 echo "Model: $MODEL"
@@ -45,8 +45,8 @@ python training/ppo_ui.py \
     --device cuda \
     --rounds "$ROUNDS" \
     --games-per-round "$GAMES" \
-    --eval-games 50 \
-    --ppo-epochs 1 \
-    --batch-size 32 \
+    --eval-games 100 \
+    --ppo-epochs 4 \
+    --batch-size 64 \
     --lr 1e-5 \
     --port 0
