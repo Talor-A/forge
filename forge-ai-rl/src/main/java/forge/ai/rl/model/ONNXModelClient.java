@@ -54,6 +54,7 @@ public class ONNXModelClient {
             dir,
             System.getProperty("user.home") + "/.forge/res/rl/models",
             "rl_data/models",
+            "forge-ai-rl/models",
         };
 
         String modelDir = null;
