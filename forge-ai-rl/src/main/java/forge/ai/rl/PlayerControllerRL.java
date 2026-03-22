@@ -93,38 +93,46 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                 return null; // model chose pass — null signals "pass priority"
             }
 
-            // RL picked a spell — let heuristic set up targeting, but ignore strategic vetoes
+            // RL picked a spell — let heuristic set up targeting and evaluate
             SpellAbility chosen = candidates.get(idx);
             forge.ai.AiPlayDecision reason = getAi().canPlayForRL(chosen);
 
-            // Strategic vetoes we override — RL model decides strategy
-            boolean isStrategicVeto = (reason == forge.ai.AiPlayDecision.CantPlayAi
-                    || reason == forge.ai.AiPlayDecision.BadEtbEffects
-                    || reason == forge.ai.AiPlayDecision.NeedsToPlayCriteriaNotMet
-                    || reason == forge.ai.AiPlayDecision.CurseEffects
-                    || reason == forge.ai.AiPlayDecision.MissingPhaseRestrictions);
-
-            if (reason == forge.ai.AiPlayDecision.WillPlay || isStrategicVeto) {
-                // Check targets are valid (canPlayForRL preserves/restores them)
-                if (chosen.usesTargeting() && !chosen.isTargetNumberValid()) {
-                    priorityTargetingRejected++;
-                    Logger.info("RL_SPELL_REJECTED: {} ({}) reason=no_valid_targets",
-                            chosen.getHostCard().getName(),
-                            chosen.getApi() != null ? chosen.getApi().name() : "null");
-                    return null;
-                }
-                if (isStrategicVeto) {
-                    Logger.info("RL_OVERRIDE: {} ({}) heuristic_said={}",
-                            chosen.getHostCard().getName(),
-                            chosen.getApi() != null ? chosen.getApi().name() : "null",
-                            reason.name());
-                }
+            if (reason.willingToPlay()) {
+                // Heuristic agrees — targets set, play it
                 priorityModelPlay++;
                 List<SpellAbility> rlResult = new ArrayList<>();
                 rlResult.add(chosen);
                 return rlResult;
             }
-            // Genuine mechanical failure
+
+            // Strategic vetoes only — heuristic set up targets but decided
+            // not to play. We override IF targets are still valid.
+            boolean isStrategicVeto = (reason == forge.ai.AiPlayDecision.CantPlayAi
+                    || reason == forge.ai.AiPlayDecision.BadEtbEffects
+                    || reason == forge.ai.AiPlayDecision.CurseEffects);
+
+            if (isStrategicVeto) {
+                // Only override if spell doesn't need targeting OR targets survived
+                if (!chosen.usesTargeting() || chosen.isTargetNumberValid()) {
+                    Logger.info("RL_OVERRIDE: {} ({}) heuristic_said={}",
+                            chosen.getHostCard().getName(),
+                            chosen.getApi() != null ? chosen.getApi().name() : "null",
+                            reason.name());
+                    priorityModelPlay++;
+                    List<SpellAbility> rlResult = new ArrayList<>();
+                    rlResult.add(chosen);
+                    return rlResult;
+                }
+                // Strategic veto AND targets cleared — can't safely play
+                priorityTargetingRejected++;
+                Logger.info("RL_SPELL_REJECTED: {} ({}) reason={}_no_targets",
+                        chosen.getHostCard().getName(),
+                        chosen.getApi() != null ? chosen.getApi().name() : "null",
+                        reason.name());
+                return null;
+            }
+
+            // Mechanical failure — genuinely can't play
             priorityTargetingRejected++;
             Logger.info("RL_SPELL_REJECTED: {} ({}) reason={}",
                     chosen.getHostCard().getName(),
