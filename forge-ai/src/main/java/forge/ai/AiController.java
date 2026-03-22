@@ -1805,7 +1805,7 @@ public class AiController {
         if (!skipped.isEmpty())
             saList.removeAll(skipped);
 
-        // Cache all mechanically legal spells (timing + cost, no AI opinion).
+        // Cache all mechanically legal spells (timing + cost + valid targets, no AI opinion).
         // This is the broadest set of actions available to the player right now.
         List<SpellAbility> mechanicallyPlayable = Lists.newArrayList();
         for (SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(saList, player)) {
@@ -1813,6 +1813,9 @@ public class AiController {
             sa.setActivatingPlayer(player);
             if (!sa.canCastTiming(player)) continue;
             if (!ComputerUtilCost.canPayCost(sa, player, sa.isTrigger())) continue;
+            // Skip spells that require targets but have none available
+            if (sa.usesTargeting() && sa.getTargetRestrictions() != null
+                    && sa.getTargetRestrictions().getNumCandidates(sa, true) == 0) continue;
             mechanicallyPlayable.add(sa);
         }
         lastPlayableSpellAbilities = mechanicallyPlayable;
