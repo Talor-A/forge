@@ -74,12 +74,15 @@ def load_attack_decisions(data_dir, max_files=None):
     print(f'  Loading attack decisions from {len(files)} '
           f'files...', flush=True)
 
+    from training.chunked_loader import extract_game_id
+
     for i, filepath in enumerate(files):
         if i % 200 == 0:
             print(f'  {i}/{len(files)} files, '
                   f'{len(samples)} attack samples...',
                   end='\r', flush=True)
         try:
+            gid = extract_game_id(filepath)
             with open(filepath, 'r') as f:
                 lines = f.readlines()
             if len(lines) < 2:
@@ -147,6 +150,7 @@ def load_attack_decisions(data_dir, max_files=None):
                     'attack_mask': attack_mask,
                     'n_creatures': n_creatures,
                     'won': 1.0 if won else 0.0,
+                    'game_id': gid,
                 })
 
         except Exception:
@@ -179,10 +183,13 @@ def load_block_decisions(data_dir, max_files=None):
 
     samples = []
 
+    from training.chunked_loader import extract_game_id
+
     print(f'  Loading block decisions...', flush=True)
 
     for filepath in files:
         try:
+            gid = extract_game_id(filepath)
             with open(filepath, 'r') as f:
                 lines = f.readlines()
             if len(lines) < 2:
@@ -240,6 +247,7 @@ def load_block_decisions(data_dir, max_files=None):
                     'block_mask': block_mask,
                     'n_creatures': n,
                     'won': 1.0 if won else 0.0,
+                    'game_id': gid,
                 })
         except Exception:
             pass
@@ -278,13 +286,11 @@ def train_attack_head(model, samples, args, device, use_amp):
         optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
-    # Split
-    random.shuffle(samples)
-    n_val = max(1, int(len(samples) * 0.1))
-    train_samples = samples[:-n_val]
-    val_samples = samples[-n_val:]
+    # Split by game to prevent data leakage
+    from training.chunked_loader import split_by_game
+    train_samples, val_samples = split_by_game(samples)
     print(f'  Train: {len(train_samples)} | '
-          f'Val: {len(val_samples)}', flush=True)
+          f'Val: {len(val_samples)} (by game)', flush=True)
 
     best_val_acc = 0
     save_path = os.path.join(
@@ -503,12 +509,11 @@ def train_block_head(model, samples, args, device, use_amp):
         optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
-    random.shuffle(samples)
-    n_val = max(1, int(len(samples) * 0.1))
-    train_s = samples[:-n_val]
-    val_s = samples[-n_val:]
-    print(f'  Train: {len(train_s)} | Val: {len(val_s)}',
-          flush=True)
+    # Split by game to prevent data leakage
+    from training.chunked_loader import split_by_game
+    train_s, val_s = split_by_game(samples)
+    print(f'  Train: {len(train_s)} | Val: {len(val_s)}'
+          ' (by game)', flush=True)
 
     best_val_acc = 0
     save_path = os.path.join(

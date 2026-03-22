@@ -271,7 +271,11 @@ public class GameStateEncoder {
         features[52] = normalize(myNonlands, 0, 30);
         features[53] = normalize(oppNonlands, 0, 30);
 
-        // [54-63] reserved
+        // [54] Can cast sorcery-speed spells (creatures) right now?
+        // This is the most important timing signal — single bit vs 13-way phase one-hot
+        features[54] = (currentPhase == PhaseType.MAIN1 || currentPhase == PhaseType.MAIN2)
+                && ph.getPlayerTurn() == me ? 1f : 0f;
+        // [55-63] reserved
 
         // [64-69] Color devotion (WUBRGC)
         for (int i = 0; i < 6; i++) {

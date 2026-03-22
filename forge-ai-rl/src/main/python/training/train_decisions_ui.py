@@ -943,10 +943,9 @@ def train_block_head(model, head, samples, args,
     scaler = torch.amp.GradScaler('cuda') if use_amp \
         else None
 
-    random.shuffle(samples)
-    n_val = max(1, int(len(samples) * 0.1))
-    train_s = samples[:-n_val]
-    val_s = samples[-n_val:]
+    # Split by game to prevent data leakage
+    from training.chunked_loader import split_by_game
+    train_s, val_s = split_by_game(samples)
 
     best_acc = 0
     save_path = os.path.join(
@@ -1090,10 +1089,9 @@ def train_priority_head(model, head, samples, args,
     scaler = torch.amp.GradScaler('cuda') if use_amp \
         else None
 
-    random.shuffle(samples)
-    n_val = max(1, int(len(samples) * 0.1))
-    train_s = samples[:-n_val]
-    val_s = samples[-n_val:]
+    # Split by game to prevent data leakage
+    from training.chunked_loader import split_by_game
+    train_s, val_s = split_by_game(samples)
 
     best_acc = 0
     save_path = os.path.join(
@@ -1239,10 +1237,9 @@ def train_head(model, head, head_name, samples, args,
         optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
-    random.shuffle(samples)
-    n_val = max(1, int(len(samples) * 0.1))
-    train_s = samples[:-n_val]
-    val_s = samples[-n_val:]
+    # Split by game to prevent data leakage
+    from training.chunked_loader import split_by_game
+    train_s, val_s = split_by_game(samples)
 
     best_acc = 0
     save_path = os.path.join(

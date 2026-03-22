@@ -9,13 +9,68 @@ Compatible with existing training code that expects lists of dicts.
 """
 
 import json
+import random
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Generator
+from typing import List, Optional, Generator, Tuple
 
 from training.mmap_dataset import (
     parse_game_state, CARD_DIM, GLOBAL_DIM,
     ZONES_CONFIG as _ZONES_CONFIG, GAME_STATE_DIM)
+
+
+def extract_game_id(filepath) -> str:
+    """Extract game ID (timestamp) from trajectory filename.
+
+    Both files from the same game share a timestamp suffix:
+    traj_P1_473_vs_P2_473_P1_473_W_1773863635351.jsonl
+    traj_P1_473_vs_P2_473_P2_473_L_1773863635351.jsonl
+    Both → game_id = '1773863635351'
+    """
+    name = Path(filepath).stem
+    parts = name.split('_')
+    if len(parts) >= 2:
+        return parts[-1]
+    return name
+
+
+def split_by_game(samples: list,
+                  val_fraction: float = 0.1,
+                  seed: int = 42
+                  ) -> Tuple[list, list]:
+    """Split samples into train/val by game_id.
+
+    Each sample must have a 'game_id' key. All samples from the
+    same game go into the same split, preventing data leakage.
+
+    Returns (train_samples, val_samples).
+    """
+    # Group samples by game_id
+    game_groups = {}
+    for s in samples:
+        gid = s.get('game_id', id(s))
+        if gid not in game_groups:
+            game_groups[gid] = []
+        game_groups[gid].append(s)
+
+    game_ids = sorted(game_groups.keys())
+    rng = random.Random(seed)
+    rng.shuffle(game_ids)
+
+    n_val_games = max(1, int(len(game_ids) * val_fraction))
+    val_ids = set(game_ids[:n_val_games])
+
+    train, val = [], []
+    for gid in game_ids:
+        if gid in val_ids:
+            val.extend(game_groups[gid])
+        else:
+            train.extend(game_groups[gid])
+
+    # Shuffle within splits
+    rng.shuffle(train)
+    rng.shuffle(val)
+    return train, val
 
 
 def chunked_file_loader(data_dir: str,
@@ -58,6 +113,7 @@ def load_value_samples(files: List[Path]) -> list:
     samples = []
     for filepath in files:
         try:
+            gid = extract_game_id(filepath)
             with open(filepath, 'r') as f:
                 lines = f.readlines()
             if len(lines) < 2:
@@ -111,6 +167,7 @@ def load_value_samples(files: List[Path]) -> list:
                     'masks': masks,
                     'value_target':
                         1.0 if won else -1.0,
+                    'game_id': gid,
                 })
         except Exception:
             pass
@@ -130,6 +187,7 @@ def load_decision_samples(files: List[Path],
 
     for filepath in files:
         try:
+            gid = extract_game_id(filepath)
             with open(filepath, 'r') as f:
                 lines = f.readlines()
             if len(lines) < 2:
@@ -196,6 +254,7 @@ def load_decision_samples(files: List[Path],
                         'selected_idx': selected_idx,
                         'n_actions': n,
                         'won': 1.0 if won else 0.0,
+                        'game_id': gid,
                     })
 
                 elif dt == 'DECLARE_ATTACKERS':
@@ -222,6 +281,7 @@ def load_decision_samples(files: List[Path],
                         'action_mask': mask,
                         'n_creatures': n,
                         'won': 1.0 if won else 0.0,
+                        'game_id': gid,
                     })
 
                 elif dt == 'DECLARE_BLOCKERS':
@@ -251,6 +311,7 @@ def load_decision_samples(files: List[Path],
                         'action_mask': mask,
                         'n_pairs': n,
                         'won': 1.0 if won else 0.0,
+                        'game_id': gid,
                     })
         except Exception:
             pass

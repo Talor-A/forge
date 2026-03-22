@@ -82,7 +82,7 @@ public class ActionEncoder {
             ApiType.Untap, ApiType.Mill, ApiType.Regenerate, ApiType.Protection,
             ApiType.Fight, ApiType.Charm, ApiType.Scry, ApiType.Explore,
             ApiType.AddOrRemoveCounter, ApiType.ManaReflected, ApiType.Mana,
-            ApiType.ChangeTargets, ApiType.Fog, ApiType.ChangeZone
+            ApiType.ChangeTargets, ApiType.Fog, ApiType.RearrangeTopOfLibrary
         };
         ApiType saType = sa.getApi();
         for (ApiType at : topTypes) {
@@ -96,8 +96,16 @@ public class ActionEncoder {
             features[idx++] = normalizeValue(sa.getTargetRestrictions().getMinTargets(sa.getHostCard(), sa), 0, 5);
             String validTgts = sa.getTargetRestrictions().getValidTgts() != null ?
                     String.join(" ", sa.getTargetRestrictions().getValidTgts()) : "";
-            features[idx++] = validTgts.contains("Creature") ? 1f : 0f;
-            features[idx++] = validTgts.contains("Player") ? 1f : 0f;
+            // Fix for auras: enchant keyword sets target type differently
+            if (source != null && source.isAura()) {
+                boolean enchantCreature = source.hasKeyword("Enchant creature")
+                        || source.hasKeyword("Enchant permanent");
+                features[idx++] = enchantCreature ? 1f : 0f;
+                features[idx++] = source.hasKeyword("Enchant player") ? 1f : 0f;
+            } else {
+                features[idx++] = validTgts.contains("Creature") ? 1f : 0f;
+                features[idx++] = validTgts.contains("Player") ? 1f : 0f;
+            }
         } else {
             idx += 3;
         }

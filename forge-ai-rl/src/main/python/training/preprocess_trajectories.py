@@ -121,6 +121,36 @@ def scan_files(files):
 
 GAMMA = 0.95  # discount factor for value returns
 
+
+def _extract_game_id(filepath):
+    """Extract game ID from trajectory filename.
+    Both files from the same game share a timestamp suffix.
+    e.g. traj_P1_473_vs_P2_473_P1_473_W_1773863635351.jsonl
+         traj_P1_473_vs_P2_473_P2_473_L_1773863635351.jsonl
+    Both have game_id = 1773863635351
+    """
+    name = os.path.basename(str(filepath)).replace('.jsonl', '')
+    # Timestamp is the last underscore-separated field
+    parts = name.split('_')
+    if len(parts) >= 2:
+        return parts[-1]  # the timestamp
+    return name
+
+
+def _build_game_id_map(files):
+    """Build mapping from file index to game_id (integer).
+    Files from the same game get the same game_id."""
+    ts_to_game = {}
+    game_ids = []
+    next_id = 0
+    for filepath in files:
+        ts = _extract_game_id(filepath)
+        if ts not in ts_to_game:
+            ts_to_game[ts] = next_id
+            next_id += 1
+        game_ids.append(ts_to_game[ts])
+    return game_ids
+
 def sanitize(arr):
     """Clip and replace NaN — matches training code."""
     np.clip(arr, -10, 10, out=arr)
@@ -313,6 +343,12 @@ def preprocess(files, output_dir, counts, max_cand):
             os.path.join(bind, 'decision.npy'),
             mode='w+', dtype=np.float32, shape=(n_bin,))
 
+    # Build game-level file IDs (both perspectives of same game get same ID)
+    game_ids = _build_game_id_map(files)
+    n_games = len(set(game_ids))
+    print(f"  Game IDs: {n_games} unique games from {len(files)} files",
+          flush=True)
+
     # Pass 2: Fill arrays
     print(f"\n  Pass 2: Writing {len(files)} files...",
           flush=True)
@@ -392,7 +428,7 @@ def preprocess(files, output_dir, counts, max_cand):
                 gs[si] = flat
                 gf[si] = g
                 outcome[si] = returns[rec_idx]
-                file_id[si] = fi
+                file_id[si] = game_ids[fi]  # game-level ID, not file-level
                 shared_row = si
                 si += 1
 

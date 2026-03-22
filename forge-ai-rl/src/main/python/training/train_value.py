@@ -152,12 +152,15 @@ def load_dataset_with_progress(data_dir, global_dim=96,
     print(f'  Loading {len(files)} trajectory files...',
           flush=True)
 
+    from training.chunked_loader import extract_game_id
+
     for i, filepath in enumerate(files):
         if i % 50 == 0 or i == len(files) - 1:
             progress_bar(i + 1, len(files),
                          prefix='Loading',
                          suffix=f'{len(samples)} samples')
         try:
+            gid = extract_game_id(filepath)
             with open(filepath, 'r') as f:
                 lines = f.readlines()
             if len(lines) < 2:
@@ -219,6 +222,7 @@ def load_dataset_with_progress(data_dir, global_dim=96,
                     'won': 1.0 if won else 0.0,
                     'value_target':
                         1.0 if won else -1.0,
+                    'game_id': gid,
                 })
                 total_decisions += 1
 
@@ -418,14 +422,14 @@ def main():
     if not samples:
         return
 
-    # Split
-    n_val = max(1, int(len(samples) * args.val_split))
-    n_train = len(samples) - n_val
-
-    import random
-    random.shuffle(samples)
-    train_ds = TensorDataset(samples[:n_train])
-    val_ds = TensorDataset(samples[n_train:])
+    # Split by game to prevent data leakage
+    from training.chunked_loader import split_by_game
+    train_samples, val_samples = split_by_game(
+        samples, val_fraction=args.val_split)
+    print(f'  Split: {len(train_samples)} train, '
+          f'{len(val_samples)} val (by game)', flush=True)
+    train_ds = TensorDataset(train_samples)
+    val_ds = TensorDataset(val_samples)
 
     train_loader = torch.utils.data.DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,

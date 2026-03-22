@@ -122,7 +122,12 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                     return null;
                 }
 
-                List<Integer> targetIndices = rl.decideTargets(legalTargets, 1, 1);
+                int minTgts = chosen.getTargetRestrictions().getMinTargets(chosen.getHostCard(), chosen);
+                int maxTgts = chosen.getTargetRestrictions().getMaxTargets(chosen.getHostCard(), chosen);
+                // Clamp to available targets
+                maxTgts = Math.min(maxTgts, legalTargets.size());
+                minTgts = Math.min(minTgts, maxTgts);
+                List<Integer> targetIndices = rl.decideTargets(legalTargets, minTgts, maxTgts);
                 if (targetIndices.isEmpty()) {
                     priorityTargetingRejected++;
                     Logger.info("RL_SPELL_REJECTED: {} ({}) reason=model_returned_no_targets", spellName, apiName);

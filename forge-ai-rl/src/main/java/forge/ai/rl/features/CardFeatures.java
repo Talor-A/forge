@@ -93,7 +93,7 @@ public class CardFeatures {
         ApiType.Untap, ApiType.Mill, ApiType.Regenerate, ApiType.Protection,
         ApiType.Fight, ApiType.Charm, ApiType.Scry, ApiType.Explore,
         ApiType.AddOrRemoveCounter, ApiType.ManaReflected, ApiType.Mana,
-        ApiType.ChangeTargets, ApiType.Fog, ApiType.ChangeZone
+        ApiType.ChangeTargets, ApiType.Fog, ApiType.RearrangeTopOfLibrary
     };
 
     public static float[] encode(Card card) {
