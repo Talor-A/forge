@@ -544,4 +544,28 @@ public class RLController {
         }
         return count;
     }
+
+    /**
+     * Record a decision directly from PlayerControllerRL overrides.
+     * Used for target selection, card selection, mulligan, and binary choices.
+     */
+    public void recordDecisionDirect(DecisionType type,
+                                      int numCandidates,
+                                      List<Integer> selected,
+                                      List<float[]> candidateFeats,
+                                      String info) {
+        if (trajectoryRecorder == null) return;
+        try {
+            GameStateFeatures gs = stateEncoder.encode(game, player);
+            DecisionContext ctx = new DecisionContext(
+                    type, gs,
+                    candidateFeats != null ? candidateFeats : List.of(),
+                    selected.size(), numCandidates, info);
+            DecisionResult res = new DecisionResult(
+                    selected, new float[0], 0f, true);
+            recordDecision(ctx, res);
+        } catch (Exception e) {
+            // Never crash the game due to recording errors
+        }
+    }
 }

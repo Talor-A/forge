@@ -1,18 +1,25 @@
 package forge.ai.rl;
 
 import forge.LobbyPlayer;
+import forge.ai.rl.decisions.DecisionType;
+import forge.ai.rl.features.ActionEncoder;
+import forge.ai.rl.features.CardFeatures;
 import forge.game.*;
 import forge.game.card.*;
 import forge.game.combat.Combat;
 import forge.game.combat.CombatUtil;
 import forge.game.player.*;
 import forge.game.spellability.SpellAbility;
+import forge.game.trigger.WrappedAbility;
 import forge.game.zone.ZoneType;
+import forge.util.collect.FCollectionView;
 
+import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.tinylog.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * PlayerController for the Reinforcement Learning AI.
@@ -251,5 +258,258 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             rl.recordHeuristicBlockAssignment(
                     possibleBlockers, attackers, combat);
         }
+    }
+
+    // ===== SPELL RESOLUTION — capture targeting at the moment of play =====
+
+    @Override
+    public boolean playChosenSpellAbility(SpellAbility sa) {
+        // Capture targeting decisions BEFORE the spell goes on the stack.
+        // At this point sa.getTargets() contains the finalized targets
+        // (set by the handler during canPlayForRL/canPlayAndPayForFacade).
+        if (sa.usesTargeting() && sa.isTargetNumberValid()) {
+            try {
+                recordSpellTargeting(sa);
+            } catch (Exception e) {
+                // Never crash due to recording
+            }
+        }
+        return super.playChosenSpellAbility(sa);
+    }
+
+    private void recordSpellTargeting(SpellAbility sa) {
+        forge.game.spellability.TargetChoices chosen = sa.getTargets();
+        if (chosen.isEmpty()) return;
+
+        // Get the legal candidate list.
+        // getAllCandidates excludes already-chosen targets, so we need to
+        // include the chosen targets in the candidate list.
+        List<GameEntity> candidates = new ArrayList<>();
+
+        // Add all currently legal targets
+        if (sa.getTargetRestrictions() != null) {
+            candidates.addAll(sa.getTargetRestrictions().getAllCandidates(sa, true));
+        }
+
+        // Add the chosen targets back (they were excluded by getAllCandidates)
+        for (Object obj : chosen) {
+            if (obj instanceof GameEntity) {
+                GameEntity ge = (GameEntity) obj;
+                if (!candidates.contains(ge)) {
+                    candidates.add(ge);
+                }
+            }
+        }
+
+        if (candidates.size() <= 1) return; // trivial choice, don't record
+
+        // Encode candidates
+        List<float[]> feats = new ArrayList<>();
+        for (GameEntity entity : candidates) {
+            if (entity instanceof Card) {
+                feats.add(CardFeatures.encode((Card) entity));
+            } else {
+                feats.add(ActionEncoder.encodeTarget(entity));
+            }
+        }
+
+        // Find selected indices
+        List<Integer> selectedIndices = new ArrayList<>();
+        for (Object obj : chosen) {
+            if (obj instanceof GameEntity) {
+                int idx = candidates.indexOf(obj);
+                if (idx >= 0) selectedIndices.add(idx);
+            }
+        }
+
+        if (selectedIndices.isEmpty()) return;
+
+        // Include spell context info
+        String spellName = sa.getHostCard() != null ? sa.getHostCard().getName() : "unknown";
+        String apiName = sa.getApi() != null ? sa.getApi().name() : "unknown";
+
+        rl.recordDecisionDirect(DecisionType.TARGET_SELECTION,
+                candidates.size(), selectedIndices, feats,
+                "spell_target_" + spellName + "_" + apiName);
+    }
+
+    // ===== TARGET SELECTION — record heuristic's interactive targeting choices =====
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T extends GameEntity> T chooseSingleEntityForEffect(
+            FCollectionView<T> optionList,
+            DelayedReveal delayedReveal,
+            SpellAbility sa, String title,
+            boolean isOptional, Player targetedPlayer,
+            Map<String, Object> params) {
+        T result = super.chooseSingleEntityForEffect(
+                optionList, delayedReveal, sa, title,
+                isOptional, targetedPlayer, params);
+        // Record targeting decision (only when there's a meaningful choice)
+        if (result != null && optionList.size() > 1) {
+            List<float[]> feats = new ArrayList<>();
+            for (T entity : optionList) {
+                if (entity instanceof Card) {
+                    feats.add(CardFeatures.encode((Card) entity));
+                } else {
+                    feats.add(ActionEncoder.encodeTarget(entity));
+                }
+            }
+            int idx = 0;
+            for (int i = 0; i < optionList.size(); i++) {
+                if (optionList.get(i) == result) {
+                    idx = i;
+                    break;
+                }
+            }
+            rl.recordDecisionDirect(DecisionType.TARGET_SELECTION,
+                    optionList.size(), List.of(idx), feats,
+                    "target_" + title);
+        }
+        return result;
+    }
+
+    // ===== CARD SELECTION — discard, sacrifice, scry, etc. =====
+
+    @Override
+    public CardCollectionView chooseCardsForEffect(
+            CardCollectionView sourceList, SpellAbility sa,
+            String title, int min, int max,
+            boolean isOptional,
+            Map<String, Object> params) {
+        CardCollectionView result = super.chooseCardsForEffect(
+                sourceList, sa, title, min, max,
+                isOptional, params);
+        if (result != null && !result.isEmpty() && sourceList.size() > 1) {
+            List<float[]> feats = new ArrayList<>();
+            for (Card c : sourceList) {
+                feats.add(CardFeatures.encode(c));
+            }
+            List<Integer> indices = new ArrayList<>();
+            for (Card c : result) {
+                int idx = sourceList.indexOf(c);
+                if (idx >= 0) indices.add(idx);
+            }
+            rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
+                    sourceList.size(), indices, feats,
+                    "cards_for_effect_" + title);
+        }
+        return result;
+    }
+
+    @Override
+    public CardCollectionView choosePermanentsToSacrifice(
+            SpellAbility sa, int min, int max,
+            CardCollectionView validTargets, String msg) {
+        CardCollectionView result = super.choosePermanentsToSacrifice(
+                sa, min, max, validTargets, msg);
+        if (result != null && validTargets.size() > 1) {
+            List<float[]> feats = new ArrayList<>();
+            for (Card c : validTargets) {
+                feats.add(CardFeatures.encode(c));
+            }
+            List<Integer> indices = new ArrayList<>();
+            for (Card c : result) {
+                int idx = validTargets.indexOf(c);
+                if (idx >= 0) indices.add(idx);
+            }
+            rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
+                    validTargets.size(), indices, feats,
+                    "sacrifice");
+        }
+        return result;
+    }
+
+    @Override
+    public CardCollection chooseCardsToDiscardFrom(
+            Player p, SpellAbility sa,
+            CardCollection validCards, int min, int max) {
+        CardCollectionView result = super.chooseCardsToDiscardFrom(
+                p, sa, validCards, min, max);
+        if (result != null && validCards.size() > 1) {
+            List<float[]> feats = new ArrayList<>();
+            for (Card c : validCards) {
+                feats.add(CardFeatures.encode(c));
+            }
+            List<Integer> indices = new ArrayList<>();
+            for (Card c : result) {
+                int idx = validCards.indexOf(c);
+                if (idx >= 0) indices.add(idx);
+            }
+            rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
+                    validCards.size(), indices, feats,
+                    "discard");
+        }
+        return new CardCollection(result);
+    }
+
+    // ===== SCRY =====
+
+    @Override
+    public ImmutablePair<CardCollection, CardCollection>
+            arrangeForScry(CardCollection topN) {
+        List<float[]> feats = new ArrayList<>();
+        for (Card c : topN) {
+            feats.add(CardFeatures.encode(c));
+        }
+
+        ImmutablePair<CardCollection, CardCollection> result =
+                super.arrangeForScry(topN);
+
+        // Record which cards stayed on top
+        List<Integer> topIndices = new ArrayList<>();
+        for (Card c : result.getLeft()) {
+            int idx = topN.indexOf(c);
+            if (idx >= 0) topIndices.add(idx);
+        }
+        rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
+                topN.size(), topIndices, feats,
+                "scry_top_" + result.getLeft().size());
+        return result;
+    }
+
+    // ===== MULLIGAN =====
+
+    @Override
+    public boolean mulliganKeepHand(
+            Player firstPlayer, int cardsToReturn) {
+        List<float[]> handFeats = new ArrayList<>();
+        CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
+        for (Card c : hand) {
+            handFeats.add(CardFeatures.encode(c));
+        }
+
+        boolean keep = super.mulliganKeepHand(firstPlayer, cardsToReturn);
+
+        rl.recordDecisionDirect(DecisionType.MULLIGAN,
+                2, List.of(keep ? 1 : 0), handFeats,
+                "mulligan_" + cardsToReturn + (keep ? "_keep" : "_mull"));
+        return keep;
+    }
+
+    // ===== BINARY DECISIONS =====
+
+    @Override
+    public boolean confirmAction(
+            SpellAbility sa, PlayerActionConfirmMode mode,
+            String message, List<String> options,
+            Card cardToShow,
+            Map<String, Object> params) {
+        boolean result = super.confirmAction(
+                sa, mode, message, options, cardToShow, params);
+        rl.recordDecisionDirect(DecisionType.BINARY_CHOICE,
+                2, List.of(result ? 1 : 0), null,
+                "confirm_" + mode);
+        return result;
+    }
+
+    @Override
+    public boolean confirmTrigger(WrappedAbility wrapper) {
+        boolean result = super.confirmTrigger(wrapper);
+        rl.recordDecisionDirect(DecisionType.BINARY_CHOICE,
+                2, List.of(result ? 1 : 0), null,
+                "trigger");
+        return result;
     }
 }
