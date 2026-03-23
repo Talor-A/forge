@@ -571,9 +571,40 @@ This leaves 34 CardFeatures slots and 32 global slots still reserved for full ca
 
 - **Inferred hand range.** Knowing "opponent has 1G open and a card in hand" should trigger different play from "opponent is tapped out." The current encoding captures mana availability and hand size but not the probability distribution over what the opponent holds. A latent belief state (updated recurrently across decisions within a game) could model this. Complex to implement — requires either a recurrent component or a memory mechanism across decision points within a game. This is the single highest-impact enhancement for playing beyond heuristic level, but also the hardest.
 
-### Alternative RL Approaches (Priority: Medium — investigate if PPO plateaus)
+### PPO Sample Efficiency — Scale Reality Check (2026-03-23)
 
-- **Advantage-weighted regression (AWR) / offline RL.** Instead of PPO's stochastic sampling, collect games under argmax (full-strength play) and weight actions by their GAE advantage. Actions with positive advantage get upweighted, negative get downweighted, without importance sampling ratios. This sidesteps the pass-heavy sampling problem entirely — the model plays at full strength during data collection, so it generates more realistic game trajectories. Worth investigating if PPO's exploration problem (78% creature miss rate under sampling) limits learning.
+PPO in complex game domains requires vastly more data than we're currently generating:
+
+| System | Games for RL improvement | Decisions | Compute |
+|--------|------------------------|-----------|---------|
+| Atari (PPO) | 10-100M timesteps | Millions | Hours on single GPU |
+| AlphaStar (imitation) | Millions of human replays | Billions | 3 days on TPUs |
+| AlphaStar (RL) | Millions of self-play games | Billions | 200 years real-time equiv, 16 TPUs/agent × 12 agents |
+| **Our PPO** | **5,000 games (50×100)** | **~250K decisions** | **~2 hours on RTX 3080** |
+
+We are 3-4 orders of magnitude below typical PPO data requirements for complex games. The oscillation and flat win rate we observe (20-34% across 20 rounds, with catastrophic mulligan collapses) may be normal variance at this scale rather than a fundamentally broken algorithm.
+
+**Key insight:** AlphaStar's imitation-only model (before any RL) already beat 84% of human players — because it trained on millions of games. Our imitation model at 54% win rate from 1,000 games is actually a strong result given the data scale. PPO improving beyond this may require 100-1,000× more games than we've tried.
+
+**Practical options:**
+1. Run PPO much longer (500+ rounds × 400 games = 200K+ games, ~50 hours). Accept that improvement will be gradual.
+2. Switch to offline RL (AWR) which is more sample-efficient for our setup (see below).
+3. Focus on improving the imitation model instead — better features, human data, class-weighted loss — since that's where our wins have come from so far.
+4. Accept 54% argmax win rate as a strong baseline and invest in feature encoding improvements (documented above) rather than RL training compute.
+
+### Alternative RL Approaches (Priority: High — PPO may not be viable at our scale)
+
+- **Advantage-weighted regression (AWR) / offline RL.** The most promising alternative to PPO for our compute budget. Instead of PPO's stochastic sampling (which degrades play quality and requires importance sampling ratios), AWR:
+  1. Collects games under **argmax** — the model plays at full strength (54% win rate, not 28%)
+  2. Computes GAE advantages for each decision in the trajectory
+  3. Updates the policy by **weighting the supervised loss** by the advantage — actions with positive advantage get upweighted, negative get downweighted
+  4. No importance sampling ratios needed, no clipping, no stochastic sampling
+
+  **Why this may work better for us:** The fundamental PPO problem is that stochastic sampling produces games where the model plays badly (passes on creatures 78% of the time), wins rarely (~28%), and therefore generates mostly negative advantage signals. The model can't learn what good play looks like because it almost never plays well during data collection. AWR avoids this entirely — the model plays its best, wins 54% of the time, and learns from both wins and losses at full strength.
+
+  **Implementation:** Replace the GRPC model server's `multinomial` sampling with `argmax`, record action probabilities for all candidates (not just the chosen one), and replace the PPO clipped objective with advantage-weighted cross-entropy: `loss = -advantage * log(π(a|s))` for positive-advantage actions only (or with exponential weighting).
+
+  **Reference:** Peng et al. (2019), "Advantage-Weighted Regression: Simple and Scalable Off-Policy Reinforcement Learning."
 
 - **Preference learning from game pairs.** Instead of per-action credit assignment, compare pairs of games from similar starting positions and learn "this sequence of decisions led to a win, that one to a loss." Avoids the need for per-step advantage estimation. Could use the value network to identify similar game states across different games and construct preference pairs.
 

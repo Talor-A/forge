@@ -623,7 +623,15 @@ These intermediate signals are combined with the terminal reward through GAE, pr
 
 The RL model handles all decisions autonomously during PPO — all 7 heads are active, targeting uses `decideTargets()` directly with legal candidates from `getAllCandidates()`, and multi-target spells (e.g., Searing Blaze) use actual min/max target counts from `TargetRestrictions`. No decisions fall through to the heuristic AI. This ensures the model receives gradient signal for every decision type and learns a coherent end-to-end strategy.
 
-**Results.** PPO training is in progress (50 rounds, 400 games/round, 4 PPO epochs per round).
+#### 5.4.5 Preliminary PPO Results and Sample Efficiency
+
+Initial PPO results (20 rounds × 100 games) show no sustained improvement: collection win rate oscillates between 19-34% with no upward trend, and eval win rate fluctuates between 0-34%. The mulligan head was identified as a source of catastrophic instability — with only ~100 samples per round, PPO updates caused wild policy swings (always-mulligan rounds at 1-3% win rate). Disabling the mulligan head from PPO (keeping the frozen imitation policy) eliminated the collapses.
+
+**Sample efficiency context.** The lack of improvement is consistent with PPO's known data requirements in complex game domains. AlphaStar required millions of self-play games (200 years of real-time gameplay equivalent) on 16 TPUs per agent to improve beyond its imitation baseline. Even Atari games — with far simpler action spaces — require 10-100 million timesteps for strong PPO performance. Our total PPO budget (~5,000 games, ~250K decisions) is 3-4 orders of magnitude below typical requirements.
+
+This does not necessarily mean PPO cannot work at our scale, but it suggests that either (a) dramatically more compute is needed (200K+ games), or (b) a more sample-efficient algorithm is required. Advantage-Weighted Regression (AWR) is a promising alternative: it collects data under argmax play (the model's full 54% win rate, not 28% under sampling), computes GAE advantages per decision, and updates the policy by weighting the supervised loss by advantage magnitude. This eliminates the exploration problem that degrades PPO's data quality — the model learns from its best play rather than its stochastic exploration. See Peng et al. (2019), "Advantage-Weighted Regression: Simple and Scalable Off-Policy Reinforcement Learning."
+
+The imitation-learned model achieves 54% overall win rate under argmax, matching the heuristic AI. This is a strong baseline achieved from only 1,000 training games — the primary gains so far have come from feature engineering and imitation learning rather than RL self-play.
 
 ---
 
@@ -649,7 +657,7 @@ Our approach aims to match and eventually exceed this performance through learne
 
 **Hidden information.** Our current feature encoding does not model uncertainty over the opponent's hidden hand. The model receives what a legal player would see (hand size, not contents), but has no explicit mechanism for probabilistic reasoning about hidden cards.
 
-**Computational scale.** Our single-GPU setup limits model size and training throughput. The progressive scaling plan targets 150M parameters, which approaches the practical limit of a 10GB GPU with mixed precision.
+**Computational scale.** Our single-GPU setup limits both model size and RL training throughput. PPO in complex game domains typically requires millions of games for meaningful policy improvement; our budget of ~5,000 games is 3-4 orders of magnitude below this. The progressive scaling plan targets 150M parameters, which approaches the practical limit of a 10GB GPU with mixed precision. More critically, the sample efficiency gap may require algorithmic changes (e.g., offline RL methods like AWR) rather than simply more compute.
 
 ### 6.3 Future Work
 
