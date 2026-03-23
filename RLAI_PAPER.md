@@ -184,7 +184,7 @@ A three-layer MLP mapping the 512-dimensional state embedding to a scalar in [-1
 - Linear(256, 256) → GELU → LayerNorm → Dropout(0.1)
 - Linear(256, 1) → Tanh
 
-The output represents estimated advantage: +1 indicates certain victory, -1 certain defeat, and 0 an even position.
+The output represents the estimated discounted return: values near +1 indicate near-certain victory (late game, winning position), values near -1 indicate near-certain defeat, and values near 0 indicate either an even position or high uncertainty (typical of early-game states where the outcome depends on many future decisions).
 
 Total parameters: 198,401.
 
@@ -222,31 +222,69 @@ The priority head selects which spell or ability to play from the available opti
 
 Total parameters: 543,233.
 
-#### 2.3.6 Additional Heads
+#### 2.3.6 Target Selection Head
 
-| Head | Purpose | Parameters |
-|------|---------|------------|
-| Target | Pointer network for selecting spell targets | 674,304 |
-| Card Select | General card selection (discard, sacrifice, scry) | 1,513,217 |
-| Mulligan | Opening hand evaluation + London mulligan bottom selection | 2,039,810 |
-| Binary | Yes/no decisions (confirm triggers, replacement effects) | 197,889 |
+The target head selects spell targets from a variable-size candidate set using a pointer attention mechanism with autoregressive multi-target support:
 
-#### 2.3.7 Total Model Size
+1. **Target projection.** Each candidate's 256-dim card features are projected to 256 dimensions.
+2. **Pointer attention.** The 512-dim game state embedding is projected to a query vector; candidate projections serve as keys. Scaled dot-product attention produces logits over candidates, masked to valid targets only.
+3. **Multi-target via GRU.** For spells requiring multiple targets (e.g., Searing Blaze), a GRU cell updates the query context after each selection, conditioning subsequent picks on previous choices. Selected targets are masked out to prevent re-selection.
+
+The head handles both single-target (softmax + argmax) and multi-target (autoregressive sampling) modes based on `minTargets`/`maxTargets` from the spell's `TargetRestrictions`.
+
+Total parameters: 723,456.
+
+#### 2.3.7 Card Selection Head
+
+The card selection head handles general "choose N cards" effects (scry top/bottom, discard, sacrifice). Architecture:
+
+1. **Card projection.** Each candidate's 256-dim features are projected to 256 dimensions.
+2. **Self-attention among candidates.** A 1-layer transformer encoder (4 heads) allows candidates to attend to each other — e.g., when discarding, the relative value of cards in hand matters.
+3. **State-conditioned scoring.** Each candidate's attention-refined embedding is concatenated with the 512-dim game state and scored by a two-layer MLP producing a selection logit per candidate.
+4. **Multi-card selection via GRU.** For effects requiring multiple selections, a GRU cell updates context after each pick, enabling sequential "pick the worst, then the next worst" reasoning.
+
+Total parameters: 1,513,217.
+
+#### 2.3.8 Mulligan Head
+
+The mulligan head makes two related decisions: keep or mulligan the opening hand, and which cards to put on bottom (London mulligan). Architecture:
+
+1. **Hand projection.** Each card's 256-dim features projected to 256 dimensions.
+2. **Hand evaluation via self-attention.** A 2-layer transformer encoder (4 heads) lets cards attend to each other — the value of a card depends on what else is in hand (e.g., a 3-drop is better with a land-heavy hand). Attention-refined card embeddings are mean-pooled to a single hand representation.
+3. **Keep/mulligan classifier.** The pooled hand embedding is concatenated with the 512-dim game state and passed through a two-layer MLP producing a keep logit (positive = keep, negative = mulligan).
+4. **Bottom card scorer.** For London mulligan, each card's attention-refined embedding (concatenated with game state) is scored independently. Cards with the highest bottom scores are put on bottom of library.
+
+Total parameters: 2,039,810.
+
+#### 2.3.9 Binary Decision Head
+
+The binary head handles simple yes/no decisions (trigger confirmations, replacement effects, optional costs). Architecture:
+
+1. **Three-layer MLP.** Maps the 512-dim game state embedding directly to a single logit:
+   - Linear(512, 256) → GELU → LayerNorm → Dropout(0.1)
+   - Linear(256, 256) → GELU → Dropout(0.1)
+   - Linear(256, 1)
+
+No candidate features are needed — binary decisions depend only on the board state. The sigmoid of the output gives the probability of "yes."
+
+Total parameters: 197,889.
+
+#### 2.3.10 Total Model Size
 
 | Component | Parameters |
 |-----------|------------|
 | Game State Encoder | 3,512,064 |
 | Value Network | 198,401 |
 | Priority Head | 543,233 |
-| Target Head | 674,304 |
+| Target Head | 723,456 |
 | Attack Head | 1,908,225 |
 | Block Head | 723,201 |
 | Card Select Head | 1,513,217 |
 | Mulligan Head | 2,039,810 |
 | Binary Head | 197,889 |
-| **Total** | **11,310,344** |
+| **Total** | **11,359,496** |
 
-At ~43MB in fp32, the full model fits comfortably on consumer GPUs (~65MB VRAM for inference). The wider 256-dim card features account for the increase from 11.0M to 11.3M parameters, primarily in the input projection layers of the card-consuming heads.
+At ~43MB in fp32, the full model fits comfortably on consumer GPUs (~51MB VRAM for inference). For deployment, the model is exported as 9 separate ONNX files (one encoder + one per head + value network), totalling ~42MB on disk. Each head receives the 512-dim state embedding from the shared encoder, so inference runs the encoder once per decision and then only the relevant head.
 
 ---
 
@@ -269,7 +307,9 @@ The `PlayerControllerRL` class extends `PlayerControllerAi` and overrides key de
 - **`declareBlockers`**: Same pattern — pre-decision capture, heuristic execution, post-decision readback of blocking assignments.
 - **`chooseSpellAbilityToPlay`**: Leverages a modified `AiController.chooseSpellAbilityToPlayFromList` that evaluates ALL candidates through the engine's full `canPlayAndPayFor()` validation (timing, cost, targeting, AI logic) rather than short-circuiting at the first playable spell. The mechanically-legal candidate list (spells passing timing + cost checks) is cached separately from the heuristic-approved list (spells the AI considers worth playing). This gives the RL model visibility into options the heuristic would reject — enabling it to discover unconventional plays.
 
-Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 37,216-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and the eventual game outcome.
+Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 37,216-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, intermediate reward signals (life/card/board advantage changes), and the terminal outcome.
+
+During preprocessing, discounted returns are computed backward through each trajectory using $G_t = r_t + \gamma G_{t+1}$ with $\gamma = 0.95$, where $r_t$ includes both the intermediate reward shaping signal and the terminal reward (+1/-1) on the final step. This means early-game decisions have value targets closer to 0 (high uncertainty about outcome), while late-game decisions have targets closer to ±1 (outcome nearly determined). The value network learns to predict these discounted returns rather than flat binary outcomes, giving it a calibrated sense of game-state certainty.
 
 Data is collected in parallel across 16 threads, achieving 1.3 games/second on a 16-core machine. A batch of 1,000 games produces approximately 2,000 trajectory files with ~153,000 decision records.
 
@@ -279,23 +319,31 @@ We note a critical implementation constraint discovered during development: the 
 
 The value network is trained first as it provides the foundation for all subsequent training:
 
-- **Task.** Predict game outcome (+1 win, -1 loss) from any mid-game state.
-- **Data.** ~153,000 decision snapshots from 1,000 games, captured at every attack, block, spell, and main phase.
-- **Loss.** Mean squared error between predicted value and game outcome.
+- **Task.** Predict discounted return $G_t$ from any mid-game state, where $G_t = r_t + \gamma G_{t+1}$ ($\gamma = 0.95$). Early-game targets are near 0 (uncertain outcome); late-game targets approach ±1 (determined outcome). This gives the value network calibrated confidence — it learns that a turn-2 board state is inherently uncertain, while a turn-12 state with one player at 2 life is nearly decided.
+- **Data.** ~127,000 decision snapshots from 1,000 games, captured at every decision point across all 7 types.
+- **Loss.** Mean squared error between predicted value and discounted return.
 - **Optimization.** AdamW (lr=3×10⁻⁴, weight decay=10⁻⁴), cosine annealing schedule, gradient clipping at 1.0.
-- **Hardware.** NVIDIA RTX 3080 (10GB VRAM), automatic mixed precision (fp16), batch size 64.
+- **Hardware.** NVIDIA RTX 3080 (10GB VRAM), automatic mixed precision (fp16), batch size 256.
 
-An early version achieved 99.6% accuracy, but this was inflated by a feature leakage bug (the "tapped" flag leaked attack decisions before they were made). After fixing the encoding to capture pre-decision state, training was stopped early when overfitting was observed. The value network still learns meaningful board evaluation — accuracy figures will be updated from the current training run.
+The feature encoding captures pre-decision state (creatures are recorded as untapped before attack declaration) to prevent information leakage. Train/val splits use game-level grouping so both player perspectives from the same game stay in the same split.
 
 #### 3.1.3 Decision Head Training
 
-After the value network converges, we freeze the encoder weights and train each decision head independently:
+After the value network converges, we freeze the encoder weights and train each decision head independently, chaining checkpoints so each head inherits all previously trained weights:
 
-**Attack Head.** Binary cross-entropy loss per creature, trained on ~8,600 attack decisions. The model learns to predict which creatures the heuristic AI chose to attack with, given the board state and available attackers.
+**Priority Head.** Cross-entropy loss over available actions (softmax single-select). Trained on ~104,500 priority decisions with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority ~85% of the time even with playable spells available, providing rich timing data — the model learns both *what* to play and *when* to wait.
 
-**Block Head.** Cross-entropy per blocker over attacker assignment options, trained on ~2,500 blocking decisions.
+**Attack Head.** Binary cross-entropy loss per creature, trained on ~9,500 attack decisions. The model learns to predict which creatures the heuristic AI chose to attack with, given the board state and available attackers.
 
-**Priority Head.** Cross-entropy loss over available actions (softmax single-select, distinct from combat's binary BCE). Trained on ~126,000 priority decisions captured with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority ~89% of the time even with playable spells available, providing rich timing data — the model learns both *what* to play and *when* to wait.
+**Target Head.** Cross-entropy loss over candidate targets (pointer attention), trained on ~5,000 target decisions with 256-dim card features per candidate.
+
+**Card Select Head.** Binary cross-entropy per candidate, trained on ~650 card selection decisions (scry top/bottom).
+
+**Block Head.** Cross-entropy per blocker over attacker assignment options, trained on ~2,800 blocking decisions.
+
+**Mulligan Head.** Binary cross-entropy (keep/mulligan), trained on ~2,600 mulligan decisions with hand card features.
+
+**Binary Head.** Binary cross-entropy (yes/no), trained on ~2,000 trigger confirmation decisions.
 
 ### 3.2 Phase 2: Reinforcement Learning via Self-Play
 
@@ -313,13 +361,13 @@ The PPO clipped objective is:
 
 $$L^{CLIP}(\theta) = \mathbb{E}_t\left[\min\left(r_t(\theta)\hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\right)\right]$$
 
-with probability ratio $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$ and clipping parameter $\epsilon = 0.2$.
+with probability ratio $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$ and clipping parameter $\epsilon = 0.1$.
 
 The total loss combines policy, value, and entropy terms:
 
 $$L = L^{CLIP} - c_1 L^{VF} + c_2 H[\pi_\theta]$$
 
-with $c_1 = 0.5$ (value loss coefficient) and $c_2 = 0.01$ (entropy bonus to encourage exploration).
+with $c_1 = 0.5$ (value loss coefficient) and $c_2 = 0.005$ (entropy bonus to encourage exploration).
 
 #### 3.2.2 Reward Shaping
 
@@ -439,11 +487,9 @@ We collected 1,000 games between four constructed decks (Red Aggro, Green Stompy
 
 ### 5.2 Value Network Performance
 
-The value network is trained on ~127,000 mid-game decision snapshots from 1,000 games using 256-dim card features.
+The value network is trained on ~127,000 mid-game decision snapshots from 1,000 games using 256-dim card features. The value target for each decision is a discounted return ($\gamma = 0.95$) computed backward through the trajectory, incorporating intermediate reward signals (life/card/board advantage changes) and the terminal outcome. This gives early-game states targets near 0 (uncertain outcome) and late-game states targets near ±1.
 
-An early version (with 128-dim features) achieved 99.6% accuracy, but this was inflated by a feature leakage bug: the "tapped" flag in creature features leaked the attack decision before it was made. After fixing the encoding to capture pre-decision state, the value network learns genuine board evaluation.
-
-A critical data quality fix in v3 (2026-03-23) addressed train/val leakage: both P1 and P2 trajectory files from the same game now receive the same `game_id` and are kept in the same split, preventing the model from seeing both perspectives of a game across train and val sets.
+The feature encoding captures pre-decision state to prevent information leakage (e.g., creatures are recorded as untapped before attack declaration). Train/val splits use game-level grouping so both P1 and P2 perspectives from the same game stay in the same split, preventing the model from seeing both sides of a game across train and val sets.
 
 ### 5.3 Decision Head Training (Imitation Learning)
 
@@ -467,23 +513,11 @@ Train/val splits use game-level grouping (both P1/P2 perspectives in the same sp
 
 After imitation learning, we will apply Proximal Policy Optimization (PPO) to improve beyond the heuristic baseline. The RL agent plays against the heuristic AI, collecting trajectories with action probabilities for importance sampling, then performs clipped policy gradient updates.
 
-**Implementation.** We store the old policy's action probabilities (`actionProbabilities`) in each trajectory record during data collection. During PPO updates, the importance sampling ratio `r = π_new / π_old` is computed and clipped to [1-ε, 1+ε] with ε=0.2. Advantages are normalized per batch for stability. The entropy coefficient is set to 0.01 to encourage mild exploration without destabilizing the learned policy.
+**Implementation.** We store the old policy's action probabilities (`actionProbabilities`) in each trajectory record during data collection. During PPO updates, the importance sampling ratio $r = \pi_{new} / \pi_{old}$ is computed and clipped to $[1-\epsilon, 1+\epsilon]$ with $\epsilon = 0.1$. Advantages are computed via GAE ($\gamma = 0.999$, $\lambda = 0.95$) using per-decision intermediate rewards from the reward shaper. The encoder is frozen during PPO to prevent representation drift; heads use lr=3e-5 and the value network uses lr=1e-4. The entropy coefficient is set to 0.005.
 
-**Results.** A previous PPO run (pre-bugfix) achieved 14%→34% eval win rate in 5 rounds before degrading. Several critical bugs were identified and fixed:
+The RL model handles all decisions autonomously during PPO self-play — all 7 heads are active, targeting uses `decideTargets()` directly with legal candidates, and multi-target spells use actual min/max counts from `TargetRestrictions`. No decisions fall through to the heuristic AI.
 
-1. **~~Targeting gap~~** — FIXED. The RL model now uses `decideTargets()` directly with legal candidates from `getAllCandidates()`, bypassing the heuristic's strategic veto.
-
-2. **~~Partial head coverage~~** — FIXED. All 7 decision heads are now trained and active. No decisions fall through to the heuristic during RL play.
-
-3. **~~Block head routed through attack head~~** — FIXED. Block PPO data was being trained through `model.attack_head` instead of `model.block_head`.
-
-4. **~~RewardShaper never initialized~~** — FIXED. `initialized` was never set to `true`, so intermediate rewards always returned 0.
-
-5. **~~Encoder corrupted by PPO~~** — FIXED. Encoder is now frozen during PPO with separate learning rates (heads 3e-5, value 1e-4).
-
-6. **~~Multi-target spells failed~~** — FIXED. Searing Blaze and similar spells now use actual min/max target counts from `TargetRestrictions`.
-
-PPO retraining with all fixes applied is pending after decision head retraining on v3 data.
+**Results.** PPO training is pending after imitation learning retraining on the current data.
 
 ---
 
