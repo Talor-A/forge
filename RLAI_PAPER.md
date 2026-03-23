@@ -623,7 +623,7 @@ The RL model handles all decisions autonomously during PPO — all 7 heads are a
 
 ### 6.1 Comparison to Existing Approaches
 
-The Forge heuristic AI uses hand-coded evaluation functions with card-specific logic, maintained by a community of contributors over 18+ years. Its `ComputerUtil` classes span over 300,000 lines of Java code encoding MTG-specific heuristics for every card interaction.
+The Forge heuristic AI uses hand-coded evaluation functions with general-purpose heuristics for combat, spell evaluation, and resource management, maintained by a community of contributors over 18+ years. The `forge-ai` module comprises ~57,000 lines of Java code encoding MTG strategy through rules like "don't attack into larger blockers," "remove the biggest threat," and "play creatures on curve" — general principles that apply across most cards rather than per-card special cases, though some edge-case handling exists for specific mechanics.
 
 Our approach aims to match and eventually exceed this performance through learned representations rather than hand-coded rules. The key advantages of the learned approach are:
 
