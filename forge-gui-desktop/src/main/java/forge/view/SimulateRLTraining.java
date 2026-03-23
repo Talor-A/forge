@@ -75,6 +75,7 @@ public class SimulateRLTraining {
         String outputDir = params.containsKey("o")
                 ? params.get("o").get(0) : "rl_data/trajectories";
         boolean quiet = params.containsKey("q");
+        boolean useOnnx = params.containsKey("onnx");
         int threads = params.containsKey("t")
                 ? Integer.parseInt(params.get("t").get(0))
                 : Runtime.getRuntime().availableProcessors();
@@ -128,7 +129,7 @@ public class SimulateRLTraining {
                 runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads);
                 break;
             case "evaluate":
-                runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort, threads);
+                runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort, threads, useOnnx);
                 break;
             case "selfplay":
                 runSelfPlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort);
@@ -257,8 +258,10 @@ public class SimulateRLTraining {
      */
     private static void runEvaluationMode(List<Deck> decks, int nGames, int timeout,
                                             String outputDir, boolean quiet,
-                                            String grpcHost, int grpcPort, int threads) {
-        System.out.println("=== RL Evaluation Mode (" + threads + " threads) ===");
+                                            String grpcHost, int grpcPort, int threads,
+                                            boolean useOnnx) {
+        System.out.println("=== RL Evaluation Mode (" + threads + " threads"
+                + (useOnnx ? ", ONNX" : ", GRPC") + ") ===");
 
         AtomicInteger rlWins = new AtomicInteger(0);
         AtomicInteger heuristicWins = new AtomicInteger(0);
@@ -284,9 +287,13 @@ public class SimulateRLTraining {
             futures.add(executor.submit(() -> {
                 // Each thread gets its own RLConfig to avoid contention
                 RLConfig rlConfig = new RLConfig();
-                rlConfig.setMode(RLModelMode.GRPC);
-                rlConfig.setGrpcHost(grpcHost);
-                rlConfig.setGrpcPort(grpcPort);
+                if (useOnnx) {
+                    rlConfig.setMode(RLModelMode.ONNX);
+                } else {
+                    rlConfig.setMode(RLModelMode.GRPC);
+                    rlConfig.setGrpcHost(grpcHost);
+                    rlConfig.setGrpcPort(grpcPort);
+                }
                 rlConfig.setRecordTrajectories(true);
                 rlConfig.setTrajectoryOutputDir(outputDir);
 
