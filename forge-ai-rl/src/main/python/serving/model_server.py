@@ -38,7 +38,8 @@ class ModelServer:
     _InferItem = namedtuple('_InferItem', ['request', 'event', 'result'])
 
     def __init__(self, model: MTGModel, host: str = 'localhost', port: int = 50051,
-                 device: str = 'cpu', batch_wait_ms: float = 5.0, max_batch: int = 32):
+                 device: str = 'cpu', batch_wait_ms: float = 5.0, max_batch: int = 32,
+                 use_argmax: bool = False):
         self.model = model
         self.model.eval()
         self.host = host
@@ -48,6 +49,7 @@ class ModelServer:
         self.request_count = 0
         self.batch_wait_ms = batch_wait_ms
         self.max_batch = max_batch
+        self.use_argmax = use_argmax
         # Queue for batched inference
         self._infer_queue = queue.Queue()
         # Limit concurrent client threads to prevent OOM
@@ -272,7 +274,7 @@ class ModelServer:
 
         logits = self.model.priority_head(state, action_features, action_mask)
         probs = torch.softmax(logits, dim=-1)
-        action = torch.multinomial(probs, 1).item()
+        action = probs.argmax(dim=-1).item() if self.use_argmax else torch.multinomial(probs, 1).item()
         value = self.model.get_value(state).item()
 
         return {
@@ -295,7 +297,7 @@ class ModelServer:
 
         max_select = request.get('maxSelections', 1)
         if max_select <= 1:
-            action = torch.multinomial(probs, 1).item()
+            action = probs.argmax(dim=-1).item() if self.use_argmax else torch.multinomial(probs, 1).item()
             selected = [action]
         else:
             # Select top-k by probability
@@ -484,7 +486,7 @@ class ModelServer:
         if num_select <= 0:
             selected = []
         elif num_select == 1:
-            action = torch.multinomial(probs, 1).item()
+            action = probs.argmax(dim=-1).item() if self.use_argmax else torch.multinomial(probs, 1).item()
             selected = [action]
         else:
             _, indices = probs.topk(min(num_select, len(candidates)), dim=-1)

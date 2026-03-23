@@ -1071,9 +1071,11 @@ def run_games(n_games, traj_dir, mode='evaluate',
 
 # ── Model server management ──────────────────────────
 
-def start_model_server(model, device, port=50051):
+def start_model_server(model, device, port=50051,
+                       use_argmax=False):
     """Start model server in background thread."""
-    server = ModelServer(model, port=port, device=device)
+    server = ModelServer(model, port=port, device=device,
+                         use_argmax=use_argmax)
     thread = threading.Thread(
         target=server.start, daemon=True)
     thread.start()
