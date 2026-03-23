@@ -167,10 +167,14 @@ public class SimulateRLTraining {
         System.out.printf("  ─────┼────────────┼─────────┼─────┼─────┼─────┼─────┼"
                 + "───────┼────────┼──────%n");
 
+        java.util.Random deckRng = new java.util.Random();
         for (int i = 0; i < nGames; i++) {
             final int gameIdx = i;
-            final Deck deck1 = decks.get(i % decks.size());
-            final Deck deck2 = decks.get((i + 1) % decks.size());
+            // Randomize deck pairing — any deck vs any deck, including mirrors
+            final int d1Idx = deckRng.nextInt(decks.size());
+            int d2Idx = deckRng.nextInt(decks.size());
+            final Deck deck1 = decks.get(d1Idx);
+            final Deck deck2 = decks.get(d2Idx);
             final boolean p1First = (i % 2 == 0);
 
             futures.add(executor.submit(() -> {
@@ -269,10 +273,12 @@ public class SimulateRLTraining {
                 java.util.concurrent.Executors.newFixedThreadPool(threads);
         List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
 
+        java.util.Random evalDeckRng = new java.util.Random();
         for (int i = 0; i < nGames; i++) {
             final int gameIdx = i;
-            final Deck rlDeck = decks.get(i % decks.size());
-            final Deck aiDeck = decks.get((i + 1) % decks.size());
+            // Randomize deck pairing for eval too
+            final Deck rlDeck = decks.get(evalDeckRng.nextInt(decks.size()));
+            final Deck aiDeck = decks.get(evalDeckRng.nextInt(decks.size()));
             final boolean rlFirst = (i % 2 == 0);
 
             futures.add(executor.submit(() -> {
@@ -369,9 +375,10 @@ public class SimulateRLTraining {
         int serverErrors = 0;
         final int MAX_SERVER_ERRORS = 3;
 
+        java.util.Random spDeckRng = new java.util.Random();
         for (int i = 0; i < nGames; i++) {
-            Deck deck1 = decks.get(i % decks.size());
-            Deck deck2 = decks.get((i + 1) % decks.size());
+            Deck deck1 = decks.get(spDeckRng.nextInt(decks.size()));
+            Deck deck2 = decks.get(spDeckRng.nextInt(decks.size()));
 
             try {
                 GameResult result = runSingleGame(deck1, deck2, config, config,
