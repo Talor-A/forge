@@ -99,7 +99,10 @@ The global feature vector captures non-card-specific game state:
 | 51 | Opponent lands untapped | [0,1] over [0, 15] |
 | 52-53 | Nonland permanent counts (both players) | [0,1] over [0, 30] |
 | 54 | Is sorcery speed (main phase + active player) | {0, 1} |
-| 55-63 | Reserved | 0 |
+| 55 | Opponent untapped creatures | [0,1] over [0, 20] |
+| 56 | Reserved | 0 |
+| 57 | Opponent max creature power | [0,1] over [-5, 20] |
+| 58-63 | Reserved | 0 |
 | 64-69 | Color devotion (WUBRGC) | [0,1] over [0, 15] |
 | 70 | Castable cards in hand | [0,1] over [0, 10] |
 | 72-75 | Enchantment/artifact counts (both players) | [0,1] over [0, 10] |
@@ -132,10 +135,21 @@ Each card in any zone is encoded as a 256-dimensional vector:
 | 174-177 | Spell speed (instant_speed, has_flash, is_modal, has_kicker) | Binary flags |
 | 178-181 | Trigger summary (ETB, death, combat, upkeep) | Binary flags |
 | 182-189 | Mana cost breakdown (W, U, B, R, G, generic, total, has_X) | Normalized / Binary |
-| 190-251 | Reserved | 0 |
+| 190-191 | Ownership (is_mine, is_opponents) | Binary flags |
+| 192-193 | ETB trigger (ApiType code, effect magnitude) | Encoded / Normalized |
+| 194-195 | Death trigger (ApiType code, effect magnitude) | Encoded / Normalized |
+| 196-197 | Combat trigger (ApiType code, effect magnitude) | Encoded / Normalized |
+| 198-199 | Other trigger (ApiType code, effect magnitude) | Encoded / Normalized |
+| 200-201 | Pump magnitude (est. power boost, est. toughness boost) | Normalized |
+| 202 | Is attached to another card | Binary flag |
+| 203-204 | Host card power / toughness | Normalized |
+| 205 | Host is creature | Binary flag |
+| 206 | Host is mine | Binary flag |
+| 207 | Host CMC | Normalized |
+| 208-251 | Reserved | 0 |
 | 252-255 | Card identity hash (4 bytes, normalized) | [0,1] per byte |
 
-The expanded encoding allows the model to see what cards *do* — their ability types, effects, mana production, and triggers — rather than just their static characteristics. The card identity hash enables learned embeddings for specific cards.
+The expanded encoding allows the model to see what cards *do* — their ability types, effects, mana production, and triggers — rather than just their static characteristics. The ownership flags (190-191) are critical: they allow the model to distinguish friendly from enemy cards when selecting targets, blocking, or choosing cards for effects. Without these flags, the model could not tell its own creatures from the opponent's in a mixed candidate list — leading to errors like using removal spells on friendly creatures. Trigger effect encoding (192-199) goes beyond binary presence flags to capture what each trigger actually does (DealDamage vs Draw vs Pump) and how much. Aura/equipment host encoding (202-207) enables reasoning about attachment effects. The card identity hash enables learned embeddings for specific cards.
 
 #### 2.2.3 Zone Encoding
 
@@ -629,9 +643,30 @@ Initial PPO results (20 rounds × 100 games) show no sustained improvement: coll
 
 **Sample efficiency context.** The lack of improvement is consistent with PPO's known data requirements in complex game domains. AlphaStar required millions of self-play games (200 years of real-time gameplay equivalent) on 16 TPUs per agent to improve beyond its imitation baseline. Even Atari games — with far simpler action spaces — require 10-100 million timesteps for strong PPO performance. Our total PPO budget (~5,000 games, ~250K decisions) is 3-4 orders of magnitude below typical requirements.
 
-This does not necessarily mean PPO cannot work at our scale, but it suggests that either (a) dramatically more compute is needed (200K+ games), or (b) a more sample-efficient algorithm is required. Advantage-Weighted Regression (AWR) is a promising alternative: it collects data under argmax play (the model's full 54% win rate, not 28% under sampling), computes GAE advantages per decision, and updates the policy by weighting the supervised loss by advantage magnitude. This eliminates the exploration problem that degrades PPO's data quality — the model learns from its best play rather than its stochastic exploration. See Peng et al. (2019), "Advantage-Weighted Regression: Simple and Scalable Off-Policy Reinforcement Learning."
+This does not necessarily mean PPO cannot work at our scale, but it suggests that either (a) dramatically more compute is needed (200K+ games), or (b) a more sample-efficient algorithm is required. Advantage-Weighted Regression (AWR) is a promising alternative: it collects data under argmax play, computes GAE advantages per decision, and updates the policy by weighting the supervised loss by advantage magnitude. This eliminates the exploration problem that degrades PPO's data quality — the model learns from its best play rather than its stochastic exploration. See Peng et al. (2019), "Advantage-Weighted Regression: Simple and Scalable Off-Policy Reinforcement Learning."
 
-The imitation-learned model achieves 54% overall win rate under argmax, matching the heuristic AI. This is a strong baseline achieved from only 1,000 training games — the primary gains so far have come from feature engineering and imitation learning rather than RL self-play.
+#### 5.4.6 Evaluation Methodology Correction
+
+A critical evaluation error was discovered: the `-onnx` flag was silently ignored in headless evaluate mode, which always used GRPC. When no GRPC server was running, the RL player fell back to the heuristic AI (`super.chooseSpellAbilityToPlay()`), producing win rates of ~50% that appeared to be RL model performance. The reported 54% and 43% "ONNX argmax" results were actually heuristic-vs-heuristic.
+
+After implementing proper `-onnx` support in evaluate mode, the true RL model win rate was confirmed at ~25% under both ONNX argmax and GRPC argmax — consistent with each other and significantly below heuristic parity. PPO's improvement from 25% to ~30% under stochastic sampling represents genuine learning from a lower baseline than previously believed.
+
+#### 5.4.7 Critical Feature Encoding Fix
+
+Analysis of the 25% model revealed a fundamental encoding gap: **the model could not distinguish friendly from enemy cards when selecting targets.** The 256-dim card feature vector encoded zone type (battlefield, hand, etc.) but not ownership — a creature on our battlefield and a creature on the opponent's battlefield produced identical features. This caused the model to sometimes target its own creatures with removal spells (e.g., Path to Exile on a friendly creature).
+
+Additionally, the data collection used fixed circular deck pairings (only 4 of 16 possible matchups, no mirrors), causing the model to learn matchup-specific strategies that didn't generalize. White Weenie learned it could win against Blue Tempo without playing creatures (because Blue was extremely weak at 4% win rate in the fixed pairing), masking the creature deployment problem.
+
+Six encoding fixes were implemented using reserved feature slots (no architecture change):
+
+1. **Ownership flags** (CardFeatures [190-191]): `is_mine` / `is_opponents` at every card encoding call site (42 fixes across 8 files)
+2. **Trigger effect details** (CardFeatures [192-199]): ETB/death/combat trigger ApiType and magnitude instead of binary presence flags
+3. **Pump spell magnitude** (CardFeatures [200-201]): power/toughness boost amounts for Pump abilities
+4. **Aura/equipment host info** (CardFeatures [202-207]): attached card's host creature stats
+5. **Opponent untapped creatures** (Global [55]) and max creature power (Global [57]): combat threat assessment
+6. **Target polarity** (ActionEncoder [56-59]): whether spells target own vs opponent creatures/players
+
+Combined with randomized deck pairings (all 16 matchups including mirrors), these fixes address the root causes of the model's poor performance. Retraining from scratch on new data with these features is in progress.
 
 ---
 
