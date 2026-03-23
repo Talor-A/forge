@@ -420,42 +420,10 @@ def ppo_thread(state, args):
                         total_ent += metrics['entropy']
                         n_updates += 1
 
-                # Mulligan head updates
-                if mulligan_data:
-                    random.shuffle(mulligan_data)
-                    for bi in range(0, len(mulligan_data),
-                                    args.batch_size):
-                        batch = mulligan_data[
-                            bi:bi + args.batch_size]
-                        if len(batch) < 2:
-                            continue
-
-                        loss, metrics, _ = \
-                            compute_ppo_mulligan_batch(
-                                model,
-                                batch, device, use_amp)
-
-                        if torch.isnan(loss):
-                            continue
-
-                        optimizer.zero_grad()
-                        if scaler:
-                            scaler.scale(loss).backward()
-                            scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(
-                                model.parameters(), 0.5)
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            loss.backward()
-                            torch.nn.utils.clip_grad_norm_(
-                                model.parameters(), 0.5)
-                            optimizer.step()
-
-                        total_pl += metrics['policy_loss']
-                        total_vl += metrics['value_loss']
-                        total_ent += metrics['entropy']
-                        n_updates += 1
+                # Mulligan head: DISABLED for PPO.
+                # Too few samples per round (~100) causes wild
+                # policy swings. The imitation-learned policy
+                # (98.5% accuracy) is already near-optimal.
 
                 # Train value network on outcomes
                 # with FULL game state (not zeros!)
