@@ -290,6 +290,14 @@ At ~43MB in fp32, the full model fits comfortably on consumer GPUs (~51MB VRAM f
 
 ## 3. Training Methodology
 
+Training proceeds in three phases, each building on the previous:
+
+1. **Imitation learning** (Section 3.1). The model learns to mimic the existing heuristic AI by observing its decisions across 1,000 games. This produces a policy that plays at rough parity with the heuristic — a warm start that avoids the intractable exploration problem of learning MTG from scratch. Training is sequential: first the shared game state encoder and value network learn board evaluation from discounted returns, then each of the 7 decision heads is trained independently to predict the heuristic's choices. The encoder is frozen after value training to protect the learned representation.
+
+2. **PPO reinforcement learning** (Section 3.2). The imitation-learned policy plays against the heuristic AI, collecting trajectories with action probabilities and intermediate rewards. Generalized Advantage Estimation (GAE) assigns per-decision credit, and PPO's clipped objective conservatively updates the policy toward actions that led to better outcomes. The model explores stochastically during data collection but deploys deterministically (argmax) — the goal is to improve the underlying probability distribution so that even greedy play surpasses the heuristic.
+
+3. **Progressive scaling** (Section 3.3). Model capacity and card pool complexity increase in stages, with weight transfer from smaller to larger models. Curriculum learning introduces card mechanics gradually, and league training with exploiter agents prevents strategy cycling.
+
 ### 3.1 Phase 1: Imitation Learning
 
 We bootstrap the RL agent by imitating the existing heuristic AI in the Forge game engine. This provides a warm start that is critical for the sparse-reward MTG environment.
