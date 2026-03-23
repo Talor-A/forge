@@ -45,17 +45,17 @@ public class GameStateEncoder {
 
         float[] globalFeatures = encodeGlobalState(game, player, opponent);
 
-        // Encode each zone
-        ZoneEncoding myBoard = encodeZone(player.getCardsIn(ZoneType.Battlefield), config.getMaxBoardCreatures());
+        // Encode each zone (pass perspective player for ownership-aware features)
+        ZoneEncoding myBoard = encodeZone(player.getCardsIn(ZoneType.Battlefield), config.getMaxBoardCreatures(), player);
         ZoneEncoding oppBoard = encodeZone(
                 opponent != null ? opponent.getCardsIn(ZoneType.Battlefield) : new CardCollection(),
-                config.getMaxBoardCreatures());
-        ZoneEncoding myHand = encodeZone(player.getCardsIn(ZoneType.Hand), config.getMaxHandCards());
-        ZoneEncoding myGraveyard = encodeZone(player.getCardsIn(ZoneType.Graveyard), config.getMaxGraveyardCards());
+                config.getMaxBoardCreatures(), player);
+        ZoneEncoding myHand = encodeZone(player.getCardsIn(ZoneType.Hand), config.getMaxHandCards(), player);
+        ZoneEncoding myGraveyard = encodeZone(player.getCardsIn(ZoneType.Graveyard), config.getMaxGraveyardCards(), player);
         ZoneEncoding oppGraveyard = encodeZone(
                 opponent != null ? opponent.getCardsIn(ZoneType.Graveyard) : new CardCollection(),
-                config.getMaxGraveyardCards());
-        ZoneEncoding stack = encodeStack(game.getStack());
+                config.getMaxGraveyardCards(), player);
+        ZoneEncoding stack = encodeStack(game.getStack(), player);
 
         return new GameStateFeatures(
                 globalFeatures,
@@ -107,7 +107,11 @@ public class GameStateEncoder {
      * [51]    : opponent lands untapped (normalized)
      * [52]    : my nonland permanents count (normalized)
      * [53]    : opponent nonland permanents count (normalized)
-     * [54-63] : reserved
+     * [54]    : can cast sorcery-speed spells (0 or 1)
+     * [55]    : opponent untapped creatures count (normalized)
+     * [56]    : reserved
+     * [57]    : opponent max creature power (normalized)
+     * [58-63] : reserved
      * [64-69] : my color devotion (W, U, B, R, G, colorless)
      * [70]    : castable cards in hand (normalized)
      * [71]    : reserved
@@ -201,12 +205,20 @@ public class GameStateEncoder {
                 }
             }
         }
+        int oppUntappedCreatures = 0;
+        int oppMaxCreaturePower = 0;
         if (opp != null) {
             for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
                 if (c.isCreature()) {
                     oppCreatures++;
                     oppPower += c.getNetPower();
                     oppToughness += c.getNetToughness();
+                    if (!c.isTapped()) {
+                        oppUntappedCreatures++;
+                    }
+                    if (c.getNetPower() > oppMaxCreaturePower) {
+                        oppMaxCreaturePower = c.getNetPower();
+                    }
                 }
                 if (c.isLand()) {
                     oppLands++;
@@ -275,7 +287,12 @@ public class GameStateEncoder {
         // This is the most important timing signal — single bit vs 13-way phase one-hot
         features[54] = (currentPhase == PhaseType.MAIN1 || currentPhase == PhaseType.MAIN2)
                 && ph.getPlayerTurn() == me ? 1f : 0f;
-        // [55-63] reserved
+        // [55] Opponent untapped creatures (can block or attack)
+        features[55] = normalize(oppUntappedCreatures, 0, 20);
+        // [56] reserved
+        // [57] Opponent max creature power
+        features[57] = normalize(oppMaxCreaturePower, -5, 20);
+        // [58-63] reserved
 
         // [64-69] Color devotion (WUBRGC)
         for (int i = 0; i < 6; i++) {
@@ -310,20 +327,20 @@ public class GameStateEncoder {
         boolean[] mask;
     }
 
-    private ZoneEncoding encodeZone(CardCollectionView cards, int maxCards) {
+    private ZoneEncoding encodeZone(CardCollectionView cards, int maxCards, Player perspective) {
         ZoneEncoding encoding = new ZoneEncoding();
         encoding.features = new float[maxCards][CardFeatures.FEATURE_SIZE];
         encoding.mask = new boolean[maxCards];
 
         int count = Math.min(cards.size(), maxCards);
         for (int i = 0; i < count; i++) {
-            encoding.features[i] = CardFeatures.encode(cards.get(i));
+            encoding.features[i] = CardFeatures.encode(cards.get(i), perspective);
             encoding.mask[i] = true;
         }
         return encoding;
     }
 
-    private ZoneEncoding encodeStack(MagicStack stack) {
+    private ZoneEncoding encodeStack(MagicStack stack, Player perspective) {
         int maxEntries = config.getMaxStackEntries();
         ZoneEncoding encoding = new ZoneEncoding();
         encoding.features = new float[maxEntries][CardFeatures.FEATURE_SIZE];
@@ -333,7 +350,7 @@ public class GameStateEncoder {
         for (SpellAbilityStackInstance si : stack) {
             if (idx >= maxEntries) break;
             if (si.getSourceCard() != null) {
-                encoding.features[idx] = CardFeatures.encode(si.getSourceCard());
+                encoding.features[idx] = CardFeatures.encode(si.getSourceCard(), perspective);
                 encoding.mask[idx] = true;
             }
             idx++;

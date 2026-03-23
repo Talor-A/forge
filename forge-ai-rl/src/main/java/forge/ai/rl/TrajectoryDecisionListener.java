@@ -109,7 +109,7 @@ public class TrajectoryDecisionListener
         List<float[]> feats = new ArrayList<>();
         List<Integer> attackerIndices = new ArrayList<>();
         for (int i = 0; i < creatures.size(); i++) {
-            feats.add(CardFeatures.encode(creatures.get(i)));
+            feats.add(CardFeatures.encode(creatures.get(i), player));
             if (combat.isAttacking(creatures.get(i))) {
                 attackerIndices.add(i);
             }
@@ -131,7 +131,7 @@ public class TrajectoryDecisionListener
         List<float[]> feats = new ArrayList<>();
         List<Integer> blockerIndices = new ArrayList<>();
         for (int i = 0; i < creatures.size(); i++) {
-            feats.add(CardFeatures.encode(creatures.get(i)));
+            feats.add(CardFeatures.encode(creatures.get(i), player));
             if (combat.isBlocking(creatures.get(i))) {
                 blockerIndices.add(i);
             }
@@ -151,7 +151,7 @@ public class TrajectoryDecisionListener
         }
         List<float[]> feats = new ArrayList<>();
         for (Card c : options) {
-            feats.add(CardFeatures.encode(c));
+            feats.add(CardFeatures.encode(c, player));
         }
         List<Integer> indices = new ArrayList<>();
         for (Card c : chosen) {
@@ -172,7 +172,7 @@ public class TrajectoryDecisionListener
         }
         List<float[]> handFeats = new ArrayList<>();
         for (Card c : player.getCardsIn(ZoneType.Hand)) {
-            handFeats.add(CardFeatures.encode(c));
+            handFeats.add(CardFeatures.encode(c, player));
         }
         record(DecisionType.MULLIGAN, handFeats,
                 List.of(keep ? 1 : 0),

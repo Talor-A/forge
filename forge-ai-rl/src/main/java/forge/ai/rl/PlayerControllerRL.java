@@ -328,7 +328,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         List<float[]> feats = new ArrayList<>();
         for (GameEntity entity : candidates) {
             if (entity instanceof Card) {
-                feats.add(CardFeatures.encode((Card) entity));
+                feats.add(CardFeatures.encode((Card) entity, player));
             } else {
                 feats.add(ActionEncoder.encodeTarget(entity));
             }
@@ -387,7 +387,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             List<float[]> feats = new ArrayList<>();
             for (T entity : optionList) {
                 if (entity instanceof Card) {
-                    feats.add(CardFeatures.encode((Card) entity));
+                    feats.add(CardFeatures.encode((Card) entity, player));
                 } else {
                     feats.add(ActionEncoder.encodeTarget(entity));
                 }
@@ -420,7 +420,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         if (result != null && !result.isEmpty() && sourceList.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : sourceList) {
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
             }
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
@@ -443,7 +443,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         if (result != null && validTargets.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : validTargets) {
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
             }
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
@@ -466,7 +466,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         if (result != null && validCards.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : validCards) {
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
             }
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
@@ -487,7 +487,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             arrangeForScry(CardCollection topN) {
         List<float[]> feats = new ArrayList<>();
         for (Card c : topN) {
-            feats.add(CardFeatures.encode(c));
+            feats.add(CardFeatures.encode(c, player));
         }
 
         ImmutablePair<CardCollection, CardCollection> result =
@@ -521,7 +521,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         List<float[]> handFeats = new ArrayList<>();
         CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
         for (Card c : hand) {
-            handFeats.add(CardFeatures.encode(c));
+            handFeats.add(CardFeatures.encode(c, player));
         }
 
         boolean keep = super.mulliganKeepHand(firstPlayer, cardsToReturn);

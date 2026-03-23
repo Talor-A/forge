@@ -46,10 +46,28 @@ import forge.game.zone.ZoneType;
  * [178-181]: trigger summary (has_etb, has_death, has_combat, has_upkeep)
  * [182-185]: cost info (mana_cost_W, mana_cost_U, mana_cost_B, mana_cost_R)
  * [186-189]: cost info (mana_cost_G, mana_cost_generic, mana_cost_total, has_X)
- * [190-199]: reserved
+ * [190-191]: ownership flags (set by encode(Card, Player))
  *
- * === RESERVED + HASH [200-255] ===
- * [200-251]: reserved for future
+ * === TRIGGER DETAILS [192-199] ===
+ * [192-193]: ETB trigger (api_type_code, magnitude)
+ * [194-195]: death trigger (api_type_code, magnitude)
+ * [196-197]: combat trigger (api_type_code, magnitude)
+ * [198-199]: other trigger (api_type_code, magnitude)
+ *
+ * === PUMP MAGNITUDE [200-201] ===
+ * [200]    : pump attack boost (NumAtt, normalized)
+ * [201]    : pump defense boost (NumDef, normalized)
+ *
+ * === AURA/EQUIPMENT HOST [202-207] ===
+ * [202]    : is_attached flag
+ * [203]    : host power (normalized)
+ * [204]    : host toughness (normalized)
+ * [205]    : host is creature
+ * [206]    : host controlled by perspective player
+ * [207]    : host CMC (normalized)
+ *
+ * === RESERVED + HASH [208-255] ===
+ * [208-251]: reserved for future
  * [252-255]: card identity hash (4 bytes, normalized)
  */
 public class CardFeatures {
@@ -97,16 +115,30 @@ public class CardFeatures {
     };
 
     public static float[] encode(Card card) {
+        return encode(card, null);
+    }
+
+    /**
+     * Encode a card with ownership context.
+     * @param perspective the player whose perspective we're encoding from (null = no ownership info)
+     */
+    public static float[] encode(Card card, forge.game.player.Player perspective) {
         float[] features = new float[FEATURE_SIZE];
         if (card == null) return features;
         try {
-            return encodeImpl(card, features);
+            encodeImpl(card, features, perspective);
+            // Ownership flag at index 190 (first reserved slot)
+            if (perspective != null) {
+                features[190] = (card.getController() == perspective) ? 1f : 0f;
+                features[191] = (card.getController() != perspective) ? 1f : 0f;
+            }
+            return features;
         } catch (Exception e) {
             return features;
         }
     }
 
-    private static float[] encodeImpl(Card card, float[] features) {
+    private static float[] encodeImpl(Card card, float[] features, forge.game.player.Player perspective) {
 
         // === BASIC CARD INFO [0-68] ===
 
@@ -336,24 +368,56 @@ public class CardFeatures {
         features[idx++] = card.hasKeyword(Keyword.KICKER) ? 1f : 0f;
         // idx = 178
 
-        // Trigger summary [178-181]
+        // Trigger summary [178-181] + trigger details [192-199]
         boolean hasETB = false, hasDeath = false, hasCombat = false, hasUpkeep = false;
         for (Trigger t : card.getTriggers()) {
             TriggerType mode = t.getMode();
+            boolean isETB = false, isDeath = false, isCombat = false;
             if (mode == TriggerType.ChangesZone) {
                 // ETB or LTB depending on destination
                 String dest = t.getParam("Destination");
-                if ("Battlefield".equals(dest)) hasETB = true;
+                if ("Battlefield".equals(dest)) { hasETB = true; isETB = true; }
                 String origin = t.getParam("Origin");
-                if ("Battlefield".equals(origin)) hasDeath = true;
+                if ("Battlefield".equals(origin)) { hasDeath = true; isDeath = true; }
             }
             if (mode == TriggerType.Attacks || mode == TriggerType.AttackersDeclared
                     || mode == TriggerType.Blocks || mode == TriggerType.DamageDone) {
                 hasCombat = true;
+                isCombat = true;
             }
             if (mode == TriggerType.Phase) {
                 String phase = t.getParam("Phase");
                 if ("Upkeep".equals(phase)) hasUpkeep = true;
+            }
+
+            // Extract trigger ability details [192-199]
+            SpellAbility trigSA = t.getOverridingAbility();
+            if (trigSA != null && trigSA.getApi() != null) {
+                ApiType trigApi = trigSA.getApi();
+                float apiCode = (trigApi == ApiType.DealDamage) ? 0.2f
+                        : (trigApi == ApiType.Draw) ? 0.4f
+                        : (trigApi == ApiType.Pump) ? 0.6f
+                        : (trigApi == ApiType.PumpAll) ? 0.8f
+                        : 1.0f;
+                float magnitude = 0f;
+                if (trigSA.hasParam("NumDmg")) {
+                    try { magnitude = normalizeValue(Integer.parseInt(trigSA.getParam("NumDmg")), 0, 20); }
+                    catch (NumberFormatException e) { magnitude = 0.3f; }
+                } else if (trigSA.hasParam("NumCards")) {
+                    try { magnitude = normalizeValue(Integer.parseInt(trigSA.getParam("NumCards")), 0, 20); }
+                    catch (NumberFormatException e) { magnitude = 0.3f; }
+                } else if (trigSA.hasParam("NumAtt")) {
+                    try { magnitude = normalizeValue(Integer.parseInt(trigSA.getParam("NumAtt")), 0, 20); }
+                    catch (NumberFormatException e) { magnitude = 0.3f; }
+                }
+
+                int slotBase;
+                if (isETB) { slotBase = 192; }
+                else if (isDeath) { slotBase = 194; }
+                else if (isCombat) { slotBase = 196; }
+                else { slotBase = 198; }
+                features[slotBase] = apiCode;
+                features[slotBase + 1] = magnitude;
             }
         }
         features[idx++] = hasETB ? 1f : 0f;
@@ -377,8 +441,43 @@ public class CardFeatures {
         }
         // idx = 190
 
-        // Reserved [190-251]
-        // idx stays at 190, skip to hash
+        // [190-191] ownership flags set by encode(Card, Player)
+        // [192-199] trigger details set in trigger loop above
+
+        // Pump magnitude [200-201]
+        if (primarySA != null && primarySA.getApi() == ApiType.Pump) {
+            if (primarySA.hasParam("NumAtt")) {
+                try {
+                    features[200] = normalizeValue(
+                            Integer.parseInt(primarySA.getParam("NumAtt")), 0, 20);
+                } catch (NumberFormatException e) {
+                    features[200] = 0.3f;
+                }
+            }
+            if (primarySA.hasParam("NumDef")) {
+                try {
+                    features[201] = normalizeValue(
+                            Integer.parseInt(primarySA.getParam("NumDef")), 0, 20);
+                } catch (NumberFormatException e) {
+                    features[201] = 0.3f;
+                }
+            }
+        }
+
+        // Aura/Equipment host info [202-207]
+        if (card.getEntityAttachedTo() instanceof Card) {
+            Card host = (Card) card.getEntityAttachedTo();
+            features[202] = 1f; // is_attached
+            features[203] = normalizeValue(host.getNetPower(), -5, 20);
+            features[204] = normalizeValue(host.getNetToughness(), -5, 20);
+            features[205] = host.isCreature() ? 1f : 0f;
+            if (perspective != null) {
+                features[206] = (host.getController() == perspective) ? 1f : 0f;
+            }
+            features[207] = normalizeValue(host.getCMC(), 0, 16);
+        }
+
+        // Reserved [208-251]
 
         // === CARD HASH [252-255] ===
         if (card.getPaperCard() != null) {

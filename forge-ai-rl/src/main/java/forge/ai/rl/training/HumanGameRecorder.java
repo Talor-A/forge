@@ -157,7 +157,7 @@ public class HumanGameRecorder implements IGameRecorder {
             cachedState = stateEncoder.encode(game, player);
             cachedCandidates = new ArrayList<>();
             for (Card c : possibleAttackers) {
-                cachedCandidates.add(CardFeatures.encode(c));
+                cachedCandidates.add(CardFeatures.encode(c, player));
             }
         } catch (Exception e) {
             Logger.warn("HumanGameRecorder: Failed to capture attack state: {}", e.getMessage());
@@ -215,8 +215,8 @@ public class HumanGameRecorder implements IGameRecorder {
 
             for (int b = 0; b < possibleBlockers.size(); b++) {
                 for (int a = 0; a < attackers.size(); a++) {
-                    float[] blockerFeats = CardFeatures.encode(possibleBlockers.get(b));
-                    float[] attackerFeats = CardFeatures.encode(attackers.get(a));
+                    float[] blockerFeats = CardFeatures.encode(possibleBlockers.get(b), player);
+                    float[] attackerFeats = CardFeatures.encode(attackers.get(a), player);
                     float[] combined = new float[blockerFeats.length + attackerFeats.length];
                     System.arraycopy(blockerFeats, 0, combined, 0, blockerFeats.length);
                     System.arraycopy(attackerFeats, 0, combined, blockerFeats.length, attackerFeats.length);
@@ -266,7 +266,7 @@ public class HumanGameRecorder implements IGameRecorder {
             GameStateFeatures state = stateEncoder.encode(game, player);
             List<float[]> candidates = new ArrayList<>();
             for (Card c : hand) {
-                candidates.add(CardFeatures.encode(c));
+                candidates.add(CardFeatures.encode(c, player));
             }
 
             DecisionContext context = DecisionContext.multiSelect(
@@ -295,7 +295,7 @@ public class HumanGameRecorder implements IGameRecorder {
             List<float[]> candidateFeatures = new ArrayList<>();
             for (Object obj : candidates) {
                 if (obj instanceof Card) {
-                    candidateFeatures.add(CardFeatures.encode((Card) obj));
+                    candidateFeatures.add(CardFeatures.encode((Card) obj, player));
                 } else {
                     candidateFeatures.add(new float[256]); // player or other entity
                 }

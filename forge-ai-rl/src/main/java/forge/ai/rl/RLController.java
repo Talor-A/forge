@@ -146,7 +146,7 @@ public class RLController {
         List<float[]> candidates = new ArrayList<>();
         for (GameEntity entity : targets) {
             if (entity instanceof Card) {
-                candidates.add(forge.ai.rl.features.CardFeatures.encode((Card) entity));
+                candidates.add(forge.ai.rl.features.CardFeatures.encode((Card) entity, player));
             } else {
                 // Player targets — pad to card_feature_dim (256)
                 float[] playerFeats = ActionEncoder.encodeTarget(entity);
@@ -177,7 +177,7 @@ public class RLController {
         GameStateFeatures gameState = stateEncoder.encode(game, player);
         List<float[]> candidates = new ArrayList<>();
         for (Card c : possibleAttackers) {
-            candidates.add(forge.ai.rl.features.CardFeatures.encode(c));
+            candidates.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
 
         DecisionContext context = DecisionContext.multiSelect(
@@ -222,8 +222,8 @@ public class RLController {
 
         for (int b = 0; b < possibleBlockers.size(); b++) {
             for (int a = 0; a < attackers.size(); a++) {
-                float[] blockerFeats = forge.ai.rl.features.CardFeatures.encode(possibleBlockers.get(b));
-                float[] attackerFeats = forge.ai.rl.features.CardFeatures.encode(attackers.get(a));
+                float[] blockerFeats = forge.ai.rl.features.CardFeatures.encode(possibleBlockers.get(b), player);
+                float[] attackerFeats = forge.ai.rl.features.CardFeatures.encode(attackers.get(a), player);
                 // Concatenate blocker + attacker features
                 float[] combined = new float[blockerFeats.length + attackerFeats.length];
                 System.arraycopy(blockerFeats, 0, combined, 0, blockerFeats.length);
@@ -270,7 +270,7 @@ public class RLController {
         GameStateFeatures gameState = stateEncoder.encode(game, player);
         List<float[]> candidateFeatures = new ArrayList<>();
         for (Card c : candidates) {
-            candidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c));
+            candidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
 
         DecisionContext context = DecisionContext.multiSelect(
@@ -312,7 +312,7 @@ public class RLController {
 
         List<float[]> candidates = new ArrayList<>();
         for (Card c : handCards) {
-            candidates.add(forge.ai.rl.features.CardFeatures.encode(c));
+            candidates.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
 
         DecisionContext context = new DecisionContext(
@@ -365,7 +365,7 @@ public class RLController {
         cachedPreDecisionState = stateEncoder.encode(game, player);
         cachedCandidateFeatures = new ArrayList<>();
         for (Card c : candidates) {
-            cachedCandidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c));
+            cachedCandidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
     }
 
@@ -430,8 +430,8 @@ public class RLController {
 
         for (int b = 0; b < possibleBlockers.size(); b++) {
             for (int a = 0; a < attackers.size(); a++) {
-                float[] blockerFeats = forge.ai.rl.features.CardFeatures.encode(possibleBlockers.get(b));
-                float[] attackerFeats = forge.ai.rl.features.CardFeatures.encode(attackers.get(a));
+                float[] blockerFeats = forge.ai.rl.features.CardFeatures.encode(possibleBlockers.get(b), player);
+                float[] attackerFeats = forge.ai.rl.features.CardFeatures.encode(attackers.get(a), player);
                 float[] combined = new float[blockerFeats.length + attackerFeats.length];
                 System.arraycopy(blockerFeats, 0, combined, 0, blockerFeats.length);
                 System.arraycopy(attackerFeats, 0, combined, blockerFeats.length, attackerFeats.length);

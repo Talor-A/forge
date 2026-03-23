@@ -34,7 +34,11 @@ public class ActionEncoder {
      * [53]    : source card toughness (if creature, normalized)
      * [54]    : estimated damage (if damage spell, normalized)
      * [55]    : estimated cards drawn (if draw spell, normalized)
-     * [56-63] : reserved
+     * [56]    : can target own creature (polarity)
+     * [57]    : can target opp creature (polarity)
+     * [58]    : can target players
+     * [59]    : can target players (duplicate for symmetry)
+     * [60-63] : reserved
      */
     public static float[] encode(SpellAbility sa) {
         float[] features = new float[ACTION_FEATURE_SIZE];
@@ -127,6 +131,21 @@ public class ActionEncoder {
             }
         } else {
             idx++;
+        }
+
+        // Target polarity [56-59]
+        if (requiresTarget && sa.getTargetRestrictions() != null) {
+            String validTgts = sa.getTargetRestrictions().getValidTgts() != null ?
+                    String.join(" ", sa.getTargetRestrictions().getValidTgts()) : "";
+            boolean targetsCreatures = validTgts.contains("Creature");
+            boolean hasOwnRestriction = validTgts.contains(".YouCtrl");
+            boolean hasOppRestriction = validTgts.contains(".OppCtrl") || validTgts.contains(".YouDontCtrl");
+            // If no controller restriction, spell can target either side
+            features[56] = (targetsCreatures && !hasOppRestriction) ? 1f : 0f;  // can target own creature
+            features[57] = (targetsCreatures && !hasOwnRestriction) ? 1f : 0f;  // can target opp creature
+            boolean targetsPlayers = validTgts.contains("Player");
+            features[58] = targetsPlayers ? 1f : 0f;  // can target players (either)
+            features[59] = targetsPlayers ? 1f : 0f;  // same for now
         }
 
         if (sa.hasParam("NumCards")) {

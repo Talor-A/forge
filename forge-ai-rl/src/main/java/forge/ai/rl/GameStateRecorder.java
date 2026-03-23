@@ -97,7 +97,7 @@ public class GameStateRecorder {
             // show creatures as untapped (matching inference)
             List<float[]> feats = new ArrayList<>();
             for (Card c : allCreatures) {
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
             }
 
             // Record with pre-attack state
@@ -148,7 +148,7 @@ public class GameStateRecorder {
 
             for (int i = 0; i < allCreatures.size(); i++) {
                 Card c = allCreatures.get(i);
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
                 CardView cv = CardView.get(c);
                 if (allBlockerViews.contains(cv)) {
                     blockerIndices.add(i);

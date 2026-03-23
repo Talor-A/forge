@@ -186,7 +186,7 @@ public class RecordingControllerAi extends PlayerControllerAi {
                 attacker.getCreaturesInPlay().size();
         List<float[]> creatureFeats = new ArrayList<>();
         for (Card c : attacker.getCreaturesInPlay()) {
-            creatureFeats.add(CardFeatures.encode(c));
+            creatureFeats.add(CardFeatures.encode(c, player));
         }
 
         super.declareAttackers(attacker, combat);
@@ -215,7 +215,7 @@ public class RecordingControllerAi extends PlayerControllerAi {
                 defender.getCreaturesInPlay().size();
         List<float[]> creatureFeats = new ArrayList<>();
         for (Card c : defender.getCreaturesInPlay()) {
-            creatureFeats.add(CardFeatures.encode(c));
+            creatureFeats.add(CardFeatures.encode(c, player));
         }
 
         super.declareBlockers(defender, combat);
@@ -249,7 +249,7 @@ public class RecordingControllerAi extends PlayerControllerAi {
                 && sourceList.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : sourceList) {
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
             }
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
@@ -275,7 +275,7 @@ public class RecordingControllerAi extends PlayerControllerAi {
         if (result != null && validTargets.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : validTargets) {
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
             }
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
@@ -302,7 +302,7 @@ public class RecordingControllerAi extends PlayerControllerAi {
         if (result != null && validCards.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : validCards) {
-                feats.add(CardFeatures.encode(c));
+                feats.add(CardFeatures.encode(c, player));
             }
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
@@ -326,7 +326,7 @@ public class RecordingControllerAi extends PlayerControllerAi {
         CardCollectionView hand =
                 player.getCardsIn(ZoneType.Hand);
         for (Card c : hand) {
-            handFeats.add(CardFeatures.encode(c));
+            handFeats.add(CardFeatures.encode(c, player));
         }
 
         boolean keep = super.mulliganKeepHand(
@@ -368,7 +368,7 @@ public class RecordingControllerAi extends PlayerControllerAi {
             arrangeForScry(CardCollection topN) {
         List<float[]> feats = new ArrayList<>();
         for (Card c : topN) {
-            feats.add(CardFeatures.encode(c));
+            feats.add(CardFeatures.encode(c, player));
         }
 
         ImmutablePair<CardCollection, CardCollection> result =

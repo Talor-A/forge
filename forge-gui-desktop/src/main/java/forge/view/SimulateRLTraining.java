@@ -124,6 +124,10 @@ public class SimulateRLTraining {
         System.out.println("Output: " + outputDir);
         System.out.println();
 
+        // Head-to-head mode arguments
+        String onnxDir1 = params.containsKey("m1") ? params.get("m1").get(0) : null;
+        String onnxDir2 = params.containsKey("m2") ? params.get("m2").get(0) : null;
+
         switch (mode) {
             case "collect":
                 runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads);
@@ -133,6 +137,14 @@ public class SimulateRLTraining {
                 break;
             case "selfplay":
                 runSelfPlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort);
+                break;
+            case "headtohead":
+                if (onnxDir1 == null || onnxDir2 == null) {
+                    System.out.println("Head-to-head requires -m1 <model_dir> -m2 <model_dir>");
+                    return;
+                }
+                runHeadToHeadMode(decks, nGames, timeout, outputDir, quiet, threads,
+                        onnxDir1, onnxDir2);
                 break;
             default:
                 System.out.println("Unknown mode: " + mode);
@@ -411,6 +423,90 @@ public class SimulateRLTraining {
             }
         }
         System.out.println("Self-play complete. Trajectories saved to: " + outputDir);
+    }
+
+    /**
+     * Head-to-head mode: two ONNX models play against each other.
+     * Usage: rltrain headtohead -m1 path/to/model1 -m2 path/to/model2 -d deck1.dck -d deck2.dck -n 100
+     */
+    private static void runHeadToHeadMode(List<Deck> decks, int nGames, int timeout,
+                                            String outputDir, boolean quiet, int threads,
+                                            String onnxDir1, String onnxDir2) {
+        System.out.println("=== Head-to-Head Mode ===");
+        System.out.println("Model 1: " + onnxDir1);
+        System.out.println("Model 2: " + onnxDir2);
+
+        AtomicInteger m1Wins = new AtomicInteger(0);
+        AtomicInteger m2Wins = new AtomicInteger(0);
+        AtomicInteger draws = new AtomicInteger(0);
+        AtomicInteger completed = new AtomicInteger(0);
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+
+        java.util.Random deckRng = new java.util.Random();
+        for (int i = 0; i < nGames; i++) {
+            final int gameIdx = i;
+            final Deck deck1 = decks.get(deckRng.nextInt(decks.size()));
+            final Deck deck2 = decks.get(deckRng.nextInt(decks.size()));
+            // Alternate who goes first
+            final boolean m1First = (i % 2 == 0);
+
+            futures.add(executor.submit(() -> {
+                RLConfig config1 = new RLConfig();
+                config1.setMode(RLModelMode.ONNX);
+                config1.setOnnxModelDir(onnxDir1);
+                config1.setRecordTrajectories(false);
+
+                RLConfig config2 = new RLConfig();
+                config2.setMode(RLModelMode.ONNX);
+                config2.setOnnxModelDir(onnxDir2);
+                config2.setRecordTrajectories(false);
+
+                try {
+                    GameResult result;
+                    if (m1First) {
+                        result = runSingleGame(deck1, deck2, config1, config2,
+                                "M1_" + gameIdx, "M2_" + gameIdx, timeout, true);
+                    } else {
+                        result = runSingleGame(deck2, deck1, config2, config1,
+                                "M2_" + gameIdx, "M1_" + gameIdx, timeout, true);
+                    }
+
+                    if (result.isDraw) {
+                        draws.incrementAndGet();
+                    } else {
+                        boolean m1Won = m1First ? result.player1Won : !result.player1Won;
+                        if (m1Won) m1Wins.incrementAndGet();
+                        else m2Wins.incrementAndGet();
+                    }
+                } catch (Exception e) {
+                    System.out.printf("Game %d FAILED: %s%n", gameIdx, e.getMessage());
+                }
+
+                int done = completed.incrementAndGet();
+                if (!quiet && (done % 10 == 0 || done == nGames)) {
+                    int w1 = m1Wins.get(), w2 = m2Wins.get();
+                    int total = w1 + w2 + draws.get();
+                    double pct = total > 0 ? 100.0 * w1 / total : 0;
+                    System.out.printf("Game %d/%d: M1 win rate: %.1f%% (%d/%d)%n",
+                            done, nGames, pct, w1, total);
+                }
+            }));
+        }
+
+        for (java.util.concurrent.Future<?> f : futures) {
+            try { f.get(); } catch (Exception e) { /* ignore */ }
+        }
+        executor.shutdown();
+
+        System.out.println();
+        System.out.println("=== Head-to-Head Complete ===");
+        System.out.printf("Model 1 Wins: %d (%.1f%%) | Model 2 Wins: %d (%.1f%%) | Draws: %d%n",
+                m1Wins.get(), 100.0 * m1Wins.get() / Math.max(nGames, 1),
+                m2Wins.get(), 100.0 * m2Wins.get() / Math.max(nGames, 1),
+                draws.get());
     }
 
     // ===== Core game execution =====
