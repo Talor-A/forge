@@ -63,7 +63,7 @@ DECKS = ['Green Stompy.dck', 'White Weenie.dck',
 # ── Data loading for PPO ─────────────────────────────
 
 GAE_GAMMA = 0.999  # discount factor
-GAE_LAMBDA = 0.95  # GAE lambda for bias-variance tradeoff
+GAE_LAMBDA = 0.98  # GAE lambda — higher lets terminal reward reach further back
 
 
 def _compute_gae_returns(records, won):
@@ -111,6 +111,8 @@ def load_ppo_data(traj_dir):
     attack_samples = []
     block_samples = []
     priority_samples = []
+    target_samples = []
+    mulligan_samples = []
     value_samples = []
 
     for filepath in files:
@@ -247,17 +249,83 @@ def load_ppo_data(traj_dir):
                     attack_samples.append(sample)
                 elif dt == 'DECLARE_BLOCKERS':
                     block_samples.append(sample)
+                    continue
+
+                if dt == 'TARGET_SELECTION':
+                    if n <= 1:
+                        continue  # trivial choice
+                    targets = np.zeros(
+                        (n, CARD_DIM), dtype=np.float32)
+                    for j, cf in enumerate(cand):
+                        cl = min(len(cf), CARD_DIM)
+                        targets[j, :cl] = np.array(
+                            cf[:cl], dtype=np.float32)
+                    np.clip(targets, -10, 10, out=targets)
+                    targets = np.nan_to_num(targets)
+
+                    selected_idx = sel[0] if sel else 0
+                    if selected_idx >= n:
+                        selected_idx = n - 1
+
+                    old_lp = 0.0
+                    if len(old_probs) > selected_idx:
+                        p = max(old_probs[selected_idx], 1e-8)
+                        old_lp = float(np.log(p))
+
+                    target_samples.append({
+                        'global_features': gf,
+                        'game_state_flat': flat,
+                        'target_features': targets,
+                        'selected_idx': selected_idx,
+                        'n_targets': n,
+                        'outcome': outcome,
+                        'advantage': advantage,
+                        'old_log_prob': old_lp,
+                    })
+
+                elif dt == 'MULLIGAN':
+                    # Mulligan: hand features + keep/mull
+                    hand = np.zeros(
+                        (n, CARD_DIM), dtype=np.float32)
+                    for j, cf in enumerate(cand):
+                        cl = min(len(cf), CARD_DIM)
+                        hand[j, :cl] = np.array(
+                            cf[:cl], dtype=np.float32)
+                    np.clip(hand, -10, 10, out=hand)
+                    hand = np.nan_to_num(hand)
+
+                    kept = 1.0 if (sel and sel[0] == 1) else 0.0
+
+                    old_lp = 0.0
+                    if len(old_probs) > 0:
+                        p = old_probs[0]
+                        if kept > 0.5:
+                            old_lp = float(np.log(max(p, 1e-8)))
+                        else:
+                            old_lp = float(np.log(max(1-p, 1e-8)))
+
+                    mulligan_samples.append({
+                        'global_features': gf,
+                        'game_state_flat': flat,
+                        'hand_features': hand,
+                        'n_cards': n,
+                        'kept': kept,
+                        'outcome': outcome,
+                        'advantage': advantage,
+                        'old_log_prob': old_lp,
+                    })
         except Exception:
             pass
 
     return (attack_samples, block_samples,
-            priority_samples, value_samples)
+            priority_samples, target_samples,
+            mulligan_samples, value_samples)
 
 
 # ── PPO batch computation ────────────────────────────
 
 def compute_ppo_batch(model, head, samples, device,
-                      use_amp, clip_eps=0.1):
+                      use_amp, clip_eps=0.2):
     """
     Compute PPO loss for a batch of attack/block decisions.
 
@@ -398,7 +466,7 @@ def compute_ppo_batch(model, head, samples, device,
 
 
 def compute_ppo_block_batch(model, samples, device,
-                            use_amp, clip_eps=0.1):
+                            use_amp, clip_eps=0.2):
     """
     Compute PPO loss for block decisions using the proper BlockHead.
 
@@ -574,7 +642,7 @@ def compute_ppo_block_batch(model, samples, device,
 
 def compute_ppo_priority_batch(model, head, samples,
                                device, use_amp,
-                               clip_eps=0.1):
+                               clip_eps=0.2):
     """
     Compute PPO loss for a batch of priority decisions.
 
@@ -700,6 +768,201 @@ def compute_ppo_priority_batch(model, head, samples,
         'mean_advantage': advantage.mean().item(),
         'mean_value': value.mean().item(),
         'win_rate': (outcomes > 0).float().mean().item(),
+    }
+    return total_loss, metrics, bs
+
+
+def compute_ppo_target_batch(model, samples, device,
+                              use_amp, clip_eps=0.2):
+    """PPO loss for target selection (single-select softmax,
+    same as priority but with 256-dim card features)."""
+    bs = len(samples)
+    max_t = max(s['n_targets'] for s in samples)
+    max_t = max(max_t, 1)
+    cd = CARD_DIM
+
+    tf = torch.zeros(bs, max_t, cd, device=device)
+    tm = torch.zeros(bs, max_t, dtype=torch.bool,
+                      device=device)
+    actions = torch.zeros(bs, dtype=torch.long,
+                           device=device)
+    outcomes = torch.zeros(bs, device=device)
+    gae_advantages = torch.zeros(bs, device=device)
+    old_log_probs = torch.zeros(bs, device=device)
+
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool,
+                      device=device)
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool,
+                       device=device)
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool,
+                       device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool,
+                       device=device)
+
+    for i, s in enumerate(samples):
+        nt = s['n_targets']
+        tf[i, :nt] = torch.from_numpy(s['target_features'])
+        tm[i, :nt] = True
+        actions[i] = s['selected_idx']
+        outcomes[i] = float(s['outcome'])
+        gae_advantages[i] = float(s['advantage'])
+        old_log_probs[i] = float(s['old_log_prob'])
+
+        g, zones, masks_d = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks_d['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(masks_d['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks_d['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks_d['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks_d['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks_d['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        state = model.encode_state(
+            gf, mb, mbm, ob, obm, h, hm,
+            mg, mgm, og, ogm, st, stm)
+        value = model.get_value(state.detach()).squeeze(-1)
+        logits = model.target_head(state, tf, tm)
+        dist = torch.distributions.Categorical(logits=logits)
+        log_probs = dist.log_prob(actions)
+
+        advantage = gae_advantages
+        if advantage.numel() > 1:
+            advantage = (advantage - advantage.mean()) / \
+                (advantage.std() + 1e-8)
+
+        ratio = torch.exp(log_probs - old_log_probs)
+        surr1 = ratio * advantage
+        surr2 = torch.clamp(ratio, 1.0 - clip_eps,
+                            1.0 + clip_eps) * advantage
+        policy_loss = -torch.min(surr1, surr2).mean()
+        value_loss = F.mse_loss(value, outcomes)
+        entropy = dist.entropy().mean()
+        total_loss = policy_loss + 0.5 * value_loss - 0.005 * entropy
+
+    metrics = {
+        'policy_loss': policy_loss.item(),
+        'value_loss': value_loss.item(),
+        'entropy': entropy.item(),
+    }
+    return total_loss, metrics, bs
+
+
+def compute_ppo_mulligan_batch(model, samples, device,
+                                use_amp, clip_eps=0.2):
+    """PPO loss for mulligan (binary keep/mull)."""
+    bs = len(samples)
+    max_h = max(s['n_cards'] for s in samples)
+    max_h = max(max_h, 1)
+    cd = CARD_DIM
+
+    hf = torch.zeros(bs, max_h, cd, device=device)
+    hmask = torch.zeros(bs, max_h, dtype=torch.bool,
+                         device=device)
+    kept = torch.zeros(bs, device=device)
+    outcomes = torch.zeros(bs, device=device)
+    gae_advantages = torch.zeros(bs, device=device)
+    old_log_probs = torch.zeros(bs, device=device)
+
+    gf = torch.zeros(bs, GLOBAL_DIM, device=device)
+    mb = torch.zeros(bs, 40, cd, device=device)
+    mbm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    ob = torch.zeros(bs, 40, cd, device=device)
+    obm = torch.zeros(bs, 40, dtype=torch.bool,
+                       device=device)
+    h = torch.zeros(bs, 15, cd, device=device)
+    hm = torch.zeros(bs, 15, dtype=torch.bool,
+                      device=device)
+    mg = torch.zeros(bs, 20, cd, device=device)
+    mgm = torch.zeros(bs, 20, dtype=torch.bool,
+                       device=device)
+    og = torch.zeros(bs, 20, cd, device=device)
+    ogm = torch.zeros(bs, 20, dtype=torch.bool,
+                       device=device)
+    st = torch.zeros(bs, 10, cd, device=device)
+    stm = torch.zeros(bs, 10, dtype=torch.bool,
+                       device=device)
+
+    for i, s in enumerate(samples):
+        nc = s['n_cards']
+        hf[i, :nc] = torch.from_numpy(s['hand_features'])
+        hmask[i, :nc] = True
+        kept[i] = s['kept']
+        outcomes[i] = float(s['outcome'])
+        gae_advantages[i] = float(s['advantage'])
+        old_log_probs[i] = float(s['old_log_prob'])
+
+        g, zones, masks_d = parse_game_state(
+            s['game_state_flat'], s['global_features'])
+        gf[i] = torch.from_numpy(g)
+        mb[i] = torch.from_numpy(zones['my_board'])
+        mbm[i] = torch.from_numpy(masks_d['my_board_mask'])
+        ob[i] = torch.from_numpy(zones['opp_board'])
+        obm[i] = torch.from_numpy(masks_d['opp_board_mask'])
+        h[i] = torch.from_numpy(zones['hand'])
+        hm[i] = torch.from_numpy(masks_d['hand_mask'])
+        mg[i] = torch.from_numpy(zones['my_gy'])
+        mgm[i] = torch.from_numpy(masks_d['my_gy_mask'])
+        og[i] = torch.from_numpy(zones['opp_gy'])
+        ogm[i] = torch.from_numpy(masks_d['opp_gy_mask'])
+        st[i] = torch.from_numpy(zones['stack'])
+        stm[i] = torch.from_numpy(masks_d['stack_mask'])
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        state = model.encode_state(
+            gf, mb, mbm, ob, obm, h, hm,
+            mg, mgm, og, ogm, st, stm)
+        value = model.get_value(state.detach()).squeeze(-1)
+
+        # Mulligan head returns keep logit
+        keep_logit = model.mulligan_head(state, hf, hmask)
+        keep_prob = torch.sigmoid(keep_logit)
+
+        # Log prob of the taken action
+        log_probs = torch.where(
+            kept > 0.5,
+            torch.log(keep_prob.clamp(min=1e-8)),
+            torch.log((1 - keep_prob).clamp(min=1e-8)))
+
+        advantage = gae_advantages
+        if advantage.numel() > 1:
+            advantage = (advantage - advantage.mean()) / \
+                (advantage.std() + 1e-8)
+
+        ratio = torch.exp(log_probs - old_log_probs)
+        surr1 = ratio * advantage
+        surr2 = torch.clamp(ratio, 1.0 - clip_eps,
+                            1.0 + clip_eps) * advantage
+        policy_loss = -torch.min(surr1, surr2).mean()
+        value_loss = F.mse_loss(value, outcomes)
+        entropy = -(keep_prob * torch.log(keep_prob.clamp(min=1e-8))
+                     + (1-keep_prob) * torch.log(
+                         (1-keep_prob).clamp(min=1e-8))).mean()
+        total_loss = policy_loss + 0.5 * value_loss - 0.005 * entropy
+
+    metrics = {
+        'policy_loss': policy_loss.item(),
+        'value_loss': value_loss.item(),
+        'entropy': entropy.item(),
     }
     return total_loss, metrics, bs
 

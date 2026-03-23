@@ -94,6 +94,8 @@ def ppo_thread(state, args):
             load_ppo_data, compute_ppo_batch,
             compute_ppo_block_batch,
             compute_ppo_priority_batch,
+            compute_ppo_target_batch,
+            compute_ppo_mulligan_batch,
             run_games, start_model_server,
             find_free_port,
             ModelServerError, PROJECT_ROOT)
@@ -148,8 +150,8 @@ def ppo_thread(state, args):
         value_params = list(model.value_network.parameters())
 
         optimizer = optim.AdamW([
-            {'params': head_params, 'lr': args.lr * 3},      # heads: 3e-5
-            {'params': value_params, 'lr': args.lr * 10},     # value: 1e-4
+            {'params': head_params, 'lr': args.lr * 10},     # heads: 1e-4
+            {'params': value_params, 'lr': args.lr * 30},     # value: 3e-4
         ], weight_decay=1e-5)
         scaler = (torch.amp.GradScaler('cuda')
                   if use_amp else None)
@@ -241,6 +243,7 @@ def ppo_thread(state, args):
                 break
 
             attack_data, block_data, priority_data, \
+                target_data, mulligan_data, \
                 value_data = load_ppo_data(traj_dir)
             state.attacks_this_round = len(attack_data)
             state.blocks_this_round = len(block_data)
@@ -248,6 +251,8 @@ def ppo_thread(state, args):
                 f"  Data: {len(attack_data)} attacks, "
                 f"{len(block_data)} blocks, "
                 f"{len(priority_data)} priority, "
+                f"{len(target_data)} target, "
+                f"{len(mulligan_data)} mulligan, "
                 f"{len(value_data)} value samples")
 
             if not value_data:
@@ -354,6 +359,80 @@ def ppo_thread(state, args):
                             compute_ppo_priority_batch(
                                 model,
                                 model.priority_head,
+                                batch, device, use_amp)
+
+                        if torch.isnan(loss):
+                            continue
+
+                        optimizer.zero_grad()
+                        if scaler:
+                            scaler.scale(loss).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            optimizer.step()
+
+                        total_pl += metrics['policy_loss']
+                        total_vl += metrics['value_loss']
+                        total_ent += metrics['entropy']
+                        n_updates += 1
+
+                # Target head updates
+                if target_data:
+                    random.shuffle(target_data)
+                    for bi in range(0, len(target_data),
+                                    args.batch_size):
+                        batch = target_data[
+                            bi:bi + args.batch_size]
+                        if len(batch) < 2:
+                            continue
+
+                        loss, metrics, _ = \
+                            compute_ppo_target_batch(
+                                model,
+                                batch, device, use_amp)
+
+                        if torch.isnan(loss):
+                            continue
+
+                        optimizer.zero_grad()
+                        if scaler:
+                            scaler.scale(loss).backward()
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), 0.5)
+                            optimizer.step()
+
+                        total_pl += metrics['policy_loss']
+                        total_vl += metrics['value_loss']
+                        total_ent += metrics['entropy']
+                        n_updates += 1
+
+                # Mulligan head updates
+                if mulligan_data:
+                    random.shuffle(mulligan_data)
+                    for bi in range(0, len(mulligan_data),
+                                    args.batch_size):
+                        batch = mulligan_data[
+                            bi:bi + args.batch_size]
+                        if len(batch) < 2:
+                            continue
+
+                        loss, metrics, _ = \
+                            compute_ppo_mulligan_batch(
+                                model,
                                 batch, device, use_amp)
 
                         if torch.isnan(loss):

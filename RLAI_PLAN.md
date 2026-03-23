@@ -431,15 +431,117 @@ All critical bugs have been fixed. Data regenerated with corrected feature encod
 
 ## Future Enhancements
 
-- **Encode spell utility in context**: The 64-dim action features encode what a spell IS but not what it DOES in the current board state. Add features like "would_kill_a_creature", "is_lethal", "has_valid_creature_target".
-
 - **Record opponent's plays**: Currently only the RL player's decisions are recorded. Recording opponent plays would help the model learn reactive strategies.
 
-## Known Limitations (future enhancements)
+## Feature Encoding Gaps
 
-- **Trigger effect encoding**: The model sees boolean flags for trigger presence (has_etb, has_death, has_combat, has_upkeep) but not what those triggers DO. An ETB that draws a card and one that deals 2 damage both just show `has_etb=1`. Fix: extract ApiType + effect params from each trigger's `getOverridingAbility()` in CardFeatures.java.
+62 of 256 CardFeature slots and 8 of 64 ActionEncoder slots are reserved/unused. All gaps below can be filled without changing the feature dimensions or model architecture — just richer extraction in Java, requiring data regeneration.
 
-- **Aura/equipment association**: Cards encode attachments count [27] and auras show as separate board cards, but there is no explicit "card X is attached to card Y" pointer. The model sees P/T effects (getNetPower/getNetToughness include bonuses) but cannot reason about what happens if an aura is removed. The per-zone self-attention in `CardSetEncoder` has the capacity to learn these associations implicitly (aura and host are both in `my_board`), but does so from weak signals. Options in order of complexity: (A) encode host card stats inline in the aura's feature vector using reserved slots — no model change; (B) encode host positional index — fragile but no model change; (C) add explicit attachment attention mask to `CardSetEncoder` — requires new attention layer (~200K params). Option A recommended first; revisit C only if the model demonstrably misplays around auras.
+### CardFeatures (256-dim) — Current Gaps
+
+#### Gap 1: Trigger effects are opaque (Priority: High)
+Indices 178-181 encode `has_etb`, `has_death`, `has_combat`, `has_upkeep` as binary flags but not what the triggers DO. An ETB that draws a card and one that deals 2 damage both show `has_etb=1`.
+
+**4-deck impact:** Augur of Bolas (ETB: dig for instant/sorcery), Thalia's Lieutenant (ETB: +1/+1 all humans), Experiment One (evolve on ETB of others), Snapcaster Mage (ETB: flashback), Eidolon of the Great Revel (cast trigger: 2 damage).
+
+**Fix:** Use reserved slots 190-199. For each trigger category, extract `getOverridingAbility().getApi()` and effect magnitude:
+- [190-194]: ETB trigger ApiType (one-hot top 5: DealDamage, Draw, Pump, PumpAll, ChangeZone)
+- [195]: ETB effect magnitude (normalized damage/draw/pump amount)
+- [196-197]: Death trigger ApiType (top 2) + magnitude
+- [198]: Combat trigger type (attacks/blocks/damage)
+- [199]: Other trigger magnitude
+
+**Full card pool considerations:** 30,000+ cards have triggers. The top-5 ETB ApiType covers ~80% of ETB effects. For full coverage, would need either: (A) expand to top-10 ETB types using more reserved slots, or (B) encode trigger text via a small language model embedding — but that's a v3 architectural change. The magnitude extraction (`NumDmg`, `NumAtt`, `NumDef`, `NumCards`) covers most parameterized effects; conditional/complex triggers (e.g., "when ~ deals combat damage to a player, draw cards equal to its power") would need special handling or would just show as `has_combat=1, combat_magnitude=0` — an acceptable approximation for now.
+
+#### Gap 2: Pump spell magnitude missing (Priority: High for green deck)
+The model sees `ApiType.Pump` but not the magnitude. Giant Growth (+3/+3), Aspect of Hydra (+N/+N), Rancor (+2/+0 trample) all look identical. The effect magnitude fields (103-106) only extract damage, draw, life, tokens — no pump amount.
+
+**Fix:** Add at indices 200-201:
+- [200]: `est_pump_power` — extract from `sa.getParam("NumAtt")`
+- [201]: `est_pump_toughness` — extract from `sa.getParam("NumDef")`
+
+**Full card pool:** Variable pump amounts (e.g., "gets +X/+X where X is your devotion") would return the default 0.3f fallback. For Aspect of Hydra specifically, computing actual devotion at encode time would give the real value — but this requires game state access during card encoding, which the current static `CardFeatures.encode(Card)` signature doesn't support. A future refactor to `encode(Card, Player)` would enable board-relative card features.
+
+#### Gap 3: Protection/evasion details not encoded (Priority: Medium)
+Brave the Elements gives protection from a chosen color. Vines of Vastwood gives hexproof + pump. The model sees `ApiType.Protection` or `ApiType.Pump` but not which color, or that hexproof prevents targeting. The value of these combat tricks depends entirely on the opponent's board composition.
+
+**Fix:** Add at indices 202-205:
+- [202]: protection_from_white, [203]: protection_from_blue, etc. — or more generally, `protection_matches_opponent_colors` as a single bit computed at encode time by checking opponent's board colors.
+
+**Full card pool:** Protection from arbitrary qualities ("protection from converted mana cost 3 or greater") is common. A single `has_relevant_protection` bit computed against the current board is more useful than trying to enumerate all protection types.
+
+#### Gap 4: Recursion / graveyard value not encoded (Priority: Low for current meta)
+Snapcaster Mage's value depends on the graveyard contents. Undying creatures (Strangleroot Geist) come back — but this IS encoded via `Keyword.UNDYING`.
+
+**Full card pool:** Flashback, unearth, escape, embalm, aftermath — all create graveyard-to-battlefield or graveyard-to-stack value. Would need: `graveyard_castable_count` as a global feature, and per-card `has_flashback`, `has_escape` flags in the extended keyword set.
+
+#### Gap 5: Conditional growth not projected (Priority: Low)
+Experiment One (evolve) and Monastery Swiftspear (prowess) have conditional growth. The model sees the keywords but can't project future growth. Prowess value depends on noncreature spell count in hand; evolve depends on upcoming creature sizes.
+
+**Full card pool:** Prowess, evolve, modular, and similar "grows over time" mechanics are common in aggro/tempo. A `projected_growth` feature would need game state access (hand contents, deck composition). Deferred to the `encode(Card, Player)` refactor.
+
+### ActionEncoder (64-dim) — Current Gaps
+
+#### Gap 6: No board-relative utility features (Priority: High)
+The 64-dim action features encode what a spell IS but not what it DOES in this specific board state. Reserved slots 56-63 (8 available).
+
+**Fix:** Compute at encode time from the game state:
+- [56]: `would_kill_creature` — does this damage spell kill any opposing creature? Check `NumDmg >= min(opp_creature_toughness - damage_marked)`
+- [57]: `kills_biggest_threat` — would it kill the highest-power opposing creature?
+- [58]: `is_lethal` — does burn-to-face win the game? Check `NumDmg >= opp_life`
+- [59]: `n_creatures_affected` — for PumpAll/DestroyAll, how many creatures would this hit?
+- [60]: `opponent_can_respond` — does opponent have mana open for instant-speed response?
+- [61]: `leaves_mana_for_followup` — after casting, how much mana remains? Normalized.
+- [62]: `creature_would_trade` — if playing a creature, would it trade favorably in combat?
+- [63]: `saves_creature` — for protection/hexproof spells, is a creature currently targeted?
+
+**Requires refactoring `ActionEncoder.encode(SpellAbility)` to `ActionEncoder.encode(SpellAbility, Game, Player)` since board-relative features need the game state.** This is a breaking change that requires updating all call sites in PlayerControllerRL, RLController, and HumanGameRecorder. Data regeneration required.
+
+**Full card pool:** The 8 utility features above are universal — they apply to any damage spell, any creature, any pump spell. No card-specific logic needed. The `opponent_can_respond` feature becomes more important with counterspells and interaction-heavy formats.
+
+### GameStateEncoder (96-dim global) — Current Gaps
+
+#### Gap 7: No race/clock calculation (Priority: High for aggro)
+In aggro mirrors, the key question is "how many turns until I die vs how many until I kill them." The model has raw data (life totals, creature stats) but no pre-computed clock.
+
+**Fix:** Add at global indices 55-56 (currently reserved):
+- [55]: `turns_to_lethal_me` — estimate based on opponent's total attacking power vs my life
+- [56]: `turns_to_lethal_opp` — estimate based on my total attacking power vs opponent's life
+
+Simple computation: `ceil(life / max(total_attack_power - total_block_power, 1))`. Doesn't account for evasion or removal but gives a directional signal.
+
+**Full card pool:** The race clock becomes less meaningful in control/combo matchups where the game isn't decided by creature damage. Could add a `game_archetype` signal (aggro mirror, aggro-vs-control, etc.) but that requires the belief-state modeling discussed elsewhere.
+
+#### Gap 8: No opponent threat quality assessment (Priority: Medium)
+Global features encode creature counts and total power but not threat quality. A 5/5 trampler is very different from five 1/1 tokens.
+
+**Fix:** Add at global indices 57-58:
+- [57]: `opp_max_creature_power` — normalized power of opponent's biggest creature
+- [58]: `opp_evasion_power` — total power of opponent's creatures with flying/trample/menace/unblockable
+
+**Full card pool:** Add `opp_has_planeswalker`, `opp_has_equipment`, `opp_noncreature_threat_count` for non-combat threats.
+
+### Aura/Equipment Association (Priority: Low for current meta)
+
+Cards encode attachments count [27] and auras show as separate board cards, but there is no explicit "card X is attached to card Y" pointer. The per-zone self-attention in `CardSetEncoder` can learn these associations implicitly (both are in `my_board`). Options: (A) encode host card stats inline — no model change; (B) positional index — fragile; (C) attachment attention mask — new layer. See Encoder Architecture section.
+
+**Full card pool:** Equipment-heavy strategies (Voltron, Bogles) rely heavily on aura/equipment stacking. For these archetypes, Option C (attachment attention) becomes necessary. For our 4-deck meta, only Rancor matters, and the model can learn "Rancor + creature = bigger creature" from the P/T boost visible in `getNetPower()`.
+
+### Implementation Priority for Next Data Regeneration
+
+All changes below fit in reserved slots — no model architecture changes required.
+
+| Change | Slots Used | Impact | Effort |
+|--------|-----------|--------|--------|
+| Pump magnitude (CardFeatures 200-201) | 2 | High (green deck) | Trivial |
+| Race clock (Global 55-56) | 2 | High (aggro mirrors) | Easy |
+| Trigger effects (CardFeatures 190-199) | 10 | High (ETB creatures) | Medium |
+| Board-relative action utility (Action 56-63) | 8 | High (burn targeting) | Medium — requires signature change |
+| Threat quality (Global 57-58) | 2 | Medium | Easy |
+| Protection details (CardFeatures 202-205) | 4 | Medium (white deck) | Easy |
+| Total | 28 slots | | |
+
+This leaves 34 CardFeatures slots and 32 global slots still reserved for full card pool expansion (planeswalker abilities, saga chapters, adventure/split cards, companion, etc.).
 
 ### Priority Head Class Imbalance — IMPLEMENTED 2026-03-23
 
