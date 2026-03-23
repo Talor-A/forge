@@ -23,7 +23,7 @@ java -Xmx8192m \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
     -jar target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar \
     rltrain collect \
-    -d green_stompy.dck -d white_weenie.dck -d blue_tempo.dck -d red_aggro.dck \
+    -d "Green Stompy.dck" -d "White Weenie.dck" -d "Blue Tempo.dck" -d "Red Aggro.dck" \
     -n 1000 -t 16 \
     -o /path/to/trajectories -q
 ```

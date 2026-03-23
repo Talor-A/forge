@@ -47,7 +47,7 @@ import subprocess
 @dataclass
 class CollectState:
     status: str = "Starting..."
-    phase: str = "init"
+    phase: str = "init"  # init, collecting, analyzing, preprocessing, done
 
     games_done: int = 0
     games_total: int = 0
@@ -67,6 +67,19 @@ class CollectState:
     elapsed_sec: float = 0.0
     avg_turns: float = 0.0
 
+    # Preprocessing
+    preprocess_phase: str = ""  # scan, write
+    preprocess_files_done: int = 0
+    preprocess_files_total: int = 0
+    preprocess_records: int = 0
+    preprocess_pct: float = 0.0
+    target_decisions: int = 0
+    card_select_decisions: int = 0
+    mulligan_decisions: int = 0
+    binary_decisions: int = 0
+    n_games: int = 0
+    preprocess_disk_gb: float = 0.0
+
     # For chart
     speed_history: List[float] = field(default_factory=list)
     files_history: List[int] = field(default_factory=list)
@@ -84,10 +97,138 @@ def log(state, msg):
     state.log_dirty = True
 
 
+def _run_preprocessing(state, traj_dir):
+    """Run preprocessing (scan + write) with progress updates."""
+    from training.preprocess_trajectories import (
+        scan_files, preprocess, GAME_STATE_DIM,
+        GLOBAL_DIM, CARD_DIM, GAMMA,
+        _build_game_id_map)
+
+    output_dir = os.path.join(
+        os.path.dirname(traj_dir), 'preprocessed')
+
+    state.phase = "preprocessing"
+    state.preprocess_phase = "scan"
+    state.status = "Preprocessing: scanning files..."
+    log(state, "")
+    log(state, "=== Preprocessing ===")
+
+    path = Path(traj_dir)
+    files = sorted(path.glob('traj_*.jsonl'))
+    state.preprocess_files_total = len(files)
+    log(state, f"  Found {len(files)} trajectory files")
+
+    if not files:
+        log(state, "  ERROR: No trajectory files found")
+        return
+
+    # Pass 1: scan with progress
+    def scan_progress(done, total):
+        state.preprocess_files_done = done
+        state.preprocess_pct = done / max(total, 1) * 100
+        state.status = (f"Scanning: {done}/{total} files "
+                        f"({state.preprocess_pct:.0f}%)")
+
+    counts, max_cand = scan_files(files,
+                                  progress_cb=scan_progress)
+    state.preprocess_records = counts['total']
+    state.attack_decisions = counts['attack']
+    state.block_decisions = counts['block']
+    state.priority_decisions = counts['priority']
+    state.target_decisions = counts.get('target', 0)
+    state.card_select_decisions = counts.get('card_select', 0)
+    state.mulligan_decisions = counts.get('mulligan', 0)
+    state.binary_decisions = counts.get('binary', 0)
+
+    log(state, f"  Total records: {counts['total']}")
+    log(state, f"  Priority: {counts['priority']}, "
+        f"Attack: {counts['attack']}, "
+        f"Block: {counts['block']}")
+    log(state, f"  Target: {counts.get('target', 0)}, "
+        f"Card Select: {counts.get('card_select', 0)}, "
+        f"Mulligan: {counts.get('mulligan', 0)}, "
+        f"Binary: {counts.get('binary', 0)}")
+    log(state, f"  Max candidates: {max_cand}")
+
+    # Pass 2: write mmap arrays with progress
+    state.preprocess_phase = "write"
+    os.makedirs(output_dir, exist_ok=True)
+
+    t0_pp = time.time()
+
+    def write_progress(done, total):
+        state.preprocess_files_done = done
+        state.preprocess_pct = done / max(total, 1) * 100
+        state.status = (f"Writing arrays: {done}/{total} "
+                        f"files ({state.preprocess_pct:.0f}%)")
+
+    final = preprocess(files, output_dir, counts, max_cand,
+                       progress_cb=write_progress)
+
+    # Compute game count
+    game_ids = _build_game_id_map(files)
+    state.n_games = len(set(game_ids))
+
+    # Save metadata
+    metadata = {
+        'source_dir': str(traj_dir),
+        'n_files': len(files),
+        'counts': counts,
+        'final_counts': final,
+        'max_candidates': max_cand,
+        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'game_state_dim': GAME_STATE_DIM,
+        'global_feature_dim': GLOBAL_DIM,
+        'card_feature_dim': CARD_DIM,
+        'shared_game_state': True,
+        'discount_gamma': GAMMA,
+        'value_targets': 'discounted_returns',
+    }
+    with open(os.path.join(output_dir,
+                           'metadata.json'), 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    # Disk usage
+    total_bytes = 0
+    for root, dirs, fnames in os.walk(output_dir):
+        for fn in fnames:
+            total_bytes += os.path.getsize(
+                os.path.join(root, fn))
+    state.preprocess_disk_gb = total_bytes / 1024**3
+
+    pp_time = time.time() - t0_pp
+    state.preprocess_pct = 100.0
+    state.preprocess_files_done = len(files)
+
+    log(state, f"  Preprocessing complete in {pp_time:.0f}s")
+    log(state, f"  Written: {final['total']} shared, "
+        f"{final['priority']} priority, "
+        f"{final['attack']} attack, "
+        f"{final['block']} block")
+    log(state, f"  Target: {final.get('target', 0)}, "
+        f"Card Select: {final.get('card_select', 0)}, "
+        f"Mulligan: {final.get('mulligan', 0)}, "
+        f"Binary: {final.get('binary', 0)}")
+    log(state, f"  Games: {state.n_games} unique")
+    log(state, f"  Disk: {state.preprocess_disk_gb:.1f} GB")
+    log(state, f"  Output: {output_dir}")
+
+
 def collect_thread(state, args):
     """Run Java data collection and monitor progress."""
     try:
         output_dir = os.path.join(PROJECT_ROOT, 'rl_data/trajectories')
+        preproc_dir = os.path.join(PROJECT_ROOT, 'rl_data/preprocessed')
+
+        if args.clean:
+            import shutil
+            for d in [output_dir, preproc_dir]:
+                if os.path.exists(d):
+                    n = len(list(Path(d).glob('*')))
+                    log(state, f"Cleaning {d} ({n} items)...")
+                    shutil.rmtree(d)
+            log(state, "Old data removed.")
+
         os.makedirs(output_dir, exist_ok=True)
 
         state.games_total = args.games
@@ -97,8 +238,8 @@ def collect_thread(state, args):
         log(state, f"Output: {output_dir}")
         log(state, f"Games: {args.games}, Threads: 16")
 
-        decks = ['green_stompy.dck', 'white_weenie.dck',
-                 'blue_tempo.dck', 'red_aggro.dck']
+        decks = ['Green Stompy.dck', 'White Weenie.dck',
+                 'Blue Tempo.dck', 'Red Aggro.dck']
         deck_args = []
         for d in decks:
             deck_args.extend(['-d', d])
@@ -263,14 +404,20 @@ def collect_thread(state, args):
         state.phase = "analyzing"
 
         # Analyze trajectory files
-        state.status = "Counting decisions..."
+        state.status = "Analyzing trajectories..."
         attacks, blocks, priority = 0, 0, 0
         tapped_leak = 0
         total_cand, total_sel = 0, 0
         files = sorted(Path(output_dir).glob('traj_*.jsonl'))
         state.traj_files = len(files)
+        n_files = len(files)
 
-        for f in files:
+        for fi, f in enumerate(files):
+            if fi % 20 == 0:
+                pct = fi / max(n_files, 1) * 100
+                state.status = (
+                    f"Analyzing: {fi}/{n_files} files "
+                    f"({pct:.0f}%)")
             for fline in open(f):
                 try:
                     r = json.loads(fline)
@@ -296,18 +443,23 @@ def collect_thread(state, args):
         state.priority_decisions = priority
         state.elapsed_sec = time.time() - t0
 
-        state.phase = "done"
-        state.status = "Collection complete!"
-
         log(state, "")
-        log(state, f"=== Summary ===")
+        log(state, f"=== Collection Summary ===")
         log(state, f"Files: {state.traj_files}")
         log(state, f"Attacks: {attacks}, Blocks: {blocks}, Priority: {priority}")
         log(state, f"Avg candidates/attack: {total_cand/max(attacks,1):.1f}")
         log(state, f"Avg selected/attack: {total_sel/max(attacks,1):.1f}")
         log(state, f"Attack rate: {total_sel*100/max(total_cand,1):.1f}%")
         log(state, f"Tapped leak: {tapped_leak} (MUST be 0)")
-        log(state, f"Time: {state.elapsed_sec:.0f}s")
+        log(state, f"Collection time: {state.elapsed_sec:.0f}s")
+
+        # === Preprocessing phase ===
+        _run_preprocessing(state, output_dir)
+
+        state.phase = "done"
+        state.status = "Collection + preprocessing complete!"
+        state.elapsed_sec = time.time() - t0
+        log(state, f"Total time: {state.elapsed_sec:.0f}s")
 
     except Exception as e:
         log(state, f"ERROR: {e}")
@@ -322,7 +474,7 @@ class CollectDashboard:
         self.root = root
         self.state = state
         root.title("MTG RL — Data Collection")
-        root.geometry("900x700")
+        root.geometry("900x750")
         root.configure(bg='#1e1e2e')
 
         style = ttk.Style()
@@ -372,6 +524,9 @@ class CollectDashboard:
             ('Avg Turns', '—'), ('ETA', '—'),
             ('Files', '—'), ('Attacks', '—'),
             ('Blocks', '—'), ('Priority', '—'),
+            ('Target', '—'), ('Mulligan', '—'),
+            ('Binary', '—'), ('Unique Games', '—'),
+            ('Records', '—'), ('Disk', '—'),
             ('Elapsed', '—'),
         ]
         for i, (k, v) in enumerate(stats):
@@ -396,7 +551,11 @@ class CollectDashboard:
         s = self.state
         self.status_v.set(s.status)
 
-        if s.games_total > 0:
+        if s.phase == "preprocessing":
+            self.prog['value'] = s.preprocess_pct
+            self.prog_v.set(
+                f"Preprocessing... {s.preprocess_phase}")
+        elif s.games_total > 0:
             pct = s.games_done / s.games_total * 100
             self.prog['value'] = pct
             self.prog_v.set(
@@ -419,6 +578,19 @@ class CollectDashboard:
         self.svars['Attacks'].set(str(s.attack_decisions))
         self.svars['Blocks'].set(str(s.block_decisions))
         self.svars['Priority'].set(str(s.priority_decisions))
+        self.svars['Target'].set(
+            str(s.target_decisions) if s.target_decisions else "—")
+        self.svars['Mulligan'].set(
+            str(s.mulligan_decisions) if s.mulligan_decisions else "—")
+        self.svars['Binary'].set(
+            str(s.binary_decisions) if s.binary_decisions else "—")
+        self.svars['Unique Games'].set(
+            str(s.n_games) if s.n_games else "—")
+        self.svars['Records'].set(
+            str(s.preprocess_records) if s.preprocess_records else "—")
+        self.svars['Disk'].set(
+            f"{s.preprocess_disk_gb:.1f} GB"
+            if s.preprocess_disk_gb > 0 else "—")
         self.svars['Elapsed'].set(
             f"{s.elapsed_sec:.0f}s" if s.elapsed_sec > 0 else "—")
 
@@ -439,6 +611,9 @@ def main():
         description='MTG RL Data Collection Dashboard')
     parser.add_argument('--games', type=int, default=1000,
                         help='Number of games to collect')
+    parser.add_argument('--clean', action='store_true',
+                        help='Delete old trajectories and '
+                             'preprocessed data before collecting')
     args = parser.parse_args()
 
     state = CollectState()

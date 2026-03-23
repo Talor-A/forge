@@ -32,10 +32,10 @@ java -Xmx4096m \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
     -jar "$FORGE_JAR" \
     rltrain collect \
-    -d green_stompy.dck \
-    -d white_weenie.dck \
-    -d blue_tempo.dck \
-    -d red_aggro.dck \
+    -d "Green Stompy.dck" \
+    -d "White Weenie.dck" \
+    -d "Blue Tempo.dck" \
+    -d "Red Aggro.dck" \
     -n "$NUM_GAMES" \
     -o "$DATA_DIR" \
     -q

@@ -53,8 +53,12 @@ CARD_DIM = 256
 GAME_STATE_DIM = 37216  # 96 + 145*256
 
 
-def scan_files(files):
-    """Pass 1: Count samples, find max candidate sizes."""
+def scan_files(files, progress_cb=None):
+    """Pass 1: Count samples, find max candidate sizes.
+
+    Args:
+        progress_cb: optional callback(files_done, files_total)
+    """
     counts = {'total': 0, 'priority': 0,
               'attack': 0, 'block': 0,
               'target': 0, 'card_select': 0,
@@ -69,6 +73,8 @@ def scan_files(files):
     for fi, filepath in enumerate(files):
         if (fi + 1) % 200 == 0:
             print(f"    {fi+1}/{len(files)}", flush=True)
+        if progress_cb and fi % 20 == 0:
+            progress_cb(fi, len(files))
         try:
             with open(filepath, 'r') as f:
                 lines = f.readlines()
@@ -114,6 +120,8 @@ def scan_files(files):
             print(f"    Warning: {filepath}: {e}",
                   flush=True)
 
+    if progress_cb:
+        progress_cb(len(files), len(files))
     print(f"  Counts: {counts}", flush=True)
     print(f"  Max candidates: {max_cand}", flush=True)
     return counts, max_cand
@@ -158,8 +166,13 @@ def sanitize(arr):
     return arr
 
 
-def preprocess(files, output_dir, counts, max_cand):
-    """Pass 2: Create and fill memory-mapped arrays."""
+def preprocess(files, output_dir, counts, max_cand,
+               progress_cb=None):
+    """Pass 2: Create and fill memory-mapped arrays.
+
+    Args:
+        progress_cb: optional callback(files_done, files_total)
+    """
     nt = counts['total']
     np_ = counts['priority']
     na = counts['attack']
@@ -366,6 +379,8 @@ def preprocess(files, output_dir, counts, max_cand):
             print(f"    {fi+1}/{len(files)} "
                   f"(s={si} p={pi} a={ai} b={bi})",
                   flush=True)
+        if progress_cb and fi % 20 == 0:
+            progress_cb(fi, len(files))
         try:
             with open(filepath, 'r') as f:
                 lines = f.readlines()
@@ -562,6 +577,9 @@ def preprocess(files, output_dir, counts, max_cand):
     if n_bin > 0:
         for arr in [bin_gs_idx, bin_decision]:
             arr.flush()
+
+    if progress_cb:
+        progress_cb(len(files), len(files))
 
     return {'total': si, 'priority': pi,
             'attack': ai, 'block': bi,

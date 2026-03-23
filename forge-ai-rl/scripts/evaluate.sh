@@ -25,8 +25,8 @@ java -Xmx4096m \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
     -jar "$FORGE_JAR" \
     rltrain evaluate \
-    -d green_stompy.dck \
-    -d white_weenie.dck \
+    -d "Green Stompy.dck" \
+    -d "White Weenie.dck" \
     -n "$NUM_GAMES" \
     -o "$DATA_DIR" \
     -host localhost \

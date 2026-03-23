@@ -56,8 +56,8 @@ FORGE_JAR = os.path.join(
     PROJECT_ROOT,
     'forge-gui-desktop/target/'
     'forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar')
-DECKS = ['green_stompy.dck', 'white_weenie.dck',
-         'blue_tempo.dck', 'red_aggro.dck']
+DECKS = ['Green Stompy.dck', 'White Weenie.dck',
+         'Blue Tempo.dck', 'Red Aggro.dck']
 
 
 # ── Data loading for PPO ─────────────────────────────

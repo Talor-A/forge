@@ -47,7 +47,7 @@ java -Xmx8192m \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
     -jar target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar \
     rltrain evaluate \
-    -d green_stompy.dck -d white_weenie.dck -d blue_tempo.dck -d red_aggro.dck \
+    -d "Green Stompy.dck" -d "White Weenie.dck" -d "Blue Tempo.dck" -d "Red Aggro.dck" \
     -n "$GAMES" -o /tmp/rl_verify \
     -host localhost -port $PORT -q 2>&1 | grep -E "RL Wins|Complete"
 
@@ -82,7 +82,7 @@ grep "RL_MODEL_ATTACK" /tmp/rl_verify/traj_*.jsonl 2>/dev/null | head -5 || \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
     -jar target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar \
     rltrain evaluate \
-    -d green_stompy.dck -d white_weenie.dck \
+    -d "Green Stompy.dck" -d "White Weenie.dck" \
     -n 1 -o /tmp/rl_verify_probs \
     -host localhost -port $PORT 2>&1 | grep "RL_MODEL_ATTACK" | head -5
 
