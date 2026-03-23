@@ -237,7 +237,7 @@ public class RLController {
 
         DecisionContext context = DecisionContext.multiSelect(
                 DecisionType.DECLARE_BLOCKERS, gameState, candidates,
-                0, possibleBlockers.size(), "declare_blockers");
+                0, Math.min(possibleBlockers.size(), candidates.size()), "declare_blockers");
 
         DecisionResult result = requestDecision(context);
         if (result == null) {
@@ -400,7 +400,8 @@ public class RLController {
         DecisionContext context = DecisionContext.multiSelect(
                 DecisionType.DECLARE_BLOCKERS, cachedPreDecisionState,
                 cachedCandidateFeatures,
-                0, possibleBlockers.size(),
+                0, Math.min(possibleBlockers.size(),
+                    cachedCandidateFeatures.size()),
                 "block_" + selectedIndices.size());
 
         DecisionResult result = new DecisionResult(
@@ -458,7 +459,9 @@ public class RLController {
         DecisionContext context = DecisionContext.multiSelect(
                 DecisionType.DECLARE_BLOCKERS, cachedPreDecisionState,
                 candidates.isEmpty() ? cachedCandidateFeatures : candidates,
-                0, possibleBlockers.size(),
+                0, Math.min(possibleBlockers.size(),
+                    candidates.isEmpty() ? cachedCandidateFeatures.size()
+                        : candidates.size()),
                 "block_assign_" + selectedIndices.size()
                     + "_of_" + possibleBlockers.size()
                     + "x" + attackers.size());

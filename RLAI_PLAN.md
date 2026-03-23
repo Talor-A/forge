@@ -337,18 +337,16 @@ The final card representation is the **concatenation of all four**, projected to
 8. ✅ Python project with PyTorch, MTGModel (11M params), training dashboards
 
 ### Phase 2: Imitation Learning (weeks 5-8) ✅ COMPLETE
-1. ✅ Run 1,000 heuristic AI vs AI games, recording all 7 decision types (~142K records)
-2. ✅ Train game state encoder + value network (stopped early, overfitting observed)
-3. ✅ Train ALL 7 decision heads with 256-dim card features:
-   - Priority: 117,111 samples → 95.7% val accuracy
-   - Attack: 10,396 samples → 82.8% val accuracy
-   - Target: 5,535 samples → 74.3% val accuracy (256-dim card features, pointer attention)
-   - Card Select: 708 samples → 76.5% val accuracy (scry top/bottom)
-   - Block: 2,977 samples → 64.2% val accuracy (pairwise assignment)
-   - Mulligan: 2,864 samples → 99.0% val accuracy (keep/mull binary)
-   - Binary: 2,277 samples → 80.9% val accuracy (trigger confirmation)
-4. ✅ Pure RL gameplay — all 7 heads make decisions, no heuristic involvement
+1. ✅ Run 1,000 heuristic AI vs AI games, recording all 7 decision types
+   - Latest data (v3, 2026-03-23): 127,156 records from 987 unique games
+   - 104,514 priority, 9,562 attack, 2,768 block, 4,995 target, 2,635 mulligan, 2,032 binary, 650 card_select
+2. ✅ Train game state encoder + value network
+3. ✅ Train ALL 7 decision heads with 256-dim card features
+   - Previous run (v2 data): Priority 95.7%, Attack 82.8%, Target 74.3%, Card Select 76.5%, Block 64.2%, Mulligan 99.0%, Binary 80.9%
+   - Retraining on v3 data in progress (bugfixes applied: leakage, feature encoding, aura targeting, multi-target)
+4. ✅ Pure RL gameplay — all 7 heads make decisions via ONNX, no heuristic involvement
 5. ✅ Baseline: ~25% win rate vs heuristic (imitation model, no PPO)
+6. ✅ ONNX deployment — 9 model files loaded in Java, verified identical to PyTorch output
 
 ### Phase 3: RL Training — Simple Cards (weeks 9-14) 🔄 IN PROGRESS
 1. 4 aggro decks (Red Aggro, Green Stompy, White Weenie, Blue Tempo)
@@ -401,31 +399,26 @@ The final card representation is the **concatenation of all four**, projected to
 
 ---
 
-## Known Bugs (fix before next data collection)
+## Bugs Fixed (v3 data collection cycle, 2026-03-23)
 
-### Critical — FIXED
+All critical bugs have been fixed. Data regenerated with corrected feature encoding.
 
-- **~~ppo_ui.py used attack_head for block data~~** — FIXED 2026-03-22. Block decisions trained through attack head. Fixed with `(data, head)` tuple pairing.
+- **~~ppo_ui.py used attack_head for block data~~** — FIXED. Block decisions trained through attack head. Fixed with `(data, head)` tuple pairing.
+- **~~RewardShaper.initialized never set to true~~** — FIXED. Intermediate rewards always returned 0.
+- **~~PPO used flat terminal +1/-1 for all decisions~~** — FIXED. Now computes GAE advantages from `intermediateReward` per decision with gamma=0.999, lambda=0.95.
+- **~~Encoder corrupted by PPO gradients~~** — FIXED. Now encoder is frozen during PPO, heads get lr=3e-5, value network gets lr=1e-4.
+- **~~Heuristic vetoed RL spell choices~~** — FIXED. RL uses `decideTargets` for targeting directly, no heuristic strategic veto.
+- **~~Duplicate ApiType.ChangeZone in feature encoding~~** — FIXED 2026-03-23. Index 29 replaced with `RearrangeTopOfLibrary` in both `ActionEncoder.java` and `CardFeatures.java`.
+- **~~Aura targeting flags wrong in ActionEncoder~~** — FIXED 2026-03-23. Added `source.isAura()` check to use enchant keyword instead of `getValidTgts()`.
+- **~~Multi-target spells (Searing Blaze) hardcoded to 1 target~~** — FIXED 2026-03-23. Now uses `getMinTargets()`/`getMaxTargets()` from `TargetRestrictions`.
+- **~~Train/val data leakage~~** — FIXED 2026-03-23. All training scripts now split by game_id (filename timestamp) instead of random shuffle. Both P1/P2 perspectives of the same game stay in the same split.
+- **~~is_sorcery_speed feature missing~~** — FIXED 2026-03-23. Added at global feature index 54.
 
-- **~~RewardShaper.initialized never set to true~~** — FIXED 2026-03-22. Intermediate rewards always returned 0.
+### Moderate — Fixed
 
-- **~~PPO used flat terminal +1/-1 for all decisions~~** — FIXED 2026-03-22. Every decision in a game got the same reward regardless of quality. `load_ppo_data()` now computes GAE advantages from `intermediateReward` per decision with gamma=0.999, lambda=0.95.
+- **~~Block candidate maxSelections constraint~~** — FIXED 2026-03-23. `maxSelections` now capped to `min(possibleBlockers.size(), candidates.size())`. Inference-only fix, no data regeneration needed (ONNX block head uses per-blocker argmax and doesn't consume this value).
 
-- **~~Encoder corrupted by PPO gradients~~** — FIXED 2026-03-22. Single optimizer updated encoder alongside heads. Now encoder is frozen during PPO, heads get lr=3e-5, value network gets lr=1e-4.
-
-- **~~Heuristic vetoed RL spell choices~~** — FIXED 2026-03-22. `canPlayAndPayForFacade` applied full strategic evaluation, rejecting spells the model wanted to play. Now RL uses `decideTargets` for targeting directly, no heuristic strategic veto.
-
-### Critical — Open
-
-- **Duplicate ApiType.ChangeZone in feature encoding**: In both `ActionEncoder.java` (lines 77-86) and `CardFeatures.java` (lines 88-97), `ApiType.ChangeZone` appears at index 3 AND index 29 of the `TOP_API_TYPES` array. This wastes a feature slot, causes ChangeZone spells to light up two features, and means the API type that should be at index 29 is completely missing. Fix: replace the duplicate at index 29 with the correct ApiType. **Requires data regeneration** since the encoding changes.
-
-- **Aura targeting flags wrong in ActionEncoder**: Aura spells (e.g. Rancor) encode `targets_creatures=0, targets_players=1` in the 64-dim action features despite targeting creatures via `K:Enchant:Creature`. The `getValidTgts()` for aura spells returns a string that doesn't match `contains("Creature")` but does match `contains("Player")`. The model learns that auras target players, which is incorrect. Fix: handle aura targeting correctly in `ActionEncoder.java` (check enchant keyword or adjust string matching).
-
-### Moderate
-
-- **Block candidate maxSelections constraint**: In `RLController.java` (lines 216-218), blocking `maxSelections` is set to `possibleBlockers.size()`, but candidates are (blocker × attacker) pairs. With 3 blockers and 2 attackers there are 7 candidates but max=3. This may prevent valid multi-block assignments. Review whether this is intentional or a bug.
-
-### Diagnostics Added (2026-03-22)
+### Diagnostics
 
 - **All decision logging**: `PlayerControllerRL` logs every RL decision:
   - `RL_PRIORITY_PLAY: {card} ({api}) -> target: {target}` — spell played with target
@@ -436,20 +429,14 @@ The final card representation is the **concatenation of all four**, projected to
   - `RL_MODEL_ATTACK: probs=[...] selected=[...] value={v}` — attack decision
 - **Per-game diagnostics**: `RL_DIAG:` summary at game end with model_asked, play, pass, rejected, bypass counts
 
-## Training Data Enhancements (next data collection cycle)
+## Future Enhancements
 
-- **Add `is_sorcery_speed_timing` flag**: Single bit in global features or action features indicating whether sorcery-speed spells (creatures) can be cast. Currently the model must learn this from a 13-way phase one-hot. A single bit makes it trivial to distinguish "main phase, can play creatures" from "combat, can only play instants." Highest impact enhancement.
+- **Encode spell utility in context**: The 64-dim action features encode what a spell IS but not what it DOES in the current board state. Add features like "would_kill_a_creature", "is_lethal", "has_valid_creature_target".
 
-- **Encode spell utility in context**: The 64-dim action features encode what a spell IS but not what it DOES in the current board state. Add features like "would_kill_a_creature" (Shock at a 2-toughness creature), "is_lethal" (burn to face when opponent is low enough), "has_valid_creature_target" to help the model learn spell timing.
+- **Record opponent's plays**: Currently only the RL player's decisions are recorded. Recording opponent plays would help the model learn reactive strategies.
 
-- **Record opponent's plays**: Currently only the RL player's decisions are recorded. Recording opponent plays (or at least board state deltas between decisions) would help the model learn reactive strategies ("opponent played a 3/3, so save removal").
-
-- **Searing Blaze multi-target fix**: Spells requiring 2+ targets (like Searing Blaze) need the targeting code to handle multiple target selections. Currently only 1 target is set, causing stack failures. Fix: check `sa.getMinTargets()` and call `decideTargets` with the correct min/max.
-
-## Known Limitations (v2 feature enhancements)
+## Known Limitations (future enhancements)
 
 - **Trigger effect encoding**: The model sees boolean flags for trigger presence (has_etb, has_death, has_combat, has_upkeep) but not what those triggers DO. An ETB that draws a card and one that deals 2 damage both just show `has_etb=1`. Fix: extract ApiType + effect params from each trigger's `getOverridingAbility()` in CardFeatures.java.
 
 - **Aura/equipment association**: Cards encode attachments count [27] and auras show as separate board cards, but there is no explicit "card X is attached to card Y" pointer. The model sees P/T effects (getNetPower/getNetToughness include bonuses) but cannot reason about what happens if an aura is removed. Fix: encode host card index in aura's feature vector.
-
-- **Card selection (discard/sacrifice) not routed through model**: The `chooseCardsForEffect`, `choosePermanentsToSacrifice`, `chooseCardsToDiscardFrom`, and `arrangeForScry` methods still fall back to heuristic. Need GRPC routing with `CardCollectionView` index conversion.
