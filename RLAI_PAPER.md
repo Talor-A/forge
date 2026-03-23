@@ -301,19 +301,33 @@ Games are run headlessly using the Forge engine's `SimulateRLTraining` runner, w
 - Runs the game with a configurable timeout (180 seconds)
 - Captures decision data via the Guava EventBus subscriber pattern
 
-The `PlayerControllerRL` class extends `PlayerControllerAi` and overrides key decision methods to capture training data:
+The `PlayerControllerRL` class extends `PlayerControllerAi` and overrides all 7 decision methods to capture training data. The recording pattern is consistent: capture the full game state and candidate features *before* delegating to the heuristic, let the heuristic make its decision, then read back what it chose.
 
-- **`declareAttackers`**: Captures pre-decision creature features (256-dim per creature), delegates to heuristic, reads back which creatures were selected as attackers from the combat object.
-- **`declareBlockers`**: Same pattern — pre-decision capture, heuristic execution, post-decision readback of blocking assignments.
-- **`chooseSpellAbilityToPlay`**: Leverages a modified `AiController.chooseSpellAbilityToPlayFromList` that evaluates ALL candidates through the engine's full `canPlayAndPayFor()` validation (timing, cost, targeting, AI logic) rather than short-circuiting at the first playable spell. The mechanically-legal candidate list (spells passing timing + cost checks) is cached separately from the heuristic-approved list (spells the AI considers worth playing). This gives the RL model visibility into options the heuristic would reject — enabling it to discover unconventional plays.
+| Decision Type | Override Method | Candidate Features | Selection Type |
+|--------------|----------------|-------------------|----------------|
+| Priority | `chooseSpellAbilityToPlay` | 64-dim per spell (card type, color, CMC, ApiType, targeting) | Single-select from spells + pass |
+| Attack | `declareAttackers` | 256-dim per creature (full card features) | Multi-select (which creatures attack) |
+| Block | `declareBlockers` | 512-dim per pair (blocker 256 + attacker 256) | Per-blocker assignment to attackers |
+| Target | `chooseSingleEntityForEffect` | 256-dim per target candidate (card features) | Single-select from legal targets |
+| Card Select | `chooseCardsForEffect` | 256-dim per candidate card | Multi-select (scry, discard) |
+| Mulligan | `mulliganKeepHand` | 256-dim per card in hand | Binary (keep/mulligan) |
+| Binary | `confirmAction` | None (game state only) | Binary (yes/no) |
 
-Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 37,216-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, intermediate reward signals (life/card/board advantage changes), and the terminal outcome.
+For priority decisions, a modified `AiController.chooseSpellAbilityToPlayFromList` evaluates ALL candidates through the engine's `canPlayAndPayFor()` validation rather than short-circuiting at the first playable spell. The mechanically-legal candidate list (spells passing timing + cost checks) is cached separately from the heuristic-approved list. This gives the RL model visibility into options the heuristic would reject — enabling it to discover unconventional plays during PPO self-play.
 
-During preprocessing, discounted returns are computed backward through each trajectory using $G_t = r_t + \gamma G_{t+1}$ with $\gamma = 0.95$, where $r_t$ includes both the intermediate reward shaping signal and the terminal reward (+1/-1) on the final step. This means early-game decisions have value targets closer to 0 (high uncertainty about outcome), while late-game decisions have targets closer to ±1 (outcome nearly determined). The value network learns to predict these discounted returns rather than flat binary outcomes, giving it a calibrated sense of game-state certainty.
+Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 37,216-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and intermediate reward signals from the `RewardShaper`.
 
-Data is collected in parallel across 16 threads, achieving 1.3 games/second on a 16-core machine. A batch of 1,000 games produces approximately 2,000 trajectory files with ~153,000 decision records.
+**Preprocessing and discounted returns.** Raw trajectory JSONL files are preprocessed into memory-mapped numpy arrays for efficient training (18.8 GB for 127K records). During preprocessing, discounted returns are computed backward through each trajectory:
 
-We note a critical implementation constraint discovered during development: the Forge game engine performs class identity checks on the `LobbyPlayerAi` class that prevent subclassing, and modifications to the `PlayerControllerAi` class break the fat-jar class resolution at runtime. Recording is implemented via `PlayerControllerRL` (which extends `PlayerControllerAi`, not `LobbyPlayerAi`) and a minimal caching addition to `AiController` — the only core engine modification is caching the validated candidate list during spell evaluation.
+$$G_t = r_t + \gamma G_{t+1} \quad (\gamma = 0.95)$$
+
+where $r_t$ includes the intermediate reward shaping signal and the terminal reward (+1/-1) on the final step. This produces value targets where early-game decisions are near 0 (high uncertainty) and late-game decisions approach ±1 (outcome nearly determined). The value network learns to predict these discounted returns, giving it calibrated confidence rather than treating every game state as equally certain.
+
+Note that the preprocessing discount factor ($\gamma = 0.95$) differs from the PPO discount factor ($\gamma = 0.999$). The preprocessing $\gamma$ is used only for value network training targets during imitation learning — it produces conservative targets that decay quickly, preventing the value network from being overconfident about early-game positions. During PPO, the higher $\gamma = 0.999$ is used for GAE advantage computation (Section 3.2.2), where we want early-game decisions to receive meaningful credit for late-game outcomes so the policy can learn long-horizon strategies.
+
+Data is collected in parallel across 16 threads, achieving 1.3 games/second on a 16-core machine. A batch of 1,000 games produces 2,000 trajectory files with ~127,000 decision records across all 7 types.
+
+We note a critical implementation constraint: the Forge game engine performs class identity checks on `LobbyPlayerAi` that prevent subclassing, and modifications to `PlayerControllerAi` break fat-jar class resolution. Recording is implemented via `PlayerControllerRL` (which extends `PlayerControllerAi`, not `LobbyPlayerAi`) with a minimal caching addition to `AiController`.
 
 #### 3.1.2 Value Network Training
 
@@ -349,31 +363,73 @@ After the value network converges, we freeze the encoder weights and train each 
 
 Once imitation learning produces a policy that plays at rough parity with the heuristic AI, we switch to PPO-based self-play to improve beyond the heuristic's level.
 
-#### 3.2.1 PPO Formulation
+#### 3.2.1 The Credit Assignment Problem
 
-At each decision point $t$, the agent observes state $s_t$ and takes action $a_t$ according to policy $\pi_\theta(a_t|s_t)$. The advantage is estimated using Generalized Advantage Estimation (GAE):
+The central challenge in applying RL to MTG is **credit assignment**: a game involves 50-400 decisions, but the reward signal is a single win or loss at the end. Which decisions actually mattered? A player who cast a Lightning Bolt at the opponent's face on turn 2 (wasteful) and then lost on turn 15 should not receive equal blame for every decision — the early misplay was more costly than the correct blocks on turn 14.
+
+We need a way to estimate, for each individual decision, how much better or worse it was than what we'd expect from that game state. This quantity is called the **advantage** — positive advantage means the action was better than average for that state, negative means it was worse.
+
+#### 3.2.2 Generalized Advantage Estimation (GAE)
+
+The naive approach to advantage estimation is the Monte Carlo return: assign each decision the eventual game outcome (+1 or -1) minus the value network's prediction for that state. This has low bias (the outcome is ground truth) but extremely high variance — a single game outcome carries noise from all subsequent decisions, opponent's draws, and random events.
+
+At the other extreme, the one-step **temporal difference (TD) residual** uses only the immediate reward and the value network's predictions:
+
+$$\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+
+This says: "the advantage of this decision is the immediate reward $r_t$ plus how much better the next state is than expected." TD residuals have low variance (they don't depend on the full game trajectory) but high bias (they trust the value network's predictions, which may be inaccurate).
+
+**GAE (Schulman et al., 2016)** interpolates between these extremes using a parameter $\lambda \in [0, 1]$:
 
 $$\hat{A}_t = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{t+l}$$
 
-where $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$ is the TD residual.
+When $\lambda = 0$, GAE reduces to the one-step TD residual (low variance, high bias). When $\lambda = 1$, it approaches the Monte Carlo return (high variance, low bias). We use $\lambda = 0.95$, which gives substantial weight to multi-step returns while still benefiting from the variance reduction of the value network baseline.
 
-The PPO clipped objective is:
+**Concrete example in MTG:** Consider a game where the RL agent casts a creature on turn 3 ($t=3$), then on turn 4 the opponent fails to remove it, and on turn 5 the creature attacks for lethal. The TD residual at $t=3$ captures the immediate board advantage change ($r_3$) plus the value improvement. GAE propagates the turn-5 lethal attack backward through the chain of TD residuals, giving the turn-3 creature cast a positive advantage — it recognizes that playing the creature led to winning.
+
+The discount factor $\gamma = 0.999$ ensures that early-game decisions still receive meaningful credit for late-game outcomes. With $\gamma = 0.99$, a reward 100 steps later would be discounted to $0.99^{100} \approx 0.37$; with $\gamma = 0.999$, it retains $0.999^{100} \approx 0.90$ of its value — appropriate for MTG where a turn-1 play can determine the game's trajectory.
+
+#### 3.2.3 PPO: How the Policy Improves
+
+PPO is an iterative algorithm that alternates between playing games (collecting experience) and updating the policy (learning from that experience). The core loop is:
+
+1. **Play games using the current policy.** The model makes decisions stochastically — sampling from its probability distribution rather than always picking the best action. This exploration is essential: the model must occasionally try suboptimal actions to discover whether they're actually better than it thinks. Each action's probability under the current policy is recorded alongside the game state and outcome.
+
+2. **Compute advantages.** Using GAE (Section 3.2.2), estimate how much better or worse each action was compared to what we'd expect. Actions with positive advantage were better than average; negative advantage means the model should have done something else.
+
+3. **Update the policy.** Increase the probability of actions with positive advantage, decrease the probability of actions with negative advantage. But do this conservatively — we don't want to overreact to a single game's outcome.
+
+**Why stochastic sampling matters.** During PPO, the model uses `torch.multinomial` to sample from its action distribution, not `argmax`. If the model assigns 60% probability to pass and 35% to playing a creature, it will play the creature 35% of the time. This is deliberately worse than greedy play (argmax would always pick the best action) because exploration is necessary — the model needs to see what happens when it plays the creature to learn whether it should increase that probability.
+
+This means PPO's win rate during training is *not* the model's true strength. A model that achieves 30% win rate under stochastic PPO sampling may achieve 50%+ under argmax deployment. The sampling reveals the shape of the model's probability distribution, while argmax hides it.
+
+**The clipping mechanism.** The key risk in policy gradient methods is making updates that are too large. If the model plays 400 games, computes advantages, and then drastically changes its policy, the advantage estimates become unreliable — they were computed under the old policy's behavior, not the new one.
+
+PPO prevents this by clipping the **importance sampling ratio** — the ratio of how likely the new policy is to take the same action versus the old policy:
+
+$$r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$$
+
+If $r_t = 1$, the policies agree. If $r_t = 2$, the new policy is twice as likely to take that action. The clipped objective prevents the ratio from moving too far from 1:
 
 $$L^{CLIP}(\theta) = \mathbb{E}_t\left[\min\left(r_t(\theta)\hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\right)\right]$$
 
-with probability ratio $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$ and clipping parameter $\epsilon = 0.1$.
+With $\epsilon = 0.1$, the ratio is clamped to $[0.9, 1.1]$, limiting each update to at most a 10% change in action probability. This is conservative — standard PPO uses $\epsilon = 0.2$ — but appropriate for our setting where the imitation-learned policy is already competent and we want to improve it without destroying what it learned.
 
-The total loss combines policy, value, and entropy terms:
+**Concrete example.** Suppose the model plays a Lightning Bolt at the opponent's face on turn 2 with probability 20% (pass was 80%). GAE computes a negative advantage for this action (the model lost that game, partly because it wasted the bolt early). PPO will decrease the probability of face-bolting in similar states — but only by up to 10% per update (from 20% to ~18%), not by zeroing it out. Over many rounds, if face-bolting consistently leads to losses, the probability gradually decreases. If the model later encounters a state where the opponent is at 3 life, the advantage will be positive and the probability will increase — the model learns context-dependent spell timing.
 
-$$L = L^{CLIP} - c_1 L^{VF} + c_2 H[\pi_\theta]$$
+**The total loss** combines three terms:
 
-with $c_1 = 0.5$ (value loss coefficient) and $c_2 = 0.005$ (entropy bonus to encourage exploration).
+$$L = L^{CLIP} + 0.5 \cdot L^{VF} - 0.005 \cdot H[\pi_\theta]$$
 
-#### 3.2.2 Reward Shaping
+- **Policy loss** ($L^{CLIP}$): Moves the policy toward actions with positive advantage, away from actions with negative advantage.
+- **Value loss** ($L^{VF}$): MSE between the value network's prediction and the actual discounted return. This improves the critic, which provides better advantage estimates in future rounds — creating a virtuous cycle where better value estimates lead to more accurate advantages, which lead to better policy updates.
+- **Entropy bonus** ($H[\pi_\theta]$): Encourages the policy to maintain some randomness, preventing premature convergence to a deterministic strategy. Without entropy, the model might collapse to "always pass" (the safest action) and never explore alternatives. The small coefficient (0.005) provides mild exploration without destabilizing the learned policy.
 
-Reward shaping, GAE advantage computation, and the frozen encoder strategy are described in detail in Section 5.4.
+#### 3.2.4 Reward Shaping
 
-#### 3.2.3 Curriculum Learning
+Reward shaping, the frozen encoder strategy, and the full PPO training loop are described in detail in Section 5.4.
+
+#### 3.2.5 Curriculum Learning
 
 We introduce card complexity gradually across six stages:
 
@@ -388,7 +444,7 @@ We introduce card complexity gradually across six stages:
 
 Win rates are measured against the heuristic AI. Advancement thresholds decrease at higher stages because the task becomes inherently harder — the agent faces more complex card interactions and the heuristic AI's hand-tuned card-specific logic becomes a stronger baseline.
 
-#### 3.2.4 League Training
+#### 3.2.6 League Training
 
 Following the AlphaStar approach (Vinyals et al., 2019), we maintain a population of agents:
 
@@ -516,28 +572,15 @@ Each PPO round consists of four phases:
 
 1. **Game collection.** The RL model plays 400 games against the heuristic AI via the GRPC model server. The Java game engine calls the model for every decision (priority, attack, block, target, mulligan, binary), recording the full game state, candidate features, selected action, action probability under the current policy, and intermediate reward signals. Each game produces two trajectory files (one per player perspective).
 
-2. **Data loading and advantage computation.** Trajectory files are parsed and decisions are separated by type. For each decision in a trajectory, GAE advantages are computed backward:
+2. **Data loading and advantage computation.** Trajectory files are parsed and decisions are separated by type. For each decision in a trajectory, GAE advantages are computed backward using the algorithm described in Section 3.2.2, with $r_t$ incorporating the intermediate reward from the `RewardShaper` (life/card/board advantage changes) and the terminal reward (+1/-1) on the final step. The value estimates $V(s_t)$ are recorded at decision time by the model server.
 
-$$\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
-$$\hat{A}_t = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{t+l}$$
+3. **Policy gradient updates.** For each of 4 PPO epochs, the data is shuffled and processed in mini-batches of 64. The clipped objective (Section 3.2.3) is applied to all heads, but each head type computes the importance sampling ratio differently because the action structures differ:
 
-where $r_t$ is the intermediate reward (life/card/board advantage change from the `RewardShaper`), $V(s_t)$ is the value estimate recorded at decision time, and the terminal reward (+1/-1) is added to the final step. With $\gamma = 0.999$ and $\lambda = 0.95$, early-game decisions receive diluted credit while late-game decisions that directly influenced the outcome receive strong signal.
+   - **Priority head:** Categorical distribution over actions via softmax. The importance ratio is computed from the log-probability of the single selected action under new vs old policy.
 
-3. **Policy gradient updates.** For each of 4 PPO epochs, the data is shuffled and processed in mini-batches of 64. Each head type has its own compute function because the loss structure differs:
-
-   - **Priority head:** The current policy produces a categorical distribution over actions via softmax. The importance sampling ratio $r = \pi_{new}(a|s) / \pi_{old}(a|s)$ is computed from the log-probabilities of the selected action under new and old policies. The clipped surrogate objective prevents destructively large updates:
-
-   $$L^{CLIP} = -\min(r\hat{A}, \text{clip}(r, 1-\epsilon, 1+\epsilon)\hat{A})$$
-
-   - **Attack head:** Each creature independently has a Bernoulli probability of attacking. The log-probability is summed across all creatures, and the importance ratio is computed from the total log-probability of the observed attack pattern. This means the policy is updated based on the *joint* attack decision, not each creature independently.
+   - **Attack head:** Each creature independently has a Bernoulli probability of attacking. The log-probability is *summed* across all creatures, and the importance ratio is computed from the total log-probability of the observed attack pattern. This means the policy is updated based on the *joint* attack decision, not each creature independently.
 
    - **Block head:** Each blocker independently selects an attacker (or no-block) via a categorical distribution. Similar to the attack head, the joint log-probability across all blockers forms the importance ratio.
-
-   For all heads, the total loss combines the clipped policy loss, value loss (MSE between predicted and actual return), and an entropy bonus:
-
-   $$L = L^{CLIP} + 0.5 \cdot L^{VF} - 0.005 \cdot H[\pi]$$
-
-   The entropy term encourages exploration — without it, the policy can collapse to always passing priority or never attacking.
 
 4. **Evaluation.** Every round, 100 evaluation games are played against the heuristic AI to track win rate. The model is saved if the eval win rate improves.
 
