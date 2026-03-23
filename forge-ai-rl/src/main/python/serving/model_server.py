@@ -347,7 +347,10 @@ class ModelServer:
 
         logits = self.model.attack_head(state, creature_features, creature_mask)
         probs = torch.sigmoid(logits)
-        decisions = torch.bernoulli(probs.clamp(0, 1))
+        if self.use_argmax:
+            decisions = (probs > 0.5).float()
+        else:
+            decisions = torch.bernoulli(probs.clamp(0, 1))
 
         selected = [i for i in range(len(candidates)) if decisions[0, i].item() > 0.5]
         value = self.model.get_value(state).item()
@@ -440,10 +443,13 @@ class ModelServer:
                                 device=self.device)
 
         for b in range(n_blockers):
-            dist = torch.distributions.Categorical(
-                logits=logits[0, b])
-            action = dist.sample().item()
             probs_b = torch.softmax(logits[0, b], dim=-1)
+            if self.use_argmax:
+                action = probs_b.argmax(dim=-1).item()
+            else:
+                dist = torch.distributions.Categorical(
+                    logits=logits[0, b])
+                action = dist.sample().item()
 
             if action < n_attackers:
                 # This blocker blocks attacker 'action'
