@@ -62,7 +62,7 @@ API_TYPE_NAMES = [
     "Untap", "Mill", "Regenerate", "Protection",
     "Fight", "Charm", "Scry", "Explore",
     "AddOrRemoveCounter", "ManaReflected", "Mana",
-    "ChangeTargets", "Fog", "ChangeZone2",
+    "ChangeTargets", "Fog", "RearrangeTopOfLibrary",
 ]
 
 COLOR_HEX = {
@@ -115,7 +115,16 @@ def decode_card(feats):
     [178-181] trigger summary (has_etb, has_death, has_combat, has_upkeep)
     [182-189] mana cost (W, U, B, R, G, generic, total, has_X)
 
-    === RESERVED + HASH [200-255] ===
+    === OWNERSHIP + TRIGGERS + PUMP + AURA [190-207] ===
+    [190-191] ownership (is_mine, is_opponents)
+    [192-193] ETB trigger (ApiType code, magnitude)
+    [194-195] death trigger (ApiType code, magnitude)
+    [196-197] combat trigger (ApiType code, magnitude)
+    [198-199] other trigger (ApiType code, magnitude)
+    [200-201] pump magnitude (power boost, toughness boost)
+    [202-207] aura/equipment host (is_attached, host_power, host_toughness, host_is_creature, host_is_mine, host_cmc)
+
+    === RESERVED + HASH [208-255] ===
     [252-255] card identity hash
     """
     if len(feats) < 30:
@@ -273,6 +282,40 @@ def decode_card(feats):
     if not mana_cost_str and cost_total > 0:
         mana_cost_str = str(cost_total)
 
+    # === OWNERSHIP [190-191] ===
+    is_mine = feats[190] > 0.5 if len(feats) > 190 else False
+    is_opponents = feats[191] > 0.5 if len(feats) > 191 else False
+
+    # === TRIGGER DETAILS [192-199] ===
+    TRIGGER_API_DECODE = {0.2: "DealDamage", 0.4: "Draw",
+                          0.6: "Pump", 0.8: "PumpAll"}
+    def _decode_trigger_api(val):
+        if val <= 0: return None
+        best = min(TRIGGER_API_DECODE.keys(),
+                   key=lambda k: abs(k - val))
+        if abs(best - val) < 0.15:
+            return TRIGGER_API_DECODE[best]
+        return "Other"
+
+    etb_api = _decode_trigger_api(feats[192]) if len(feats) > 192 else None
+    etb_magnitude = round(feats[193] * 20) if len(feats) > 193 and feats[193] > 0 else 0
+    death_api = _decode_trigger_api(feats[194]) if len(feats) > 194 else None
+    death_magnitude = round(feats[195] * 20) if len(feats) > 195 and feats[195] > 0 else 0
+    combat_trig_api = _decode_trigger_api(feats[196]) if len(feats) > 196 else None
+    combat_trig_magnitude = round(feats[197] * 20) if len(feats) > 197 and feats[197] > 0 else 0
+
+    # === PUMP MAGNITUDE [200-201] ===
+    pump_power = round(feats[200] * 25 - 5) if len(feats) > 200 and feats[200] > 0 else None
+    pump_toughness = round(feats[201] * 25 - 5) if len(feats) > 201 and feats[201] > 0 else None
+
+    # === AURA/EQUIPMENT HOST [202-207] ===
+    is_attached = feats[202] > 0.5 if len(feats) > 202 else False
+    host_power = round(feats[203] * 25 - 5) if len(feats) > 203 and is_attached else None
+    host_toughness = round(feats[204] * 25 - 5) if len(feats) > 204 and is_attached else None
+    host_is_creature = feats[205] > 0.5 if len(feats) > 205 and is_attached else False
+    host_is_mine = feats[206] > 0.5 if len(feats) > 206 and is_attached else False
+    host_cmc = round(feats[207] * 16) if len(feats) > 207 and is_attached else None
+
     return {
         "label": label, "types": types, "colors": colors,
         "cmc": cmc, "power": power, "toughness": toughness,
@@ -307,8 +350,25 @@ def decode_card(feats):
         "has_etb": has_etb, "has_death": has_death,
         "has_combat_trigger": has_combat_trigger,
         "has_upkeep": has_upkeep,
+        # Trigger details
+        "etb_api": etb_api, "etb_magnitude": etb_magnitude,
+        "death_api": death_api, "death_magnitude": death_magnitude,
+        "combat_trig_api": combat_trig_api,
+        "combat_trig_magnitude": combat_trig_magnitude,
         # Mana cost
         "mana_cost_str": mana_cost_str,
+        # Ownership
+        "is_mine": is_mine, "is_opponents": is_opponents,
+        # Pump
+        "pump_power": pump_power,
+        "pump_toughness": pump_toughness,
+        # Aura/equipment host
+        "is_attached": is_attached,
+        "host_power": host_power,
+        "host_toughness": host_toughness,
+        "host_is_creature": host_is_creature,
+        "host_is_mine": host_is_mine,
+        "host_cmc": host_cmc,
     }
 
 
@@ -426,16 +486,27 @@ def decode_action(feats):
     if len(feats) > 55:
         cards_drawn = int(round(feats[55] * 10))
 
-    # Build target description
+    # Target polarity [56-59]
+    can_target_own_creature = feats[56] > 0.5 if len(feats) > 56 else False
+    can_target_opp_creature = feats[57] > 0.5 if len(feats) > 57 else False
+    can_target_own_player = feats[58] > 0.5 if len(feats) > 58 else False
+    can_target_opp_player = feats[59] > 0.5 if len(feats) > 59 else False
+
+    # Build target description with polarity
     target_parts = []
     if requires_target:
-        if targets_creatures and targets_players:
-            target_parts.append("→ creature/player")
+        if can_target_own_creature and can_target_opp_creature:
+            target_parts.append("→ any creature")
+        elif can_target_opp_creature:
+            target_parts.append("→ opp creature")
+        elif can_target_own_creature:
+            target_parts.append("→ own creature")
         elif targets_creatures:
             target_parts.append("→ creature")
-        elif targets_players:
-            target_parts.append("→ player")
-        else:
+
+        if targets_players:
+            target_parts.append("/ player")
+        if not target_parts:
             target_parts.append("→ target")
     target_info = " ".join(target_parts)
 
@@ -472,6 +543,11 @@ def decode_action(feats):
         "damage": damage, "cards_drawn": cards_drawn,
         "power": power, "toughness": toughness,
         "detail": detail,
+        # Target polarity
+        "can_target_own_creature": can_target_own_creature,
+        "can_target_opp_creature": can_target_opp_creature,
+        "can_target_own_player": can_target_own_player,
+        "can_target_opp_player": can_target_opp_player,
     }
 
 
