@@ -645,28 +645,7 @@ Initial PPO results (20 rounds × 100 games) show no sustained improvement: coll
 
 This does not necessarily mean PPO cannot work at our scale, but it suggests that either (a) dramatically more compute is needed (200K+ games), or (b) a more sample-efficient algorithm is required. Advantage-Weighted Regression (AWR) is a promising alternative: it collects data under argmax play, computes GAE advantages per decision, and updates the policy by weighting the supervised loss by advantage magnitude. This eliminates the exploration problem that degrades PPO's data quality — the model learns from its best play rather than its stochastic exploration. See Peng et al. (2019), "Advantage-Weighted Regression: Simple and Scalable Off-Policy Reinforcement Learning."
 
-#### 5.4.6 Evaluation Methodology Correction
-
-A critical evaluation error was discovered: the `-onnx` flag was silently ignored in headless evaluate mode, which always used GRPC. When no GRPC server was running, the RL player fell back to the heuristic AI (`super.chooseSpellAbilityToPlay()`), producing win rates of ~50% that appeared to be RL model performance. The reported 54% and 43% "ONNX argmax" results were actually heuristic-vs-heuristic.
-
-After implementing proper `-onnx` support in evaluate mode, the true RL model win rate was confirmed at ~25% under both ONNX argmax and GRPC argmax — consistent with each other and significantly below heuristic parity. PPO's improvement from 25% to ~30% under stochastic sampling represents genuine learning from a lower baseline than previously believed.
-
-#### 5.4.7 Critical Feature Encoding Fix
-
-Analysis of the 25% model revealed a fundamental encoding gap: **the model could not distinguish friendly from enemy cards when selecting targets.** The 256-dim card feature vector encoded zone type (battlefield, hand, etc.) but not ownership — a creature on our battlefield and a creature on the opponent's battlefield produced identical features. This caused the model to sometimes target its own creatures with removal spells (e.g., Path to Exile on a friendly creature).
-
-Additionally, the data collection used fixed circular deck pairings (only 4 of 16 possible matchups, no mirrors), causing the model to learn matchup-specific strategies that didn't generalize. White Weenie learned it could win against Blue Tempo without playing creatures (because Blue was extremely weak at 4% win rate in the fixed pairing), masking the creature deployment problem.
-
-Six encoding fixes were implemented using reserved feature slots (no architecture change):
-
-1. **Ownership flags** (CardFeatures [190-191]): `is_mine` / `is_opponents` at every card encoding call site (42 fixes across 8 files)
-2. **Trigger effect details** (CardFeatures [192-199]): ETB/death/combat trigger ApiType and magnitude instead of binary presence flags
-3. **Pump spell magnitude** (CardFeatures [200-201]): power/toughness boost amounts for Pump abilities
-4. **Aura/equipment host info** (CardFeatures [202-207]): attached card's host creature stats
-5. **Opponent untapped creatures** (Global [55]) and max creature power (Global [57]): combat threat assessment
-6. **Target polarity** (ActionEncoder [56-59]): whether spells target own vs opponent creatures/players
-
-Combined with randomized deck pairings (all 16 matchups including mirrors), these fixes address the root causes of the model's poor performance. Retraining from scratch on new data with these features is in progress.
+**Results.** PPO training is in progress. Results will be reported after retraining with the current v4 feature encoding on randomized matchup data.
 
 ---
 
