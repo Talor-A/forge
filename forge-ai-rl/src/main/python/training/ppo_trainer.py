@@ -771,15 +771,8 @@ def run_games(n_games, traj_dir, mode='evaluate',
                     progress_callback(done, n_games)
                 except (IndexError, ValueError):
                     pass
-            # Also count trajectory files as progress
-            elif (progress_callback
-                  and 'Wrote trajectory' in line):
-                done = len(list(
-                    Path(traj_dir).glob('traj_*.jsonl')))
-                # Each game produces ~4 files
-                est = min(done // 4, n_games)
-                if est > 0:
-                    progress_callback(est, n_games)
+            # File-counting fallback removed — was racing with
+            # the Game X/Y parser above, causing UI to jump
 
         proc.wait(timeout=600)
     except subprocess.TimeoutExpired:

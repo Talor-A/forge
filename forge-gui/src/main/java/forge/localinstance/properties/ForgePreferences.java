@@ -79,6 +79,7 @@ public class ForgePreferences extends PreferencesStore<ForgePreferences.FPref> {
         UI_USE_OLD ("false"),
         UI_RANDOM_FOIL ("false"),
         UI_ENABLE_AI_CHEATS ("false"),
+        UI_RECORD_HUMAN_GAMES ("false"),
         UI_AVATARS ("0,1"),
         UI_SLEEVES ("0,1"),
         UI_SHOW_CARD_OVERLAYS ("true"),

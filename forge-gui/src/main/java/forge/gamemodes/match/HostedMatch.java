@@ -239,6 +239,22 @@ public class HostedMatch {
 
                 humanControllers.add(humanController);
                 humanCount++;
+
+                // Attach game recorder if preference is enabled
+                if (FModel.getPreferences().getPrefBoolean(FPref.UI_RECORD_HUMAN_GAMES)) {
+                    try {
+                        String outputDir = ForgeConstants.USER_DIR + "human_trajectories";
+                        Class<?> recorderClass = Class.forName(
+                                "forge.ai.rl.training.HumanGameRecorder");
+                        Object recorder = recorderClass.getConstructor(
+                                forge.game.player.Player.class, String.class)
+                                .newInstance(p, outputDir);
+                        humanController.setGameRecorder(
+                                (forge.game.player.IGameRecorder) recorder);
+                    } catch (Exception e) {
+                        // forge-ai-rl not on classpath — silently skip
+                    }
+                }
             }
         }
 
@@ -272,9 +288,31 @@ public class HostedMatch {
                 playbackControl.setGame(game);
                 game.subscribeToEvents(playbackControl);
             }
+            // Notify game recorders of game start
+            for (PlayerControllerHuman hc : humanControllers) {
+                if (hc.getGameRecorder() != null) {
+                    try {
+                        String gameId = "Human_" + hc.getPlayer().getName()
+                                + "_vs_" + hc.getPlayer().getWeakestOpponent().getName();
+                        hc.getGameRecorder().onGameStart(gameId);
+                    } catch (Exception e) { /* ignore */ }
+                }
+            }
             // Actually start the game!
             match.startGame(game, startGameHook);
             // this function waits?
+
+            // Notify game recorders of game end
+            for (PlayerControllerHuman hc : humanControllers) {
+                if (hc.getGameRecorder() != null) {
+                    try {
+                        boolean won = game.getOutcome() != null
+                                && game.getOutcome().isWinner(hc.getPlayer().getRegisteredPlayer());
+                        hc.getGameRecorder().onGameEnd(won);
+                    } catch (Exception e) { /* ignore */ }
+                }
+            }
+
             if (endGameHook != null){
                 endGameHook.run();
             }
