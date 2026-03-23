@@ -750,7 +750,7 @@ def draw_card_image(info, highlight=None):
         draw.text((4, y), "TAPPED",
                   fill="#ff6666", font=font_sm)
         y += 9
-    if info.get("sick"):
+    if info.get("sick") and info.get("zone") == "Battlefield":
         draw.text((4, y), "SICK",
                   fill="#ffaa44", font=font_sm)
         y += 9
