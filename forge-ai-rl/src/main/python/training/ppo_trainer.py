@@ -257,7 +257,7 @@ def load_ppo_data(traj_dir):
 # ── PPO batch computation ────────────────────────────
 
 def compute_ppo_batch(model, head, samples, device,
-                      use_amp, clip_eps=0.2):
+                      use_amp, clip_eps=0.1):
     """
     Compute PPO loss for a batch of attack/block decisions.
 
@@ -383,7 +383,7 @@ def compute_ppo_batch(model, head, samples, device,
 
         total_loss = (
             policy_loss +
-            0.25 * value_loss -
+            0.5 * value_loss -
             0.005 * entropy)
 
     metrics = {
@@ -398,7 +398,7 @@ def compute_ppo_batch(model, head, samples, device,
 
 
 def compute_ppo_block_batch(model, samples, device,
-                            use_amp, clip_eps=0.2):
+                            use_amp, clip_eps=0.1):
     """
     Compute PPO loss for block decisions using the proper BlockHead.
 
@@ -690,7 +690,7 @@ def compute_ppo_priority_batch(model, head, samples,
 
         total_loss = (
             policy_loss +
-            0.25 * value_loss -
+            0.5 * value_loss -
             0.005 * entropy)
 
     metrics = {
