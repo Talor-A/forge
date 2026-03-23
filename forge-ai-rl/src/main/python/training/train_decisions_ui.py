@@ -550,6 +550,23 @@ def make_priority_batch(model, batch, device, use_amp,
         st[i] = torch.from_numpy(zones['stack'])
         stm[i] = torch.from_numpy(masks['stack_mask'])
 
+    # Class weighting: upweight play decisions vs pass
+    # Pass is always the last action (index n_actions - 1)
+    is_pass = torch.tensor(
+        [s['selected_idx'] == s['n_actions'] - 1
+         for s in batch], device=device)
+    n_pass = is_pass.sum().item()
+    n_play = bs - n_pass
+    if n_pass > 0 and n_play > 0:
+        # Inverse frequency: play gets weight n_pass/n_total,
+        # pass gets weight n_play/n_total
+        play_weight = n_pass / bs
+        pass_weight = n_play / bs
+        sample_weights = torch.where(
+            is_pass, pass_weight, play_weight)
+    else:
+        sample_weights = torch.ones(bs, device=device)
+
     with torch.amp.autocast('cuda', enabled=use_amp):
         with torch.no_grad():
             state_emb = model.encode_state(
@@ -558,7 +575,9 @@ def make_priority_batch(model, batch, device, use_amp,
 
         logits = head(state_emb, af, am)
 
-        loss = nn.functional.cross_entropy(logits, tgt)
+        loss = nn.functional.cross_entropy(
+            logits, tgt, reduction='none')
+        loss = (loss * sample_weights).mean()
 
     with torch.no_grad():
         preds = logits.argmax(dim=1)

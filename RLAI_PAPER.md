@@ -331,7 +331,7 @@ The feature encoding captures pre-decision state (creatures are recorded as unta
 
 After the value network converges, we freeze the encoder weights and train each decision head independently, chaining checkpoints so each head inherits all previously trained weights:
 
-**Priority Head.** Cross-entropy loss over available actions (softmax single-select). Trained on ~104,500 priority decisions with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority ~85% of the time even with playable spells available, providing rich timing data — the model learns both *what* to play and *when* to wait.
+**Priority Head.** Cross-entropy loss over available actions (softmax single-select) with **inverse-frequency class weighting**. Trained on ~104,500 priority decisions with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority ~85% of the time even with playable spells available. Without weighting, the model learns a pass-heavy distribution that achieves high accuracy (93.9%) but performs poorly under the stochastic sampling required for PPO exploration — analysis showed a 78% creature miss rate during own main phases. Per-sample inverse-frequency weighting (`n_pass/n_total` for play decisions, `n_play/n_total` for pass decisions) equalizes the gradient contribution of play vs pass actions, encouraging a more balanced probability distribution while preserving the timing signal from genuine pass decisions.
 
 **Attack Head.** Binary cross-entropy loss per creature, trained on ~9,500 attack decisions. The model learns to predict which creatures the heuristic AI chose to attack with, given the board state and available attackers.
 
@@ -371,18 +371,7 @@ with $c_1 = 0.5$ (value loss coefficient) and $c_2 = 0.005$ (entropy bonus to en
 
 #### 3.2.2 Reward Shaping
 
-MTG's terminal reward (win/loss) is extremely sparse — a game may involve hundreds of micro-decisions before the outcome is determined. We employ reward shaping to provide more frequent feedback during early training:
-
-| Signal | Reward | Rationale |
-|--------|--------|-----------|
-| Win | +1.0 | Terminal reward |
-| Loss | -1.0 | Terminal reward |
-| Life advantage change | ±0.01 per point | Tracks damage race |
-| Card advantage change | ±0.05 per card | Card advantage is a fundamental MTG concept |
-| Board advantage change | ±0.02 per creature | Board presence correlates with winning |
-| Total power advantage | ±0.005 per power | Quality of board matters, not just quantity |
-
-Shaping rewards are multiplied by a decay factor ($\alpha = 0.9999$ per training step) so the agent eventually optimizes purely for win rate. The discount factor $\gamma = 0.999$ reflects the long-horizon nature of MTG games.
+Reward shaping, GAE advantage computation, and the frozen encoder strategy are described in detail in Section 5.4.
 
 #### 3.2.3 Curriculum Learning
 
@@ -495,29 +484,95 @@ The feature encoding captures pre-decision state to prevent information leakage 
 
 After the value network converges, the encoder weights are frozen and each decision head is trained independently. All heads use the same 512-dimensional state embedding from the shared encoder. Heads are trained sequentially, chaining checkpoints so each subsequent head inherits all previously trained weights.
 
-| Head | Samples | Loss Function | Val Accuracy | Epochs |
-|------|---------|---------------|-------------|--------|
-| Priority | 104,514 | CrossEntropy (softmax) | 95.7% | 10 |
-| Attack | 9,562 | BCE (per-creature sigmoid) | 82.8% | 10 |
-| Target | 4,995 | CrossEntropy (pointer) | 74.3% | 10 |
-| Card Select | 650 | BCE (multi-select sigmoid) | 76.5% | 10 |
-| Block | 2,768 | CE per-blocker (assignment) | 64.2% | 10 |
-| Mulligan | 2,635 | BCE (keep/mulligan) | 99.0% | 10 |
-| Binary | 2,032 | BCE (yes/no) | 80.9% | 10 |
+| Head | Train | Val | Loss Function | Val Accuracy | Epochs |
+|------|-------|-----|---------------|-------------|--------|
+| Priority | 95,210 | 9,304 | CrossEntropy (softmax) | 93.9% | 10 |
+| Mulligan | 2,375 | 260 | BCE (keep/mulligan) | 98.5% | 10 |
+| Attack | 8,683 | 879 | BCE (per-creature sigmoid) | 81.6% | 10 |
+| Binary | 1,827 | 205 | BCE (yes/no) | 81.0% | 10 |
+| Target | 4,547 | 448 | CrossEntropy (pointer) | 76.8% | 10 |
+| Card Select | 591 | 59 | BCE (multi-select sigmoid) | 76.3% | 10 |
+| Block | 2,492 | 276 | CE per-blocker (assignment) | 68.5% | 10 |
 
-The ~85% pass rate in priority training data means a naive "always pass" baseline achieves ~85%, so the priority head's 95.7% accuracy represents significant learning of spell timing. The mulligan head's 99.0% accuracy reflects that the heuristic almost always keeps 7-card hands, making the baseline high.
+The ~85% pass rate in priority training data means a naive "always pass" baseline achieves ~85%, so the priority head's 93.9% accuracy represents significant learning of spell timing. The mulligan head's 98.5% accuracy reflects that the heuristic almost always keeps 7-card hands, making the baseline high. All heads were still improving at epoch 10 (best validation on final epoch for 5 of 7 heads), suggesting additional training could yield marginal gains.
 
 Train/val splits use game-level grouping (both P1/P2 perspectives in the same split) to prevent data leakage.
 
-### 5.4 PPO Self-Play Training
+#### 5.3.1 Going-First Asymmetry and Class Imbalance
 
-After imitation learning, we will apply Proximal Policy Optimization (PPO) to improve beyond the heuristic baseline. The RL agent plays against the heuristic AI, collecting trajectories with action probabilities for importance sampling, then performs clipped policy gradient updates.
+Evaluation of the imitation-learned model under argmax (ONNX deployment) shows 54% overall win rate against the heuristic — at parity — but with a stark positional asymmetry: 34% win rate going first vs 74% going second. By comparison, the heuristic vs itself shows only a mild going-second advantage (47%/53%) in these aggro matchups.
 
-**Implementation.** We store the old policy's action probabilities (`actionProbabilities`) in each trajectory record during data collection. During PPO updates, the importance sampling ratio $r = \pi_{new} / \pi_{old}$ is computed and clipped to $[1-\epsilon, 1+\epsilon]$ with $\epsilon = 0.1$. Advantages are computed via GAE ($\gamma = 0.999$, $\lambda = 0.95$) using per-decision intermediate rewards from the reward shaper. The encoder is frozen during PPO to prevent representation drift; heads use lr=3e-5 and the value network uses lr=1e-4. The entropy coefficient is set to 0.005.
+Analysis of the model's probability distribution reveals the cause: during own main phases with creatures available, the model passes 78% of the time. This pass-heavy distribution — learned from the 85% pass rate in imitation data — is masked by argmax (which always picks the top action, often correctly) but exposed under the stochastic sampling required for PPO exploration. The model learned an exaggerated version of the heuristic's going-second preference because reactive play patterns (holding removal, blocking) are easier to learn from pass-heavy data than proactive patterns (playing creatures on curve).
 
-The RL model handles all decisions autonomously during PPO self-play — all 7 heads are active, targeting uses `decideTargets()` directly with legal candidates, and multi-target spells use actual min/max counts from `TargetRestrictions`. No decisions fall through to the heuristic AI.
+The class-weighted cross-entropy fix (Section 3.1.3) addresses this by equalizing gradient contribution between play and pass decisions, encouraging the model to develop a more balanced probability distribution that supports both greedy deployment (argmax) and effective exploration (sampling for PPO).
 
-**Results.** PPO training is pending after imitation learning retraining on the current data.
+### 5.4 PPO Training
+
+After imitation learning, we apply Proximal Policy Optimization (PPO) to improve beyond the heuristic baseline. The key challenge is adapting the standard PPO algorithm — designed for single-action-space environments — to MTG's heterogeneous decision structure where three fundamentally different action types (categorical spell selection, binary per-creature attack, per-blocker assignment) must be trained from the same game trajectories.
+
+#### 5.4.1 Training Loop Structure
+
+Each PPO round consists of four phases:
+
+1. **Game collection.** The RL model plays 400 games against the heuristic AI via the GRPC model server. The Java game engine calls the model for every decision (priority, attack, block, target, mulligan, binary), recording the full game state, candidate features, selected action, action probability under the current policy, and intermediate reward signals. Each game produces two trajectory files (one per player perspective).
+
+2. **Data loading and advantage computation.** Trajectory files are parsed and decisions are separated by type. For each decision in a trajectory, GAE advantages are computed backward:
+
+$$\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+$$\hat{A}_t = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{t+l}$$
+
+where $r_t$ is the intermediate reward (life/card/board advantage change from the `RewardShaper`), $V(s_t)$ is the value estimate recorded at decision time, and the terminal reward (+1/-1) is added to the final step. With $\gamma = 0.999$ and $\lambda = 0.95$, early-game decisions receive diluted credit while late-game decisions that directly influenced the outcome receive strong signal.
+
+3. **Policy gradient updates.** For each of 4 PPO epochs, the data is shuffled and processed in mini-batches of 64. Each head type has its own compute function because the loss structure differs:
+
+   - **Priority head:** The current policy produces a categorical distribution over actions via softmax. The importance sampling ratio $r = \pi_{new}(a|s) / \pi_{old}(a|s)$ is computed from the log-probabilities of the selected action under new and old policies. The clipped surrogate objective prevents destructively large updates:
+
+   $$L^{CLIP} = -\min(r\hat{A}, \text{clip}(r, 1-\epsilon, 1+\epsilon)\hat{A})$$
+
+   - **Attack head:** Each creature independently has a Bernoulli probability of attacking. The log-probability is summed across all creatures, and the importance ratio is computed from the total log-probability of the observed attack pattern. This means the policy is updated based on the *joint* attack decision, not each creature independently.
+
+   - **Block head:** Each blocker independently selects an attacker (or no-block) via a categorical distribution. Similar to the attack head, the joint log-probability across all blockers forms the importance ratio.
+
+   For all heads, the total loss combines the clipped policy loss, value loss (MSE between predicted and actual return), and an entropy bonus:
+
+   $$L = L^{CLIP} + 0.5 \cdot L^{VF} - 0.005 \cdot H[\pi]$$
+
+   The entropy term encourages exploration — without it, the policy can collapse to always passing priority or never attacking.
+
+4. **Evaluation.** Every round, 100 evaluation games are played against the heuristic AI to track win rate. The model is saved if the eval win rate improves.
+
+#### 5.4.2 Frozen Encoder with Differential Learning Rates
+
+A critical design choice: the game state encoder is frozen during PPO. Only the decision heads and value network receive gradient updates, with different learning rates:
+
+| Component | Learning Rate | Rationale |
+|-----------|--------------|-----------|
+| State encoder | 0 (frozen) | Protects the game state representation learned from 127K imitation samples |
+| Decision heads | 3×10⁻⁵ | Conservative updates to avoid destroying imitation-learned behavior |
+| Value network | 1×10⁻⁴ | Faster adaptation since the value function must track the changing policy |
+
+This is motivated by the observation that the encoder's representation is trained on 10-100× more data than any single PPO round produces. Allowing PPO gradients to flow through the encoder would adapt a 3.5M-parameter encoder based on a few hundred games, likely degrading the representation.
+
+#### 5.4.3 Reward Shaping and Credit Assignment
+
+MTG's terminal reward (win/loss) is extremely sparse — a game involves 50-400 decisions before the outcome is determined. The `RewardShaper` (Java) computes per-decision intermediate rewards by tracking delta changes in game state metrics between consecutive decisions:
+
+| Signal | Reward | Rationale |
+|--------|--------|-----------|
+| Win | +1.0 | Terminal reward |
+| Loss | -1.0 | Terminal reward |
+| Life advantage change | ±0.01 per point | Tracks damage race |
+| Card advantage change | ±0.05 per card | Card advantage is a fundamental MTG concept |
+| Board advantage change | ±0.02 per creature | Board presence correlates with winning |
+| Total power advantage | ±0.005 per power | Quality of board matters, not just quantity |
+
+These intermediate signals are combined with the terminal reward through GAE, providing denser gradient signal during early training. Shaping rewards are multiplied by a decay factor ($\alpha = 0.9999$ per training step) so the agent eventually optimizes purely for win rate.
+
+#### 5.4.4 Full Autonomy
+
+The RL model handles all decisions autonomously during PPO — all 7 heads are active, targeting uses `decideTargets()` directly with legal candidates from `getAllCandidates()`, and multi-target spells (e.g., Searing Blaze) use actual min/max target counts from `TargetRestrictions`. No decisions fall through to the heuristic AI. This ensures the model receives gradient signal for every decision type and learns a coherent end-to-end strategy.
+
+**Results.** PPO training is in progress (50 rounds, 400 games/round, 4 PPO epochs per round).
 
 ---
 
@@ -561,7 +616,7 @@ Our approach aims to match and eventually exceed this performance through learne
 
 We have presented a hierarchical reinforcement learning system for Magic: The Gathering, implemented as an 11M-parameter model with a shared transformer encoder and 7 specialized decision heads. The system integrates with the Forge game engine (32,300 cards) through a `PlayerControllerRL` that overrides all decision methods, and deploys via 9 ONNX model files for real-time Java-native inference without Python dependency.
 
-Our imitation learning pipeline trains all 7 decision heads from ~127K heuristic AI trajectory records: priority (95.7% accuracy on 104K samples), attack (82.8% on 9.5K), target (74.3% on 5K), card select (76.5% on 650), block (64.2% on 2.8K), mulligan (99.0% on 2.6K), and binary (80.9% on 2K). The model handles the complete decision space — no decisions fall through to the heuristic AI.
+Our imitation learning pipeline trains all 7 decision heads from ~127K heuristic AI trajectory records: priority (93.9% accuracy on 104K samples), mulligan (98.5% on 2.6K), attack (81.6% on 9.5K), binary (81.0% on 2K), target (76.8% on 5K), card select (76.3% on 650), and block (68.5% on 2.8K). The model handles the complete decision space — no decisions fall through to the heuristic AI.
 
 Key data quality improvements include game-level train/val splitting (preventing leakage from P1/P2 perspectives of the same game), corrected feature encoding (duplicate ApiType fix, aura targeting via enchant keywords, `is_sorcery_speed` global feature), and multi-target spell support (Searing Blaze).
 
