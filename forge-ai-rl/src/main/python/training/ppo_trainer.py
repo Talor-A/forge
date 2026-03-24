@@ -977,22 +977,42 @@ class ModelServerError(Exception):
 def run_games(n_games, traj_dir, mode='evaluate',
               port=50051, quiet=True,
               progress_callback=None,
-              log_callback=None):
-    """Run games via Java subprocess.
+              log_callback=None,
+              threads=4,
+              java_procs=1):
+    """Run games via Java subprocess(es).
     Raises ModelServerError if the server is detected as down.
     progress_callback(completed, total) called as games complete.
-    log_callback(line) called for each stdout line from Java."""
+    log_callback(line) called for each stdout line from Java.
+    java_procs: number of separate Java processes to split games across."""
     os.makedirs(traj_dir, exist_ok=True)
     # Clean old trajectories
     for f in Path(traj_dir).glob('traj_*.jsonl'):
         f.unlink()
 
+    if java_procs > 1:
+        return _run_games_multi(
+            n_games, traj_dir, mode, port, quiet,
+            progress_callback, log_callback, threads,
+            java_procs)
+
+    return _run_games_single(
+        n_games, traj_dir, mode, port, quiet,
+        progress_callback, log_callback, threads)
+
+
+def _build_java_cmd(n_games, traj_dir, mode, port_str,
+                    threads, heap='3g'):
+    """Build the Java command for a single process."""
     deck_args = []
     for d in DECKS:
         deck_args.extend(['-d', d])
 
-    cmd = [
-        'java', '-Xmx8192m',
+    return [
+        'java', f'-Xmx{heap}',
+        '-XX:+UseG1GC',
+        '-XX:MaxGCPauseMillis=50',
+        '-XX:ParallelGCThreads=2',
         '--add-opens', 'java.base/java.lang=ALL-UNNAMED',
         '--add-opens', 'java.base/java.util=ALL-UNNAMED',
         '--add-opens', 'java.base/java.text=ALL-UNNAMED',
@@ -1004,17 +1024,26 @@ def run_games(n_games, traj_dir, mode='evaluate',
         'rltrain', mode,
     ] + deck_args + [
         '-n', str(n_games),
-        '-t', '4',
+        '-t', str(threads),
         '-o', traj_dir,
         '-host', 'localhost',
-        '-port', str(port),
+        '-port', port_str,
     ]
-    # Don't use -q so we can parse progress
-    # (evaluate mode prints Game N/M every 10 games)
 
+
+def _run_games_single(n_games, traj_dir, mode, port,
+                      quiet, progress_callback,
+                      log_callback, threads):
+    """Run games in a single Java process."""
+    if isinstance(port, (list, tuple)):
+        port_str = ','.join(str(p) for p in port)
+    else:
+        port_str = str(port)
+
+    cmd = _build_java_cmd(n_games, traj_dir, mode,
+                          port_str, threads, heap='12g')
     cwd = os.path.join(PROJECT_ROOT, 'forge-gui-desktop')
 
-    # Stream output for progress tracking
     proc = subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
@@ -1025,42 +1054,144 @@ def run_games(n_games, traj_dir, mode='evaluate',
             stdout_lines.append(line)
             if log_callback:
                 log_callback(line.rstrip())
-            # Parse progress from evaluate mode output
             if progress_callback and 'Game ' in line:
                 try:
-                    # "Game 10/100: RL win rate: ..."
                     parts = line.split('Game ')[1].split('/')
                     done = int(parts[0])
                     progress_callback(done, n_games)
                 except (IndexError, ValueError):
                     pass
-            # File-counting fallback removed — was racing with
-            # the Game X/Y parser above, causing UI to jump
 
         proc.wait(timeout=600)
     except subprocess.TimeoutExpired:
         proc.kill()
 
     stdout = ''.join(stdout_lines)
+    return _parse_game_results(stdout_lines, stdout,
+                               n_games)
 
-    # Check for model server abort
+
+def _run_games_multi(n_games, traj_dir, mode, port,
+                     quiet, progress_callback,
+                     log_callback, threads, java_procs):
+    """Run games across multiple Java processes."""
+    if isinstance(port, (list, tuple)):
+        port_str = ','.join(str(p) for p in port)
+    else:
+        port_str = str(port)
+
+    # Split games and threads across processes
+    games_per = n_games // java_procs
+    threads_per = max(1, threads // java_procs)
+    remainder = n_games - games_per * java_procs
+    # Memory per process — 2GB is sufficient (actual RSS ~1.5GB)
+    heap_str = '2g'
+
+    cwd = os.path.join(PROJECT_ROOT, 'forge-gui-desktop')
+    procs = []
+    for i in range(java_procs):
+        ng = games_per + (1 if i < remainder else 0)
+        if ng == 0:
+            continue
+        cmd = _build_java_cmd(ng, traj_dir, mode,
+                              port_str, threads_per,
+                              heap=heap_str)
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True)
+        procs.append((proc, ng))
+
+    if log_callback:
+        log_callback(f"  Launched {len(procs)} Java "
+                     f"processes ({games_per} games, "
+                     f"{threads_per} threads, "
+                     f"{heap_str} heap each)")
+
+    # Monitor all processes via file counting
+    completed = [0]
+    all_stdout = [[] for _ in procs]
+
+    def _read_proc(idx, proc):
+        for line in proc.stdout:
+            all_stdout[idx].append(line)
+            if log_callback:
+                log_callback(f"  [java:{idx}] "
+                             f"{line.rstrip()}")
+            if 'Game ' in line:
+                try:
+                    parts = (line.split('Game ')[1]
+                             .split('/'))
+                    done = int(parts[0])
+                    # Approximate total progress
+                    completed[0] += 10  # each report = 10
+                    if progress_callback:
+                        progress_callback(
+                            min(completed[0], n_games),
+                            n_games)
+                except (IndexError, ValueError):
+                    pass
+
+    reader_threads = []
+    for idx, (proc, _) in enumerate(procs):
+        t = threading.Thread(target=_read_proc,
+                             args=(idx, proc),
+                             daemon=True)
+        t.start()
+        reader_threads.append(t)
+
+    # Wait for all processes
+    for proc, _ in procs:
+        try:
+            proc.wait(timeout=900)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    for t in reader_threads:
+        t.join(timeout=5)
+
+    # Aggregate results
+    all_lines = []
+    for lines in all_stdout:
+        all_lines.extend(lines)
+    all_text = ''.join(all_lines)
+
+    return _parse_game_results(all_lines, all_text,
+                               n_games)
+
+
+def _parse_game_results(stdout_lines, stdout, n_games):
+    """Parse win rate and errors from game output."""
     if 'ABORT' in stdout:
         raise ModelServerError(
             "Model server is down — Java aborted the run. "
             "Check server logs.")
 
-    # Parse win rate from output
-    win_rate = None
+    # Aggregate win rates across all processes
+    total_rl_wins = 0
+    total_heuristic_wins = 0
     server_errors = 0
     for line in stdout_lines:
         if 'RL Wins:' in line:
             try:
-                pct = line.split('(')[1].split('%')[0]
-                win_rate = float(pct) / 100
+                wins = int(line.split('RL Wins:')[1]
+                           .strip().split()[0])
+                total_rl_wins += wins
             except (IndexError, ValueError):
                 pass
-        elif 'MODEL_SERVER_ERROR' in line:
+        # Not elif — RL Wins and Heuristic Wins are on same line
+        if 'Heuristic Wins:' in line:
+            try:
+                hw = int(line.split('Heuristic Wins:')[1]
+                         .strip().split()[0])
+                total_heuristic_wins += hw
+            except (IndexError, ValueError):
+                pass
+        if 'MODEL_SERVER_ERROR' in line:
             server_errors += 1
+
+    total_games = total_rl_wins + total_heuristic_wins
+    win_rate = (total_rl_wins / total_games
+                if total_games > 0 else None)
 
     if server_errors > 0:
         print(f"  WARNING: {server_errors} model server "

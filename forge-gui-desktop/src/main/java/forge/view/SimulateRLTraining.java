@@ -81,8 +81,19 @@ public class SimulateRLTraining {
                 : Runtime.getRuntime().availableProcessors();
         String grpcHost = params.containsKey("host")
                 ? params.get("host").get(0) : "localhost";
-        int grpcPort = params.containsKey("port")
-                ? Integer.parseInt(params.get("port").get(0)) : 50051;
+        // Support comma-separated ports for multi-server parallelism
+        int[] grpcPorts;
+        if (params.containsKey("port")) {
+            String portStr = params.get("port").get(0);
+            String[] portParts = portStr.split(",");
+            grpcPorts = new int[portParts.length];
+            for (int pi = 0; pi < portParts.length; pi++) {
+                grpcPorts[pi] = Integer.parseInt(portParts[pi].trim());
+            }
+        } else {
+            grpcPorts = new int[]{50051};
+        }
+        int grpcPort = grpcPorts[0];
 
         // Load decks
         List<Deck> decks = new ArrayList<>();
@@ -133,7 +144,7 @@ public class SimulateRLTraining {
                 runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads);
                 break;
             case "evaluate":
-                runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort, threads, useOnnx);
+                runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPorts, threads, useOnnx);
                 break;
             case "selfplay":
                 runSelfPlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort);
@@ -270,10 +281,11 @@ public class SimulateRLTraining {
      */
     private static void runEvaluationMode(List<Deck> decks, int nGames, int timeout,
                                             String outputDir, boolean quiet,
-                                            String grpcHost, int grpcPort, int threads,
+                                            String grpcHost, int[] grpcPorts, int threads,
                                             boolean useOnnx) {
         System.out.println("=== RL Evaluation Mode (" + threads + " threads"
-                + (useOnnx ? ", ONNX" : ", GRPC") + ") ===");
+                + (useOnnx ? ", ONNX" : ", GRPC" + (grpcPorts.length > 1 ? " x" + grpcPorts.length + " servers" : ""))
+                + ") ===");
 
         AtomicInteger rlWins = new AtomicInteger(0);
         AtomicInteger heuristicWins = new AtomicInteger(0);
@@ -291,6 +303,8 @@ public class SimulateRLTraining {
         java.util.Random evalDeckRng = new java.util.Random();
         for (int i = 0; i < nGames; i++) {
             final int gameIdx = i;
+            // Round-robin port assignment across available servers
+            final int assignedPort = grpcPorts[i % grpcPorts.length];
             // Randomize deck pairing for eval too
             final Deck rlDeck = decks.get(evalDeckRng.nextInt(decks.size()));
             final Deck aiDeck = decks.get(evalDeckRng.nextInt(decks.size()));
@@ -304,7 +318,7 @@ public class SimulateRLTraining {
                 } else {
                     rlConfig.setMode(RLModelMode.GRPC);
                     rlConfig.setGrpcHost(grpcHost);
-                    rlConfig.setGrpcPort(grpcPort);
+                    rlConfig.setGrpcPort(assignedPort);
                 }
                 rlConfig.setRecordTrajectories(true);
                 rlConfig.setTrajectoryOutputDir(outputDir);

@@ -43,6 +43,7 @@ import forge.toolbox.FSkin;
 import forge.toolbox.FSkin.SkinImage;
 import forge.toolbox.FSkin.SkinnedPanel;
 import forge.toolbox.special.PhaseIndicator;
+import forge.ai.rl.RLController;
 import forge.toolbox.special.PlayerDetailsPanel;
 import forge.util.Localizer;
 import forge.view.arcane.PlayArea;
@@ -81,6 +82,7 @@ public class VField implements IVDoc<CField> {
     private final FLabel lblExperience = new FLabel.Builder().fontAlign(SwingConstants.CENTER).fontStyle(Font.BOLD).icon(FSkin.getImage(FSkinProp.IMG_EXPERIENCE)).iconInBackground().build();
     private final FLabel lblTicket     = new FLabel.Builder().fontAlign(SwingConstants.CENTER).fontStyle(Font.BOLD).icon(FSkin.getImage(FSkinProp.IMG_TICKET)).iconInBackground().build();
     private final FLabel lblRad        = new FLabel.Builder().fontAlign(SwingConstants.CENTER).fontStyle(Font.BOLD).icon(FSkin.getImage(FSkinProp.IMG_RAD)).iconInBackground().build();
+    private final FLabel lblWinPct     = new FLabel.Builder().fontAlign(SwingConstants.CENTER).fontSize(10).build();
 
     private final PhaseIndicator phaseIndicator = new PhaseIndicator();
 
@@ -121,8 +123,11 @@ public class VField implements IVDoc<CField> {
         avatarArea.setOpaque(false);
         avatarArea.setBackground(FSkin.getColor(FSkin.Colors.CLR_HOVER));
         avatarArea.setLayout(new MigLayout("insets 0, gap 0"));
-        avatarArea.add(lblAvatar, "w 100%-6px!, h 100%-23px!, wrap, gap 3 3 3 0");
+        avatarArea.add(lblAvatar, "w 100%-6px!, h 100%-36px!, wrap, gap 3 3 3 0");
         avatarArea.add(lblLife, "w 100%!, h 20px!, wrap");
+        lblWinPct.setFocusable(false);
+        lblWinPct.setVisible(false);
+        avatarArea.add(lblWinPct, "w 100%!, h 14px!, wrap");
 
         // Player area hover effect
         avatarArea.addMouseListener(new MouseAdapter() {
@@ -392,5 +397,39 @@ public class VField implements IVDoc<CField> {
         this.avatarArea.setBorder(highlighted ? borderAvatarHighlighted : borderAvatarSimple );
         this.avatarArea.setOpaque(highlighted);
         this.avatarArea.setToolTipText(player.getDetailsHtml());
+
+        // Update RL model win probability if available
+        updateWinProbability();
+    }
+
+    private void updateWinProbability() {
+        Float value = RLController.getLatestValueEstimate(player.getName());
+        if (value == null) {
+            lblWinPct.setVisible(false);
+            return;
+        }
+        // value is in [-1, 1], convert to win percentage
+        float winPct = (value + 1f) / 2f;
+        int pct = Math.round(winPct * 100f);
+        pct = Math.max(0, Math.min(100, pct));
+        lblWinPct.setText(pct + "%");
+        lblWinPct.setVisible(true);
+
+        // Color: green if winning (>55%), red if losing (<45%), gray if even
+        if (winPct > 0.55f) {
+            float intensity = Math.min(1f, (winPct - 0.5f) * 4f); // 0..1 over 50%..75%
+            lblWinPct.setForeground(new Color(
+                    (int)(80 * (1 - intensity)),
+                    (int)(140 + 115 * intensity),
+                    (int)(80 * (1 - intensity))));
+        } else if (winPct < 0.45f) {
+            float intensity = Math.min(1f, (0.5f - winPct) * 4f);
+            lblWinPct.setForeground(new Color(
+                    (int)(140 + 115 * intensity),
+                    (int)(80 * (1 - intensity)),
+                    (int)(80 * (1 - intensity))));
+        } else {
+            lblWinPct.setForeground(Color.GRAY);
+        }
     }
 }

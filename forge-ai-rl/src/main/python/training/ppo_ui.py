@@ -187,10 +187,19 @@ def ppo_thread(state, args):
             except Exception:
                 pass
 
-        # Start server
-        log(state, f"Starting model server on :{port}")
-        server = start_model_server(model, device, port)
-        log(state, "Server ready.")
+        # Start server(s)
+        n_servers = getattr(args, 'servers', 1)
+        servers = []
+        ports = []
+        for si in range(n_servers):
+            p = find_free_port() if port == 0 else port + si
+            log(state, f"Starting model server {si+1}/{n_servers} on :{p}")
+            srv = start_model_server(model, device, p)
+            servers.append(srv)
+            ports.append(p)
+        log(state, f"{n_servers} server(s) ready.")
+        # For run_games: pass list if multi-server, single int if one
+        port_arg = ports if len(ports) > 1 else ports[0]
 
         traj_dir = os.path.join(
             PROJECT_ROOT, 'rl_data/ppo_trajectories')
@@ -231,8 +240,10 @@ def ppo_thread(state, args):
             try:
                 _, stdout = run_games(
                     args.games_per_round, traj_dir,
-                    mode='evaluate', port=port,
+                    mode='evaluate', port=port_arg,
                     progress_callback=on_progress,
+                    threads=args.threads,
+                    java_procs=args.java_procs,
                     log_callback=on_java_log)
             except ModelServerError as e:
                 log(state, f"  FATAL: {e}")
@@ -545,8 +556,10 @@ def ppo_thread(state, args):
             try:
                 eval_wr, _ = run_games(
                     args.eval_games, eval_dir,
-                    mode='evaluate', port=port,
-                    log_callback=on_java_log)
+                    mode='evaluate', port=port_arg,
+                    log_callback=on_java_log,
+                    threads=args.threads,
+                    java_procs=args.java_procs)
                 eval_wr = eval_wr or 0.0
             except ModelServerError as e:
                 log(state, f"  FATAL: {e}")
@@ -852,6 +865,12 @@ def main():
     parser.add_argument('--eval-games', type=int,
         default=50)
     parser.add_argument('--port', type=int, default=0)
+    parser.add_argument('--threads', type=int, default=16,
+        help='Java game threads for data collection')
+    parser.add_argument('--servers', type=int, default=1,
+        help='Number of model servers for parallel inference')
+    parser.add_argument('--java-procs', type=int, default=1,
+        help='Number of Java processes to split games across')
     args = parser.parse_args()
 
     state = PPOState()

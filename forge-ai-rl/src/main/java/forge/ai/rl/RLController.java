@@ -21,6 +21,7 @@ import org.tinylog.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Central orchestrator for the RL AI system.
@@ -28,6 +29,19 @@ import java.util.List;
  * and records trajectories for training.
  */
 public class RLController {
+    // Static registry of latest value estimates per player name, for GUI display
+    private static final ConcurrentHashMap<String, Float> latestValueEstimates = new ConcurrentHashMap<>();
+
+    /** Get the latest value estimate for a player (by name). Returns null if no estimate available. */
+    public static Float getLatestValueEstimate(String playerName) {
+        return latestValueEstimates.get(playerName);
+    }
+
+    /** Clear all stored value estimates (call on game end). */
+    public static void clearValueEstimates() {
+        latestValueEstimates.clear();
+    }
+
     private final RLConfig config;
     private final GameStateEncoder stateEncoder;
     private final ModelServerClient modelClient;
@@ -533,16 +547,24 @@ public class RLController {
     // --- Internal helpers ---
 
     private DecisionResult requestDecision(DecisionContext context) {
+        DecisionResult result;
         switch (config.getMode()) {
             case GRPC:
-                return modelClient.requestDecision(context);
+                result = modelClient.requestDecision(context);
+                break;
             case ONNX:
-                return onnxClient != null ? onnxClient.requestDecision(context) : null;
+                result = onnxClient != null ? onnxClient.requestDecision(context) : null;
+                break;
             case HEURISTIC_FALLBACK:
             case RECORD_HEURISTIC:
             default:
                 return null; // caller should use heuristic fallback
         }
+        // Store latest value estimate for GUI display
+        if (result != null && player != null) {
+            latestValueEstimates.put(player.getName(), result.getValueEstimate());
+        }
+        return result;
     }
 
     private void recordDecision(DecisionContext context, DecisionResult result) {

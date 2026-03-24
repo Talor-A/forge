@@ -49,4 +49,7 @@ python training/ppo_ui.py \
     --ppo-epochs 4 \
     --batch-size 64 \
     --lr 1e-5 \
-    --port 0
+    --port 0 \
+    --threads 32 \
+    --servers 4 \
+    --java-procs 4
