@@ -73,9 +73,21 @@ class PPOState:
     device: str = ""
     gpu_name: str = ""
 
+    # Self-play mode
+    training_mode: str = "vs_heuristic"  # vs_heuristic, selfplay, mixed
+    elo_ratings: List[float] = field(default_factory=list)
+    current_elo: float = 1000.0
+    eval_interval: int = 5
+
     # Console log
     log_lines: List[str] = field(default_factory=list)
     log_dirty: bool = False
+
+
+def update_elo(rating, opponent_rating, score, k=32):
+    """Update Elo rating. score: 1=win, 0=loss, 0.5=draw."""
+    expected = 1.0 / (1.0 + 10 ** ((opponent_rating - rating) / 400))
+    return rating + k * (score - expected)
 
 
 def log(state, msg):
@@ -180,6 +192,10 @@ def ppo_thread(state, args):
                     'value_losses', [])
                 state.entropies = saved.get(
                     'entropies', [])
+                state.elo_ratings = saved.get(
+                    'elo_ratings', [])
+                state.current_elo = saved.get(
+                    'current_elo', 1000.0)
                 log(state,
                     f"Resumed from round {start_round}, "
                     f"best WR: "
@@ -216,12 +232,18 @@ def ppo_thread(state, args):
             t0 = time.time()
 
             # Collect
+            collect_mode = getattr(args, 'collect_mode',
+                                   'evaluate')
+            state.training_mode = collect_mode
+            mode_label = ('self-play' if collect_mode
+                         == 'selfplay' else 'vs heuristic')
             state.phase = "collecting"
             state.status = (
                 f"Round {rnd}: collecting "
-                f"{args.games_per_round} games...")
+                f"{args.games_per_round} games "
+                f"({mode_label})...")
             log(state, f"\n--- Round {rnd}/{total_rounds} "
-                f"---")
+                f"({mode_label}) ---")
             log(state, "  Collecting games...")
 
             def on_progress(done, total):
@@ -240,7 +262,7 @@ def ppo_thread(state, args):
             try:
                 _, stdout = run_games(
                     args.games_per_round, traj_dir,
-                    mode='evaluate', port=port_arg,
+                    mode=collect_mode, port=port_arg,
                     progress_callback=on_progress,
                     threads=args.threads,
                     java_procs=args.java_procs,
@@ -547,34 +569,70 @@ def ppo_thread(state, args):
             avg_vl = total_vl / max(n_updates, 1)
             avg_ent = total_ent / max(n_updates, 1)
 
-            # Evaluate
-            state.phase = "evaluating"
-            state.status = (
-                f"Round {rnd}: evaluating...")
-            model.eval()
+            # Free trajectory data before launching eval/next round
+            del attack_data, block_data, priority_data
+            del target_data, mulligan_data, value_data
+            import gc; gc.collect()
+            if device.startswith('cuda'):
+                torch.cuda.empty_cache()
 
-            try:
-                eval_wr, _ = run_games(
-                    args.eval_games, eval_dir,
-                    mode='evaluate', port=port_arg,
-                    log_callback=on_java_log,
-                    threads=args.threads,
-                    java_procs=args.java_procs)
-                eval_wr = eval_wr or 0.0
-            except ModelServerError as e:
-                log(state, f"  FATAL: {e}")
-                log(state, "  Stopping PPO — model server "
-                    "is down during eval.")
-                state.status = "ABORTED: model server down"
-                state.phase = "done"
-                break
+            # Evaluate vs heuristic
+            eval_interval = getattr(args, 'eval_interval', 1)
+            run_eval = (collect_mode == 'evaluate'
+                        or rnd % eval_interval == 0
+                        or rnd == total_rounds)
+
+            eval_wr = state.current_win_rate  # keep prev
+            if run_eval:
+                state.phase = "evaluating"
+                state.status = (
+                    f"Round {rnd}: evaluating vs "
+                    f"heuristic...")
+                model.eval()
+
+                try:
+                    eval_wr, _ = run_games(
+                        args.eval_games, eval_dir,
+                        mode='evaluate', port=port_arg,
+                        log_callback=on_java_log,
+                        threads=args.threads,
+                        java_procs=args.java_procs)
+                    eval_wr = eval_wr or 0.0
+                except ModelServerError as e:
+                    log(state, f"  FATAL: {e}")
+                    log(state, "  Stopping PPO — model "
+                        "server is down during eval.")
+                    state.status = ("ABORTED: model "
+                        "server down")
+                    state.phase = "done"
+                    break
+
+                # Update Elo from eval result
+                heuristic_elo = 1200.0
+                n_eval = args.eval_games
+                wins = int(round(eval_wr * n_eval))
+                elo = state.current_elo
+                for _ in range(wins):
+                    elo = update_elo(elo, heuristic_elo,
+                                     1.0, k=16)
+                for _ in range(n_eval - wins):
+                    elo = update_elo(elo, heuristic_elo,
+                                     0.0, k=16)
+                state.current_elo = elo
+                state.elo_ratings.append(elo)
+            else:
+                next_eval = (rnd + eval_interval
+                    - rnd % eval_interval)
+                log(state, f"  (eval skipped — next at "
+                    f"round {next_eval})")
 
             # Update state
             state.current_win_rate = eval_wr
             state.current_policy_loss = avg_pl
             state.current_value_loss = avg_vl
             state.current_entropy = avg_ent
-            state.win_rates.append(eval_wr)
+            if run_eval:
+                state.win_rates.append(eval_wr)
             state.policy_losses.append(avg_pl)
             state.value_losses.append(avg_vl)
             state.entropies.append(avg_ent)
@@ -598,6 +656,9 @@ def ppo_thread(state, args):
                 'policy_losses': state.policy_losses,
                 'value_losses': state.value_losses,
                 'entropies': state.entropies,
+                'elo_ratings': state.elo_ratings,
+                'current_elo': state.current_elo,
+                'collect_mode': collect_mode,
             }
             with open(os.path.join(
                     save_dir,
@@ -697,8 +758,8 @@ class PPODashboard:
         self.svars = {}
         for i, (k, v) in enumerate([
             ('Round', '—'), ('Win Rate', '—'),
-            ('Best WR', '—'), ('Policy Loss', '—'),
-            ('Value Loss', '—'), ('Entropy', '—'),
+            ('Best WR', '—'), ('Elo', '—'),
+            ('Policy Loss', '—'), ('Entropy', '—'),
             ('Round Time', '—'), ('ETA', '—'),
         ]):
             r, c = divmod(i, 4)
@@ -769,10 +830,10 @@ class PPODashboard:
             f"{s.current_win_rate:.1%}")
         self.svars['Best WR'].set(
             f"{s.best_win_rate:.1%} (r{s.best_round})")
+        self.svars['Elo'].set(
+            f"{s.current_elo:.0f}")
         self.svars['Policy Loss'].set(
             f"{s.current_policy_loss:.4f}")
-        self.svars['Value Loss'].set(
-            f"{s.current_value_loss:.4f}")
         self.svars['Entropy'].set(
             f"{s.current_entropy:.3f}")
         self.svars['Round Time'].set(
@@ -871,6 +932,14 @@ def main():
         help='Number of model servers for parallel inference')
     parser.add_argument('--java-procs', type=int, default=1,
         help='Number of Java processes to split games across')
+    parser.add_argument('--collect-mode', default='evaluate',
+        choices=['evaluate', 'selfplay'],
+        help='Collection mode: evaluate (vs heuristic) '
+             'or selfplay (RL vs RL)')
+    parser.add_argument('--eval-interval', type=int,
+        default=1,
+        help='Eval vs heuristic every N rounds '
+             '(selfplay mode, default: 1)')
     args = parser.parse_args()
 
     state = PPOState()

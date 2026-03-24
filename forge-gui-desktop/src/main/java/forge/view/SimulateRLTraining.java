@@ -147,7 +147,7 @@ public class SimulateRLTraining {
                 runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPorts, threads, useOnnx);
                 break;
             case "selfplay":
-                runSelfPlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPort);
+                runSelfPlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPorts, threads);
                 break;
             case "headtohead":
                 if (onnxDir1 == null || onnxDir2 == null) {
@@ -391,52 +391,85 @@ public class SimulateRLTraining {
     }
 
     /**
-     * Self-play mode: RL AI vs RL AI.
+     * Self-play mode: RL AI vs RL AI, multi-threaded with multi-port support.
      */
     private static void runSelfPlayMode(List<Deck> decks, int nGames, int timeout,
                                           String outputDir, boolean quiet,
-                                          String grpcHost, int grpcPort) {
-        System.out.println("=== Self-Play Mode ===");
+                                          String grpcHost, int[] grpcPorts, int threads) {
+        System.out.println("=== Self-Play Mode (" + threads + " threads, GRPC"
+                + (grpcPorts.length > 1 ? " x" + grpcPorts.length + " servers" : "") + ") ===");
 
-        RLConfig config = new RLConfig();
-        config.setMode(RLModelMode.GRPC);
-        config.setGrpcHost(grpcHost);
-        config.setGrpcPort(grpcPort);
-        config.setRecordTrajectories(true);
-        config.setTrajectoryOutputDir(outputDir);
-
-        int serverErrors = 0;
+        AtomicInteger completed = new AtomicInteger(0);
+        AtomicInteger serverErrors = new AtomicInteger(0);
+        AtomicInteger consecutiveErrors = new AtomicInteger(0);
         final int MAX_SERVER_ERRORS = 3;
+        long startTime = System.currentTimeMillis();
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
 
         java.util.Random spDeckRng = new java.util.Random();
         for (int i = 0; i < nGames; i++) {
-            Deck deck1 = decks.get(spDeckRng.nextInt(decks.size()));
-            Deck deck2 = decks.get(spDeckRng.nextInt(decks.size()));
+            final int gameIdx = i;
+            final int assignedPort = grpcPorts[i % grpcPorts.length];
+            final Deck deck1 = decks.get(spDeckRng.nextInt(decks.size()));
+            final Deck deck2 = decks.get(spDeckRng.nextInt(decks.size()));
+            final boolean p1First = (i % 2 == 0);
 
+            futures.add(executor.submit(() -> {
+                // Each player gets its own RLConfig to avoid contention
+                RLConfig configA = new RLConfig();
+                configA.setMode(RLModelMode.GRPC);
+                configA.setGrpcHost(grpcHost);
+                configA.setGrpcPort(assignedPort);
+                configA.setRecordTrajectories(true);
+                configA.setTrajectoryOutputDir(outputDir);
+
+                RLConfig configB = new RLConfig();
+                configB.setMode(RLModelMode.GRPC);
+                configB.setGrpcHost(grpcHost);
+                configB.setGrpcPort(assignedPort);
+                configB.setRecordTrajectories(true);
+                configB.setTrajectoryOutputDir(outputDir);
+
+                try {
+                    runSingleGame(deck1, deck2, configA, configB,
+                            "RL_A_" + gameIdx, "RL_B_" + gameIdx, timeout, p1First);
+                    consecutiveErrors.set(0);
+                } catch (ModelServerException e) {
+                    serverErrors.incrementAndGet();
+                    int consec = consecutiveErrors.incrementAndGet();
+                    System.out.printf("Game %d MODEL_SERVER_ERROR (%d/%d): %s%n",
+                            gameIdx, consec, MAX_SERVER_ERRORS, e.getMessage());
+                } catch (Exception e) {
+                    System.out.printf("Game %d FAILED: %s%n", gameIdx, e.getMessage());
+                }
+
+                int done = completed.incrementAndGet();
+                if (!quiet && done % 10 == 0) {
+                    double elapsed = (System.currentTimeMillis() - startTime) / 1000.0;
+                    System.out.printf("Game %d/%d [%.1f games/s]%n",
+                            done, nGames, done / elapsed);
+                }
+            }));
+        }
+
+        // Wait for all games
+        for (java.util.concurrent.Future<?> f : futures) {
             try {
-                GameResult result = runSingleGame(deck1, deck2, config, config,
-                        "RL_A_" + i, "RL_B_" + i, timeout, i % 2 == 0);
-
-                serverErrors = 0; // reset on success
-
-                if (!quiet && (i + 1) % 10 == 0) {
-                    System.out.printf("Self-play game %d/%d complete%n", i + 1, nGames);
-                }
-            } catch (ModelServerException e) {
-                serverErrors++;
-                System.out.printf("Game %d MODEL_SERVER_ERROR (%d/%d): %s%n",
-                        i + 1, serverErrors, MAX_SERVER_ERRORS, e.getMessage());
-                if (serverErrors >= MAX_SERVER_ERRORS) {
-                    System.out.println();
-                    System.out.println("ABORT: Model server failed " + MAX_SERVER_ERRORS
-                            + " consecutive games. Server is down or broken.");
-                    break;
-                }
+                f.get(timeout + 30, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                f.cancel(true);
             } catch (Exception e) {
-                System.out.printf("Game %d FAILED: %s%n", i + 1, e.getMessage());
+                // ignore
             }
         }
-        System.out.println("Self-play complete. Trajectories saved to: " + outputDir);
+        executor.shutdown();
+
+        System.out.printf("Self-play complete: %d games, %d server errors%n",
+                completed.get(), serverErrors.get());
+        System.out.println("Trajectories saved to: " + outputDir);
     }
 
     /**

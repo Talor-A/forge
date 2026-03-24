@@ -405,7 +405,9 @@ All critical bugs have been fixed. Data regenerated with corrected feature encod
 
 - **~~ppo_ui.py used attack_head for block data~~** — FIXED. Block decisions trained through attack head. Fixed with `(data, head)` tuple pairing.
 - **~~RewardShaper.initialized never set to true~~** — FIXED. Intermediate rewards always returned 0.
-- **~~PPO used flat terminal +1/-1 for all decisions~~** — FIXED. Now computes GAE advantages from `intermediateReward` per decision with gamma=0.999, lambda=0.95.
+- **~~PPO used flat terminal +1/-1 for all decisions~~** — FIXED. Now computes GAE advantages from `intermediateReward` per decision with gamma=0.95, lambda=0.90.
+- **~~GAE gamma mismatched value function~~** — FIXED 2026-03-24. GAE_GAMMA changed from 0.999 to 0.95 to match the value function training gamma (0.95 in preprocess_trajectories.py). The mismatch caused systematic bias: delta = r_t + 0.999*V(t+1) - V(t), but V was trained to satisfy V(t) ≈ r_t + 0.95*V(t+1), so deltas were always proportional to V(t+1) regardless of decision quality. Every decision in winning games got positive advantage, every decision in losing games got negative advantage. Value loss dropped from ~0.20 to 0.032 after the fix, confirming the value function was already accurate but miscalibrated.
+- **~~GAE lambda too high for credit assignment~~** — FIXED 2026-03-24. GAE_LAMBDA changed from 0.98 to 0.90. Lower lambda puts more weight on per-step value deltas vs terminal game outcome. With λ=0.98 in a 25-decision game, terminal reward dominated credit assignment. At λ=0.90, effective discount is (γλ)^k = 0.855^k, so per-step value improvements drive advantages — good decisions in losing games get positive advantage (value improved) rather than being penalized by the eventual loss. Note: intermediate rewards (life delta × 0.01, board delta × 0.02, card advantage × 0.05) are very small compared to value-based signal; the value function is the primary credit assignment mechanism through GAE.
 - **~~Encoder corrupted by PPO gradients~~** — FIXED. Now encoder is frozen during PPO, heads get lr=3e-5, value network gets lr=1e-4.
 - **~~Heuristic vetoed RL spell choices~~** — FIXED. RL uses `decideTargets` for targeting directly, no heuristic strategic veto.
 - **~~Duplicate ApiType.ChangeZone in feature encoding~~** — FIXED 2026-03-23. Index 29 replaced with `RearrangeTopOfLibrary` in both `ActionEncoder.java` and `CardFeatures.java`.
@@ -593,6 +595,31 @@ We are 3-4 orders of magnitude below typical PPO data requirements for complex g
 2. Switch to offline RL (AWR) which is more sample-efficient for our setup (see below).
 3. Focus on improving the imitation model instead — better features, human data, class-weighted loss — since that's where our wins have come from so far.
 4. Accept 54% argmax win rate as a strong baseline and invest in feature encoding improvements (documented above) rather than RL training compute.
+
+### Self-Play + Reward Shaping (Priority: High — next after current PPO run)
+
+The fundamental problem with PPO vs heuristic at 25-30% win rate: reward signal is sparse and noisy. Most wins are due to opponent bad luck, not good play. PPO can't learn what works when it almost never wins.
+
+**Reward Shaping — per-decision intermediate rewards:**
+- Board advantage delta: +reward when creature count/power improves relative to opponent
+- Life delta: +reward for dealing damage, -reward for taking damage
+- Correct targeting: +reward when removal hits opponent creature, pump hits own creature
+- Mana efficiency: +reward for spending mana on curve
+- Card advantage: +reward for drawing, -reward for discarding
+
+Add to `RewardShaper` with small blending weight (0.1-0.2) so game outcome still dominates. Risk: shaped rewards can create degenerate strategies (farming life gain instead of winning). Keep weight low and monitor.
+
+**Self-Play — guaranteed 50% win rate:**
+Both players use the RL model (GRPC/sampling). Every game produces one win and one loss — balanced signal. Record trajectories for both players — 2x data per game.
+
+Infrastructure already exists: `runSelfPlayMode` in SimulateRLTraining.
+
+**Phased approach:**
+1. **Phase 1: Self-play + shaped rewards** — train until model develops consistent strategy (creature deployment, correct targeting, combat). The combination gives both balanced win signal AND per-decision feedback.
+2. **Phase 2: vs Heuristic** — once self-play plateaus (~50 rounds), switch to heuristic opponent to learn from a stronger player.
+3. **Phase 3: Mixed** — alternate self-play and vs-heuristic rounds.
+
+**Concerns:** Self-play can develop degenerate strategies that beat itself but lose to everything else (e.g., both players learn to never attack). Mitigate with periodic heuristic eval, shaped rewards that encourage aggressive play, and early stopping if heuristic win rate drops.
 
 ### Alternative RL Approaches (Priority: High — PPO may not be viable at our scale)
 

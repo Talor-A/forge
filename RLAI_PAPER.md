@@ -405,11 +405,11 @@ This says: "the advantage of this decision is the immediate reward $r_t$ plus ho
 
 $$\hat{A}_t = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{t+l}$$
 
-When $\lambda = 0$, GAE reduces to the one-step TD residual (low variance, high bias). When $\lambda = 1$, it approaches the Monte Carlo return (high variance, low bias). We use $\lambda = 0.95$, which gives substantial weight to multi-step returns while still benefiting from the variance reduction of the value network baseline.
+When $\lambda = 0$, GAE reduces to the one-step TD residual (low variance, high bias). When $\lambda = 1$, it approaches the Monte Carlo return (high variance, low bias). We use $\lambda = 0.90$, which puts substantial weight on per-step value improvements rather than terminal game outcomes — appropriate for short-episode, high-variance games where individual decision quality matters more than the eventual win/loss.
 
 **Concrete example in MTG:** Consider a game where the RL agent casts a creature on turn 3 ($t=3$), then on turn 4 the opponent fails to remove it, and on turn 5 the creature attacks for lethal. The TD residual at $t=3$ captures the immediate board advantage change ($r_3$) plus the value improvement. GAE propagates the turn-5 lethal attack backward through the chain of TD residuals, giving the turn-3 creature cast a positive advantage — it recognizes that playing the creature led to winning.
 
-The discount factor $\gamma = 0.999$ ensures that early-game decisions still receive meaningful credit for late-game outcomes. With $\gamma = 0.99$, a reward 100 steps later would be discounted to $0.99^{100} \approx 0.37$; with $\gamma = 0.999$, it retains $0.999^{100} \approx 0.90$ of its value — appropriate for MTG where a turn-1 play can determine the game's trajectory.
+The discount factor $\gamma = 0.95$ must match the gamma used to train the value network (Section 5.1). This matching is critical: the GAE delta $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$ measures "did this decision improve the position relative to the value function's expectation." If GAE uses a different $\gamma$ than the value network was trained with, the Bellman residuals become systematically biased — the deltas no longer measure decision quality but instead reflect the gamma mismatch. With matched $\gamma = 0.95$, a well-calibrated value network produces near-zero deltas for expected transitions, positive deltas for decisions that improved the position beyond expectation, and negative deltas for decisions that worsened it.
 
 #### 3.2.3 PPO: How the Policy Improves
 
@@ -746,8 +746,8 @@ Ward, C. D. & Cowling, P. I. (2009). Monte Carlo search applied to card selectio
 | Gradient clipping | 1.0 |
 | Batch size | 64 |
 | PPO clip epsilon | 0.1 |
-| Discount factor (γ) | 0.999 |
-| GAE lambda (λ) | 0.95 |
+| Discount factor (γ) | 0.95 |
+| GAE lambda (λ) | 0.90 |
 | Value loss coefficient | 0.5 |
 | Entropy coefficient | 0.005 |
 

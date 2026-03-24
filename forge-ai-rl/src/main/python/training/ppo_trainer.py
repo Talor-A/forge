@@ -62,8 +62,8 @@ DECKS = ['Green Stompy.dck', 'White Weenie.dck',
 
 # ── Data loading for PPO ─────────────────────────────
 
-GAE_GAMMA = 0.999  # discount factor
-GAE_LAMBDA = 0.98  # GAE lambda — higher lets terminal reward reach further back
+GAE_GAMMA = 0.95  # must match value network training gamma
+GAE_LAMBDA = 0.90  # lower = trust per-step value deltas more, less terminal outcome influence
 
 
 def _compute_gae_returns(records, won):
