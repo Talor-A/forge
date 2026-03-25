@@ -193,6 +193,7 @@ public class RLController {
         for (Card c : possibleAttackers) {
             candidates.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
+        forge.ai.rl.features.CombatMath.enrichCandidates(candidates, possibleAttackers, player);
 
         DecisionContext context = DecisionContext.multiSelect(
                 DecisionType.DECLARE_ATTACKERS, gameState, candidates,
@@ -229,19 +230,31 @@ public class RLController {
 
         GameStateFeatures gameState = stateEncoder.encode(game, player);
 
-        // Encode blockers and attackers together as candidates
+        // Pre-encode and enrich all blockers and attackers with combat math
+        List<float[]> blockerFeats = new ArrayList<>();
+        for (Card c : possibleBlockers) {
+            blockerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
+        }
+        forge.ai.rl.features.CombatMath.enrichCandidates(blockerFeats, possibleBlockers, player);
+
+        List<float[]> attackerFeats = new ArrayList<>();
+        for (Card c : attackers) {
+            attackerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
+        }
+        forge.ai.rl.features.CombatMath.enrichCandidates(attackerFeats, attackers, player);
+
         // Each candidate is a (blocker, attacker) pair
         List<float[]> candidates = new ArrayList<>();
         List<int[]> pairIndices = new ArrayList<>();
 
         for (int b = 0; b < possibleBlockers.size(); b++) {
             for (int a = 0; a < attackers.size(); a++) {
-                float[] blockerFeats = forge.ai.rl.features.CardFeatures.encode(possibleBlockers.get(b), player);
-                float[] attackerFeats = forge.ai.rl.features.CardFeatures.encode(attackers.get(a), player);
+                float[] bf = blockerFeats.get(b);
+                float[] af = attackerFeats.get(a);
                 // Concatenate blocker + attacker features
-                float[] combined = new float[blockerFeats.length + attackerFeats.length];
-                System.arraycopy(blockerFeats, 0, combined, 0, blockerFeats.length);
-                System.arraycopy(attackerFeats, 0, combined, blockerFeats.length, attackerFeats.length);
+                float[] combined = new float[bf.length + af.length];
+                System.arraycopy(bf, 0, combined, 0, bf.length);
+                System.arraycopy(af, 0, combined, bf.length, af.length);
                 candidates.add(combined);
                 pairIndices.add(new int[]{b, a});
             }
@@ -283,9 +296,12 @@ public class RLController {
 
         GameStateFeatures gameState = stateEncoder.encode(game, player);
         List<float[]> candidateFeatures = new ArrayList<>();
+        List<Card> cardList = new ArrayList<>();
         for (Card c : candidates) {
             candidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c, player));
+            cardList.add(c);
         }
+        forge.ai.rl.features.CombatMath.enrichCandidates(candidateFeatures, cardList, player);
 
         DecisionContext context = DecisionContext.multiSelect(
                 DecisionType.CARD_SELECTION, gameState, candidateFeatures, min, max, "card_selection");
@@ -381,6 +397,7 @@ public class RLController {
         for (Card c : candidates) {
             cachedCandidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
+        forge.ai.rl.features.CombatMath.enrichCandidates(cachedCandidateFeatures, candidates, player);
     }
 
     /**
@@ -438,17 +455,30 @@ public class RLController {
             forge.game.combat.Combat combat) {
         if (trajectoryRecorder == null || cachedPreDecisionState == null) return;
 
-        // Build (blocker, attacker) pair candidates — same as decideBlockers()
+        // Pre-encode and enrich all blockers and attackers with combat math
+        List<float[]> blockerFeats = new ArrayList<>();
+        for (Card c : possibleBlockers) {
+            blockerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
+        }
+        forge.ai.rl.features.CombatMath.enrichCandidates(blockerFeats, possibleBlockers, player);
+
+        List<float[]> attackerFeats = new ArrayList<>();
+        for (Card c : attackers) {
+            attackerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
+        }
+        forge.ai.rl.features.CombatMath.enrichCandidates(attackerFeats, attackers, player);
+
+        // Build (blocker, attacker) pair candidates
         List<float[]> candidates = new ArrayList<>();
         List<int[]> pairIndices = new ArrayList<>();
 
         for (int b = 0; b < possibleBlockers.size(); b++) {
             for (int a = 0; a < attackers.size(); a++) {
-                float[] blockerFeats = forge.ai.rl.features.CardFeatures.encode(possibleBlockers.get(b), player);
-                float[] attackerFeats = forge.ai.rl.features.CardFeatures.encode(attackers.get(a), player);
-                float[] combined = new float[blockerFeats.length + attackerFeats.length];
-                System.arraycopy(blockerFeats, 0, combined, 0, blockerFeats.length);
-                System.arraycopy(attackerFeats, 0, combined, blockerFeats.length, attackerFeats.length);
+                float[] bf = blockerFeats.get(b);
+                float[] af = attackerFeats.get(a);
+                float[] combined = new float[bf.length + af.length];
+                System.arraycopy(bf, 0, combined, 0, bf.length);
+                System.arraycopy(af, 0, combined, bf.length, af.length);
                 candidates.add(combined);
                 pairIndices.add(new int[]{b, a});
             }

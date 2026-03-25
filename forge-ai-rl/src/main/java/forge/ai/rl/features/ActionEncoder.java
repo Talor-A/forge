@@ -2,8 +2,10 @@ package forge.ai.rl.features;
 
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
+import forge.game.keyword.Keyword;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
+import forge.game.zone.ZoneType;
 import forge.game.GameEntity;
 
 /**
@@ -38,7 +40,10 @@ public class ActionEncoder {
      * [57]    : can target opp creature (polarity)
      * [58]    : can target players
      * [59]    : can target players (duplicate for symmetry)
-     * [60-63] : reserved
+     * [60]    : creature_would_be_biggest (power > all creatures on board)
+     * [61]    : creature_would_survive (toughness > opp max creature power)
+     * [62]    : spell_is_combat_trick (Pump/PumpAll/Protection/Regenerate AND instant)
+     * [63]    : removal_kills_biggest (DealDamage/Destroy kills opp biggest creature)
      */
     public static float[] encode(SpellAbility sa) {
         float[] features = new float[ACTION_FEATURE_SIZE];
@@ -153,6 +158,81 @@ public class ActionEncoder {
                 features[idx++] = normalizeValue(Integer.parseInt(sa.getParam("NumCards")), 0, 10);
             } catch (NumberFormatException e) {
                 features[idx++] = 0.2f; // variable draw
+            }
+        }
+
+        // Combat-relevant action features [60-63]
+        if (source != null) {
+            try {
+                // [60] creature_would_be_biggest: if source isCreature, power > all creatures on board
+                if (source.isCreature()) {
+                    int power = source.getNetPower();
+                    boolean biggest = true;
+                    Player controller = source.getController();
+                    if (controller != null && controller.getGame() != null) {
+                        for (Player p : controller.getGame().getPlayers()) {
+                            for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+                                if (c.isCreature() && c != source && c.getNetPower() >= power) {
+                                    biggest = false;
+                                    break;
+                                }
+                            }
+                            if (!biggest) break;
+                        }
+                    }
+                    features[60] = biggest ? 1f : 0f;
+                }
+
+                // [61] creature_would_survive: if source isCreature, toughness > opp max creature power
+                if (source.isCreature()) {
+                    int toughness = source.getNetToughness();
+                    Player controller = source.getController();
+                    Player opp = controller != null ? controller.getWeakestOpponent() : null;
+                    if (opp != null) {
+                        int oppMaxPower = 0;
+                        for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+                            if (c.isCreature() && c.getNetPower() > oppMaxPower) {
+                                oppMaxPower = c.getNetPower();
+                            }
+                        }
+                        features[61] = toughness > oppMaxPower ? 1f : 0f;
+                    }
+                }
+
+                // [62] spell_is_combat_trick: Pump/PumpAll/Protection/Regenerate AND isInstant
+                if (saType != null && (saType == ApiType.Pump || saType == ApiType.PumpAll
+                        || saType == ApiType.Protection || saType == ApiType.Regenerate)) {
+                    if (source.isInstant() || source.hasKeyword(Keyword.FLASH)) {
+                        features[62] = 1f;
+                    }
+                }
+
+                // [63] removal_kills_biggest: if DealDamage/Destroy, estimated damage >= opp biggest creature toughness
+                if (saType != null && (saType == ApiType.DealDamage || saType == ApiType.Destroy)) {
+                    Player controller = source.getController();
+                    Player opp = controller != null ? controller.getWeakestOpponent() : null;
+                    if (opp != null) {
+                        int oppMaxToughness = 0;
+                        for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+                            if (c.isCreature() && c.getNetToughness() > oppMaxToughness) {
+                                oppMaxToughness = c.getNetToughness();
+                            }
+                        }
+                        if (saType == ApiType.Destroy) {
+                            // Destroy always kills (unless indestructible, but we estimate)
+                            features[63] = oppMaxToughness > 0 ? 1f : 0f;
+                        } else if (sa.hasParam("NumDmg")) {
+                            try {
+                                int dmg = Integer.parseInt(sa.getParam("NumDmg"));
+                                features[63] = dmg >= oppMaxToughness && oppMaxToughness > 0 ? 1f : 0f;
+                            } catch (NumberFormatException e) {
+                                features[63] = 0.5f; // variable damage, uncertain
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // Guard against NPEs from game state access during unusual phases
             }
         }
 

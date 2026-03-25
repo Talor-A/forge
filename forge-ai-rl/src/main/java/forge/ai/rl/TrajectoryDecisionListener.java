@@ -6,6 +6,7 @@ import forge.ai.rl.decisions.DecisionResult;
 import forge.ai.rl.decisions.DecisionType;
 import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.CardFeatures;
+import forge.ai.rl.features.CombatMath;
 import forge.ai.rl.features.GameStateEncoder;
 import forge.ai.rl.features.GameStateFeatures;
 import forge.ai.rl.training.TrajectoryRecorder;
@@ -114,6 +115,7 @@ public class TrajectoryDecisionListener
                 attackerIndices.add(i);
             }
         }
+        CombatMath.enrichCandidates(feats, creatures, player);
         record(DecisionType.DECLARE_ATTACKERS, feats,
                 attackerIndices,
                 "attack_" + attackerIndices.size()
@@ -136,6 +138,7 @@ public class TrajectoryDecisionListener
                 blockerIndices.add(i);
             }
         }
+        CombatMath.enrichCandidates(feats, creatures, player);
         record(DecisionType.DECLARE_BLOCKERS, feats,
                 blockerIndices,
                 "block_" + blockerIndices.size());
@@ -150,9 +153,12 @@ public class TrajectoryDecisionListener
             return;
         }
         List<float[]> feats = new ArrayList<>();
+        List<Card> optionList = new ArrayList<>();
         for (Card c : options) {
             feats.add(CardFeatures.encode(c, player));
+            optionList.add(c);
         }
+        CombatMath.enrichCandidates(feats, optionList, player);
         List<Integer> indices = new ArrayList<>();
         for (Card c : chosen) {
             int idx = options.indexOf(c);

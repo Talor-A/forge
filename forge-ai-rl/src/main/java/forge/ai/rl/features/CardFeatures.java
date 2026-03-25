@@ -66,8 +66,34 @@ import forge.game.zone.ZoneType;
  * [206]    : host controlled by perspective player
  * [207]    : host CMC (normalized)
  *
- * === RESERVED + HASH [208-255] ===
- * [208-251]: reserved for future
+ * === COMBAT MATH [208-231] (battlefield creatures only) ===
+ * [208]    : can_attack (!tapped && !sickness && !DEFENDER)
+ * [209]    : is_evasive (no opp untapped creature can block)
+ * [210]    : frac_can_block_this (fraction of opp untapped that can block)
+ * [211]    : frac_this_kills (fraction of opp creatures this kills in combat)
+ * [212]    : frac_kills_this (fraction of opp creatures that kill this)
+ * [213]    : lethal_damage_remaining ((toughness - damage) / toughness)
+ * [214]    : power_vs_avg_toughness (power / avg opp toughness)
+ * [215]    : toughness_vs_avg_power (toughness / avg opp power)
+ * [216]    : has_first_strike_advantage (FS/DS with no opp blocker having it)
+ * [217]    : has_deathtouch
+ * [218]    : has_indestructible
+ * [219]    : has_lifelink
+ * [220]    : has_trample
+ * [221]    : can_trade_up (kill higher-CMC opp creature)
+ * [222]    : can_trade_even (mutual kill with same-CMC opp creature)
+ * [223]    : is_biggest_creature (highest power on both boards)
+ * [224]    : power_rank_my_board (rank / (count-1), 1.0=highest)
+ * [225]    : toughness_rank_my_board (rank / (count-1), 1.0=highest)
+ * [226]    : safe_attacker (evasive or no profitable block)
+ * [227]    : must_be_double_blocked (MENACE or power > max blocker toughness)
+ * [228]    : best_blocker_power (norm/20)
+ * [229]    : best_blocker_toughness (norm/20)
+ * [230]    : n_profitable_blocks (norm/10)
+ * [231]    : power_surplus ((power - best_blocker_toughness) / 20)
+ *
+ * === RESERVED + HASH [232-255] ===
+ * [232-251]: reserved for future
  * [252-255]: card identity hash (4 bytes, normalized)
  */
 public class CardFeatures {

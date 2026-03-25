@@ -7,6 +7,7 @@ import forge.ai.rl.decisions.DecisionResult;
 import forge.ai.rl.decisions.DecisionType;
 import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.CardFeatures;
+import forge.ai.rl.features.CombatMath;
 import forge.ai.rl.features.GameStateEncoder;
 import forge.ai.rl.features.GameStateFeatures;
 import forge.ai.rl.training.TrajectoryRecorder;
@@ -99,6 +100,7 @@ public class GameStateRecorder {
             for (Card c : allCreatures) {
                 feats.add(CardFeatures.encode(c, player));
             }
+            CombatMath.enrichCandidates(feats, allCreatures, player);
 
             // Record with pre-attack state
             recordWithAction(
@@ -154,6 +156,7 @@ public class GameStateRecorder {
                     blockerIndices.add(i);
                 }
             }
+            CombatMath.enrichCandidates(feats, allCreatures, player);
             recordWithAction(
                     DecisionType.DECLARE_BLOCKERS,
                     feats, blockerIndices,

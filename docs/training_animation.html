@@ -1,0 +1,2267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MTG RL AI Training Pipeline</title>
+<style>
+/* ===== Reset & Base ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #1e1e2e;
+  --surface: #313244;
+  --surface1: #45475a;
+  --text: #cdd6f4;
+  --subtext: #a6adc8;
+  --blue: #89b4fa;
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --yellow: #f9e2af;
+  --mauve: #cba6f7;
+  --peach: #fab387;
+  --teal: #94e2d5;
+  --overlay0: #6c7086;
+  --mantle: #181825;
+}
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ===== Top Nav Bar ===== */
+#topbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  height: 56px;
+  background: var(--mantle);
+  border-bottom: 1px solid var(--surface1);
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 0 16px;
+}
+
+.phase-dot {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background: transparent;
+  border: 1px solid transparent;
+  font-size: 13px;
+  color: var(--subtext);
+  white-space: nowrap;
+}
+.phase-dot:hover { background: var(--surface); }
+.phase-dot.active {
+  background: var(--surface);
+  border-color: var(--blue);
+  color: var(--text);
+}
+.phase-dot .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--overlay0);
+  transition: background 0.3s;
+}
+.phase-dot.active .dot { background: var(--blue); }
+.phase-dot.visited .dot { background: var(--green); }
+
+/* ===== Bottom Nav ===== */
+#bottombar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+  height: 56px;
+  background: var(--mantle);
+  border-top: 1px solid var(--surface1);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 32px;
+}
+
+.nav-btn {
+  padding: 10px 28px;
+  border-radius: 8px;
+  border: 1px solid var(--surface1);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex; align-items: center; gap: 8px;
+}
+.nav-btn:hover { background: var(--surface1); border-color: var(--blue); }
+.nav-btn:disabled { opacity: 0.3; cursor: default; }
+.nav-btn:disabled:hover { background: var(--surface); border-color: var(--surface1); }
+
+#step-indicator {
+  font-size: 14px; color: var(--subtext);
+  display: flex; align-items: center; gap: 12px;
+}
+#step-indicator .step-dots { display: flex; gap: 6px; }
+#step-indicator .sdot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--surface1);
+  transition: all 0.3s;
+}
+#step-indicator .sdot.active { background: var(--blue); transform: scale(1.3); }
+#step-indicator .sdot.done { background: var(--green); }
+
+/* ===== Phase Container ===== */
+#phase-container {
+  position: fixed; top: 56px; left: 0; right: 0; bottom: 56px;
+  display: flex;
+  transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.phase {
+  min-width: 100vw;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 32px 48px;
+  position: relative;
+}
+
+.phase-title {
+  font-size: 28px; font-weight: 700;
+  margin-bottom: 8px;
+  opacity: 0; transform: translateY(-20px);
+  transition: all 0.5s ease;
+}
+.phase-title.visible { opacity: 1; transform: translateY(0); }
+
+.phase-subtitle {
+  font-size: 16px; color: var(--subtext);
+  margin-bottom: 24px;
+  opacity: 0; transform: translateY(-10px);
+  transition: all 0.5s ease 0.1s;
+}
+.phase-subtitle.visible { opacity: 1; transform: translateY(0); }
+
+/* Sub-step content */
+.substep {
+  position: absolute;
+  top: 110px; left: 48px; right: 48px; bottom: 16px;
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.substep.active {
+  opacity: 1; transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* ===== Card Styles ===== */
+.mtg-card {
+  width: 100px;
+  height: 140px;
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.15);
+  padding: 0;
+  font-size: 12px;
+  position: relative;
+  transition: all 0.3s;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.mtg-card .card-name-box {
+  background: rgba(255,255,255,0.15);
+  padding: 4px 6px;
+  margin: 4px 4px 0 4px;
+  border-radius: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.mtg-card .card-name { font-weight: 600; font-size: 10px; line-height: 1.2; flex: 1; }
+.mtg-card .card-cost { display: flex; gap: 2px; flex-shrink: 0; margin-left: 3px; }
+.mtg-card .mana-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 1px solid rgba(0,0,0,0.3);
+  display: inline-block;
+}
+.mtg-card .mana-dot.mana-G { background: #4a9e4a; }
+.mtg-card .mana-dot.mana-W { background: #d4af37; }
+.mtg-card .mana-dot.mana-U { background: #4a7fb5; }
+.mtg-card .mana-dot.mana-R { background: #c44a4a; }
+.mtg-card .mana-dot.mana-B { background: #8a6ab5; }
+.mtg-card .card-text-box {
+  background: rgba(0,0,0,0.2);
+  margin: 3px 4px;
+  padding: 3px 5px;
+  border-radius: 3px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+.mtg-card .card-type { font-size: 9px; color: rgba(255,255,255,0.7); }
+.mtg-card .card-pt-box {
+  position: absolute;
+  bottom: 4px; right: 4px;
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-weight: 700; font-size: 12px;
+}
+.mtg-card .card-pt { font-weight: 700; font-size: 12px; }
+
+/* Color frames - entire card background */
+.mtg-card.color-G { background: #2d4a2d; }
+.mtg-card.color-W { background: #4a4430; }
+.mtg-card.color-U { background: #2d3a4a; }
+.mtg-card.color-R { background: #4a2d2d; }
+.mtg-card.color-B { background: #3a2d4a; }
+
+/* Lands: smaller and muted */
+.mtg-card.land-card {
+  height: 90px;
+  width: 80px;
+  opacity: 0.75;
+}
+
+.mtg-card.facedown {
+  background: var(--surface1);
+  border: 2px solid var(--overlay0);
+}
+.mtg-card.facedown .card-name { color: var(--overlay0); }
+
+.mtg-card.highlight {
+  box-shadow: 0 0 20px rgba(137,180,250,0.4);
+  transform: scale(1.08);
+  z-index: 10;
+}
+
+/* ===== Board Layout ===== */
+.game-board {
+  display: flex; flex-direction: column; gap: 16px;
+  width: 100%; max-width: 900px;
+}
+.board-side {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--mantle);
+  border: 1px solid var(--surface1);
+}
+.board-side.opponent { border-color: var(--red); border-opacity: 0.3; }
+.board-side.player { border-color: var(--green); border-opacity: 0.3; }
+.board-label {
+  font-size: 13px; font-weight: 600; color: var(--subtext);
+  display: flex; align-items: center; gap: 8px;
+}
+.life-total {
+  font-size: 18px; font-weight: 700;
+  padding: 2px 10px; border-radius: 6px;
+  background: var(--surface);
+}
+.card-row {
+  display: flex; gap: 10px; flex-wrap: wrap;
+  min-height: 90px;
+  align-items: flex-end;
+}
+.board-divider {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--surface1), transparent);
+  margin: 4px 0;
+  flex: 1;
+}
+
+/* ===== Feature Vector Bar ===== */
+.feature-bar {
+  display: flex; gap: 1px;
+  border-radius: 4px; overflow: hidden;
+  background: var(--mantle);
+  padding: 2px;
+}
+.feature-cell {
+  width: 3px; height: 24px;
+  background: var(--surface1);
+  transition: background 0.2s;
+  border-radius: 1px;
+}
+.feature-cell.active-g { background: var(--green); }
+.feature-cell.active-b { background: var(--blue); }
+.feature-cell.active-r { background: var(--red); }
+.feature-cell.active-y { background: var(--yellow); }
+.feature-cell.active-m { background: var(--mauve); }
+
+.feature-label {
+  position: absolute;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface);
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.feature-label.visible { opacity: 1; }
+
+/* ===== Zone Matrix ===== */
+.zone-matrix {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px;
+  background: var(--mantle);
+  border-radius: 8px;
+  border: 1px solid var(--surface1);
+}
+.zone-matrix-title {
+  font-size: 12px; font-weight: 600; color: var(--subtext);
+  margin-bottom: 4px;
+}
+.zone-row {
+  display: flex; gap: 1px; height: 4px;
+}
+.zone-row .cell {
+  width: 2px; height: 4px;
+  border-radius: 1px;
+}
+.zone-row.filled .cell { background: var(--blue); opacity: 0.6; }
+.zone-row.empty .cell { background: var(--surface1); opacity: 0.3; border: 0.5px dashed var(--overlay0); }
+
+/* ===== Network Diagram ===== */
+.encoder-box {
+  background: var(--surface);
+  border: 1px solid var(--surface1);
+  border-radius: 10px;
+  padding: 12px 16px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.3s;
+}
+.encoder-box:hover { border-color: var(--blue); }
+.encoder-box .sublabel { font-size: 10px; color: var(--subtext); font-weight: 400; margin-top: 2px; }
+
+.dim-bar {
+  height: 28px;
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600;
+  transition: all 0.5s;
+}
+
+/* ===== Decision Heads ===== */
+.head-box {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 16px;
+  border: 2px solid var(--surface1);
+  min-width: 200px;
+  text-align: center;
+  transition: all 0.3s;
+}
+.head-box.blue { border-color: var(--blue); }
+.head-box.green { border-color: var(--green); }
+.head-box.mauve { border-color: var(--mauve); }
+
+.prob-bar-container {
+  display: flex; flex-direction: column; gap: 6px;
+  width: 100%;
+}
+.prob-bar-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.prob-bar-label { font-size: 12px; min-width: 120px; text-align: right; }
+.prob-bar-track {
+  flex: 1; height: 20px;
+  background: var(--mantle);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.prob-bar-fill {
+  height: 100%; border-radius: 4px;
+  transition: width 1s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex; align-items: center; justify-content: flex-end;
+  padding-right: 6px; font-size: 11px; font-weight: 600;
+}
+
+/* ===== Sigmoid Gauge ===== */
+.sigmoid-gauge {
+  width: 120px; height: 120px; position: relative;
+}
+.gauge-label {
+  position: absolute; bottom: -20px; left: 0; right: 0;
+  text-align: center; font-size: 13px; font-weight: 600;
+}
+
+/* ===== Grid Animation ===== */
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(20, 1fr);
+  gap: 3px;
+  max-width: 500px;
+}
+.game-cell {
+  width: 20px; height: 20px;
+  border-radius: 3px;
+  background: var(--surface1);
+  transition: background 0.3s;
+}
+.game-cell.win { background: var(--green); }
+.game-cell.loss { background: var(--red); }
+
+/* ===== Loss Curve ===== */
+.chart-container {
+  width: 100%; max-width: 400px;
+  background: var(--mantle);
+  border-radius: 8px;
+  padding: 16px;
+  border: 1px solid var(--surface1);
+}
+
+/* ===== Timeline ===== */
+.timeline {
+  display: flex; align-items: center; gap: 0;
+  position: relative;
+  width: 100%; max-width: 800px;
+}
+.timeline-line {
+  position: absolute; top: 50%; left: 0; right: 0;
+  height: 2px; background: var(--surface1);
+  transform: translateY(-50%);
+}
+.timeline-point {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--surface1);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600;
+  z-index: 1;
+  transition: all 0.3s;
+  cursor: default;
+}
+.timeline-point.highlight-good {
+  border-color: var(--green);
+  box-shadow: 0 0 16px rgba(166,227,161,0.5);
+  background: rgba(166,227,161,0.15);
+}
+.timeline-point.highlight-bad {
+  border-color: var(--red);
+  box-shadow: 0 0 16px rgba(243,139,168,0.5);
+  background: rgba(243,139,168,0.15);
+}
+
+/* ===== PPO Clip Bar ===== */
+.clip-bar-track {
+  width: 100%; height: 32px;
+  background: var(--mantle);
+  border-radius: 8px;
+  position: relative;
+  overflow: hidden;
+}
+.clip-bar-zone {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(137,180,250,0.15);
+  border-left: 2px dashed var(--blue);
+  border-right: 2px dashed var(--blue);
+}
+.clip-bar-marker {
+  position: absolute; top: -4px; bottom: -4px; width: 4px;
+  border-radius: 2px;
+  transition: left 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ===== ONNX Icons ===== */
+.onnx-grid {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  justify-content: center;
+  max-width: 600px;
+}
+.onnx-file {
+  background: var(--surface);
+  border: 1px solid var(--surface1);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 11px;
+  text-align: center;
+  transition: all 0.3s;
+  opacity: 0;
+  transform: scale(0.8);
+}
+.onnx-file.visible {
+  opacity: 1; transform: scale(1);
+}
+.onnx-file:hover { border-color: var(--peach); }
+.onnx-file .icon { font-size: 24px; margin-bottom: 4px; }
+
+/* ===== Pipeline ===== */
+.pipeline {
+  display: flex; align-items: center; gap: 0;
+  max-width: 800px;
+}
+.pipeline-stage {
+  background: var(--surface);
+  border: 1px solid var(--surface1);
+  border-radius: 8px;
+  padding: 12px 16px;
+  text-align: center;
+  font-size: 13px;
+  transition: all 0.4s;
+  opacity: 0;
+  transform: translateX(-20px);
+}
+.pipeline-stage.visible {
+  opacity: 1; transform: translateX(0);
+}
+.pipeline-arrow {
+  color: var(--blue); font-size: 20px;
+  padding: 0 8px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.pipeline-arrow.visible { opacity: 1; }
+.pipeline-stage .timing { font-size: 11px; color: var(--green); margin-top: 4px; }
+
+/* ===== Animations ===== */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 10px rgba(137,180,250,0.2); }
+  50% { box-shadow: 0 0 30px rgba(137,180,250,0.5); }
+}
+@keyframes dash-flow {
+  to { stroke-dashoffset: -20; }
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes count-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+@keyframes loop-arrow {
+  0% { stroke-dashoffset: 0; }
+  100% { stroke-dashoffset: -300; }
+}
+@keyframes attention-dash {
+  to { stroke-dashoffset: -16; }
+}
+@keyframes float-up {
+  0% { opacity: 0; transform: translateY(10px); }
+  30% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-10px); }
+}
+
+.glow-blue { animation: pulse-glow 2s ease-in-out infinite; }
+.glow-green {
+  animation: pulse-glow 2s ease-in-out infinite;
+  --glow-color: var(--green);
+}
+
+/* ===== Utility ===== */
+.flex-row { display: flex; align-items: center; }
+.flex-col { display: flex; flex-direction: column; }
+.gap-8 { gap: 8px; }
+.gap-12 { gap: 12px; }
+.gap-16 { gap: 16px; }
+.gap-24 { gap: 24px; }
+.gap-32 { gap: 32px; }
+.text-center { text-align: center; }
+.text-sm { font-size: 13px; }
+.text-xs { font-size: 11px; }
+.text-lg { font-size: 20px; }
+.text-xl { font-size: 28px; }
+.text-subtext { color: var(--subtext); }
+.text-blue { color: var(--blue); }
+.text-green { color: var(--green); }
+.text-red { color: var(--red); }
+.text-yellow { color: var(--yellow); }
+.text-mauve { color: var(--mauve); }
+.text-peach { color: var(--peach); }
+.text-teal { color: var(--teal); }
+.fw-bold { font-weight: 700; }
+.mt-8 { margin-top: 8px; }
+.mt-16 { margin-top: 16px; }
+.mt-24 { margin-top: 24px; }
+.mb-8 { margin-bottom: 8px; }
+.mb-16 { margin-bottom: 16px; }
+.w-full { width: 100%; }
+.max-w-800 { max-width: 800px; }
+
+/* SVG animations */
+.attention-line {
+  stroke-dasharray: 8 8;
+  animation: attention-dash 0.8s linear infinite;
+}
+
+.flow-particle {
+  animation: float-up 2s ease-in-out infinite;
+}
+</style>
+</head>
+<body>
+
+<!-- ===== TOP BAR ===== -->
+<div id="topbar">
+  <div class="phase-dot active" data-phase="0">
+    <span class="dot"></span> 1. Game State
+  </div>
+  <div class="phase-dot" data-phase="1">
+    <span class="dot"></span> 2. Transformer
+  </div>
+  <div class="phase-dot" data-phase="2">
+    <span class="dot"></span> 3. Decision Heads
+  </div>
+  <div class="phase-dot" data-phase="3">
+    <span class="dot"></span> 4. Imitation
+  </div>
+  <div class="phase-dot" data-phase="4">
+    <span class="dot"></span> 5. PPO Self-Play
+  </div>
+  <div class="phase-dot" data-phase="5">
+    <span class="dot"></span> 6. Deployment
+  </div>
+</div>
+
+<!-- ===== PHASE CONTAINER ===== -->
+<div id="phase-container">
+
+  <!-- ==================== PHASE 1: Game State Encoding ==================== -->
+  <section class="phase" id="phase-0">
+    <div class="phase-title">Game State Encoding</div>
+    <div class="phase-subtitle">Converting a Magic board state into 37,216 numbers</div>
+
+    <!-- Step 0: Board Visual -->
+    <div class="substep active" id="p0s0">
+      <div class="game-board" id="board-visual">
+        <!-- Opponent Side -->
+        <div class="board-side opponent">
+          <div class="board-label">
+            <span>OPPONENT</span>
+            <span class="life-total" style="color:var(--red)">17</span>
+          </div>
+          <div class="board-label" style="font-size:11px;color:var(--overlay0);margin-top:4px">Hand</div>
+          <div class="card-row" id="opp-hand">
+            <div class="mtg-card facedown" style="width:70px;height:90px"><div class="card-name-box" style="background:rgba(255,255,255,0.06)"><span class="card-name">? ? ?</span></div></div>
+            <div class="mtg-card facedown" style="width:70px;height:90px"><div class="card-name-box" style="background:rgba(255,255,255,0.06)"><span class="card-name">? ? ?</span></div></div>
+          </div>
+          <div class="board-label" style="font-size:11px;color:var(--overlay0);margin-top:4px">Battlefield</div>
+          <div class="card-row" id="opp-board">
+            <div class="mtg-card color-W">
+              <div class="card-name-box"><span class="card-name">Soldier of the Pantheon</span><span class="card-cost"><span class="mana-dot mana-W"></span></span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">2/1</span></div>
+            </div>
+            <div class="mtg-card color-W">
+              <div class="card-name-box"><span class="card-name">Precinct Captain</span><span class="card-cost"><span class="mana-dot mana-W"></span><span class="mana-dot mana-W"></span></span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">2/2</span></div>
+            </div>
+            <div class="mtg-card color-W land-card">
+              <div class="card-name-box"><span class="card-name">Plains</span></div>
+              <div class="card-text-box"><span class="card-type">Land</span></div>
+            </div>
+            <div class="mtg-card color-W land-card">
+              <div class="card-name-box"><span class="card-name">Plains</span></div>
+              <div class="card-text-box"><span class="card-type">Land</span></div>
+            </div>
+            <div class="mtg-card color-W land-card">
+              <div class="card-name-box"><span class="card-name">Plains</span></div>
+              <div class="card-text-box"><span class="card-type">Land</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stack Zone -->
+        <div style="display:flex;align-items:center;gap:12px;padding:4px 0">
+          <div class="board-divider" style="flex:1"></div>
+          <span style="font-size:11px;color:var(--overlay0);white-space:nowrap">Stack (empty)</span>
+          <div class="board-divider" style="flex:1"></div>
+        </div>
+
+        <!-- Player Side -->
+        <div class="board-side player">
+          <div class="board-label" style="font-size:11px;color:var(--overlay0)">Battlefield</div>
+          <div class="card-row" id="my-board">
+            <div class="mtg-card color-G" id="baloth-card">
+              <div class="card-name-box"><span class="card-name">Leatherback Baloth</span><span class="card-cost"><span class="mana-dot mana-G"></span><span class="mana-dot mana-G"></span><span class="mana-dot mana-G"></span></span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">4/5</span></div>
+            </div>
+            <div class="mtg-card color-G">
+              <div class="card-name-box"><span class="card-name">Elvish Mystic</span><span class="card-cost"><span class="mana-dot mana-G"></span></span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">1/1</span></div>
+            </div>
+            <div class="mtg-card color-G land-card">
+              <div class="card-name-box"><span class="card-name">Forest</span></div>
+              <div class="card-text-box"><span class="card-type">Land</span></div>
+            </div>
+            <div class="mtg-card color-G land-card">
+              <div class="card-name-box"><span class="card-name">Forest</span></div>
+              <div class="card-text-box"><span class="card-type">Land</span></div>
+            </div>
+            <div class="mtg-card color-G land-card">
+              <div class="card-name-box"><span class="card-name">Forest</span></div>
+              <div class="card-text-box"><span class="card-type">Land</span></div>
+            </div>
+          </div>
+          <div class="board-label" style="font-size:11px;color:var(--overlay0);margin-top:4px">Hand</div>
+          <div class="card-row" id="my-hand">
+            <div class="mtg-card color-G">
+              <div class="card-name-box"><span class="card-name">Giant Growth</span><span class="card-cost"><span class="mana-dot mana-G"></span></span></div>
+              <div class="card-text-box"><span class="card-type">Instant</span></div>
+            </div>
+            <div class="mtg-card color-G">
+              <div class="card-name-box"><span class="card-name">Rancor</span><span class="card-cost"><span class="mana-dot mana-G"></span></span></div>
+              <div class="card-text-box"><span class="card-type">Enchantment</span></div>
+            </div>
+            <div class="mtg-card color-G">
+              <div class="card-name-box"><span class="card-name">Kalonian Tusker</span><span class="card-cost"><span class="mana-dot mana-G"></span><span class="mana-dot mana-G"></span></span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">3/3</span></div>
+            </div>
+          </div>
+          <div class="board-label" style="font-size:11px;color:var(--overlay0);margin-top:4px">Graveyard</div>
+          <div class="card-row" id="my-graveyard" style="min-height:30px">
+            <div class="mtg-card color-G land-card" style="height:70px;width:70px;opacity:0.5">
+              <div class="card-name-box"><span class="card-name">Experiment One</span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">1/1</span></div>
+            </div>
+          </div>
+          <div class="board-label">
+            <span>YOU</span>
+            <span class="life-total" style="color:var(--green)">20</span>
+          </div>
+        </div>
+      </div>
+      <div class="text-sm text-subtext mt-16">A typical game state in Green Stompy vs White Weenie</div>
+    </div>
+
+    <!-- Step 1: Card to Vector -->
+    <div class="substep" id="p0s1">
+      <div class="flex-col gap-24" style="align-items:center;width:100%;max-width:800px">
+        <div class="flex-row gap-32" style="align-items:flex-start">
+          <div class="mtg-card color-G highlight" style="transform:scale(1.4);width:130px;height:180px">
+            <div class="card-name-box"><span class="card-name" style="font-size:12px">Leatherback Baloth</span><span class="card-cost"><span class="mana-dot mana-G"></span><span class="mana-dot mana-G"></span><span class="mana-dot mana-G"></span></span></div>
+            <div class="card-text-box"><span class="card-type" style="font-size:11px">Creature</span></div>
+            <div class="card-pt-box"><span class="card-pt" style="font-size:16px">4/5</span></div>
+          </div>
+          <div style="padding-top:30px">
+            <svg width="60" height="40"><path d="M5 20 L50 20" stroke="var(--blue)" stroke-width="2" marker-end="url(#arrowBlue)"/><defs><marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6" fill="var(--blue)"/></marker></defs></svg>
+          </div>
+          <div class="flex-col gap-8" style="font-size:13px;color:var(--subtext)">
+            <div><span class="fw-bold text-green">256-dimensional</span> feature vector</div>
+            <div>One vector per card in every zone</div>
+          </div>
+        </div>
+
+        <div style="position:relative;width:100%;overflow-x:auto;padding:20px 0">
+          <div id="feature-vector-bar" class="feature-bar" style="justify-content:center"></div>
+          <div id="feature-labels-container" style="position:relative;height:100px;margin-top:8px"></div>
+        </div>
+
+        <div class="flex-col gap-8 text-sm" id="feature-annotations" style="width:100%">
+          <div class="flex-row gap-16" style="flex-wrap:wrap;justify-content:center">
+            <div id="feat-0" class="flex-row gap-4" style="opacity:0;transition:opacity 0.5s">
+              <span style="width:10px;height:10px;background:var(--green);border-radius:2px;display:inline-block"></span>
+              <span>[0] Creature = 1</span>
+            </div>
+            <div id="feat-1" class="flex-row gap-4" style="opacity:0;transition:opacity 0.5s 0.3s">
+              <span style="width:10px;height:10px;background:var(--green);border-radius:2px;display:inline-block"></span>
+              <span>[11] Color: Green = 1</span>
+            </div>
+            <div id="feat-2" class="flex-row gap-4" style="opacity:0;transition:opacity 0.5s 0.6s">
+              <span style="width:10px;height:10px;background:var(--yellow);border-radius:2px;display:inline-block"></span>
+              <span>[52] Power = 0.36 (4/11 normalized)</span>
+            </div>
+            <div id="feat-3" class="flex-row gap-4" style="opacity:0;transition:opacity 0.5s 0.9s">
+              <span style="width:10px;height:10px;background:var(--yellow);border-radius:2px;display:inline-block"></span>
+              <span>[53] Toughness = 0.45 (5/11 normalized)</span>
+            </div>
+            <div id="feat-4" class="flex-row gap-4" style="opacity:0;transition:opacity 0.5s 1.2s">
+              <span style="width:10px;height:10px;background:var(--blue);border-radius:2px;display:inline-block"></span>
+              <span>[190] Is Mine = 1</span>
+            </div>
+            <div id="feat-5" class="flex-row gap-4" style="opacity:0;transition:opacity 0.5s 1.5s">
+              <span style="width:10px;height:10px;background:var(--red);border-radius:2px;display:inline-block"></span>
+              <span>[191] Is Opponent's = 0</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Zone Matrices -->
+    <div class="substep" id="p0s2">
+      <div class="flex-col gap-16" style="align-items:center">
+        <div class="text-lg fw-bold mb-8">Six Zone Matrices</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:750px">
+          <div id="zone-myboard" class="zone-matrix">
+            <div class="zone-matrix-title" style="color:var(--green)">My Board <span class="text-xs text-subtext">(40 x 256)</span></div>
+            <div id="zone-myboard-rows"></div>
+          </div>
+          <div id="zone-oppboard" class="zone-matrix">
+            <div class="zone-matrix-title" style="color:var(--red)">Opp Board <span class="text-xs text-subtext">(40 x 256)</span></div>
+            <div id="zone-oppboard-rows"></div>
+          </div>
+          <div id="zone-hand" class="zone-matrix">
+            <div class="zone-matrix-title" style="color:var(--blue)">Hand <span class="text-xs text-subtext">(15 x 256)</span></div>
+            <div id="zone-hand-rows"></div>
+          </div>
+          <div id="zone-mygy" class="zone-matrix">
+            <div class="zone-matrix-title" style="color:var(--teal)">My Graveyard <span class="text-xs text-subtext">(20 x 256)</span></div>
+            <div id="zone-mygy-rows"></div>
+          </div>
+          <div id="zone-oppgy" class="zone-matrix">
+            <div class="zone-matrix-title" style="color:var(--peach)">Opp Graveyard <span class="text-xs text-subtext">(20 x 256)</span></div>
+            <div id="zone-oppgy-rows"></div>
+          </div>
+          <div id="zone-stack" class="zone-matrix">
+            <div class="zone-matrix-title" style="color:var(--mauve)">Stack <span class="text-xs text-subtext">(10 x 256)</span></div>
+            <div id="zone-stack-rows"></div>
+          </div>
+        </div>
+        <div class="text-sm text-subtext mt-8">
+          <span style="display:inline-block;width:12px;height:12px;background:var(--blue);opacity:0.6;border-radius:2px;vertical-align:middle"></span> Filled card rows &nbsp;
+          <span style="display:inline-block;width:12px;height:12px;border:1px dashed var(--overlay0);border-radius:2px;vertical-align:middle"></span> Zero-padded rows
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3: Total -->
+    <div class="substep" id="p0s3">
+      <div class="flex-col gap-24" style="align-items:center">
+        <div class="text-lg fw-bold">Complete Game State Input</div>
+
+        <div class="flex-row gap-16" style="flex-wrap:wrap;justify-content:center;max-width:700px">
+          <div class="encoder-box" style="border-color:var(--peach)">
+            <div style="font-size:18px;color:var(--peach)">96</div>
+            <div class="sublabel">Global Features</div>
+            <div class="text-xs text-subtext mt-8">Life totals, phase, mana pool,<br>creature counts, turn number</div>
+          </div>
+          <div style="font-size:24px;color:var(--subtext);padding-top:10px">+</div>
+          <div class="encoder-box" style="border-color:var(--blue)">
+            <div style="font-size:18px;color:var(--blue)">145 x 256</div>
+            <div class="sublabel">Card Feature Vectors</div>
+            <div class="text-xs text-subtext mt-8">40 + 40 + 15 + 20 + 20 + 10<br>cards across six zones</div>
+          </div>
+        </div>
+
+        <div style="font-size:20px;color:var(--subtext)">
+          <svg width="40" height="40"><path d="M20 5 L20 35" stroke="var(--blue)" stroke-width="2" marker-end="url(#arrowBlue)"/></svg>
+        </div>
+
+        <div id="total-counter" class="encoder-box glow-blue" style="font-size:36px;padding:24px 48px;border-color:var(--blue)">
+          <div id="counter-value" style="color:var(--blue);font-family:monospace">0</div>
+          <div class="sublabel" style="font-size:14px;margin-top:8px">floating-point numbers per game state</div>
+          <div class="text-xs text-subtext mt-8">96 + (145 &times; 256) = 37,216</div>
+        </div>
+
+        <div class="text-sm text-subtext">This is the raw input to the neural network every time it needs to make a decision</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== PHASE 2: Transformer Encoder ==================== -->
+  <section class="phase" id="phase-1">
+    <div class="phase-title">Transformer Encoder</div>
+    <div class="phase-subtitle">Set-based attention captures card relationships</div>
+
+    <!-- Step 0: Zone to Encoder -->
+    <div class="substep active" id="p1s0">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:800px">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;width:100%">
+          <div class="encoder-box" style="border-color:var(--green)"><div style="color:var(--green)">My Board</div><div class="sublabel">40 x 256</div></div>
+          <div class="encoder-box" style="border-color:var(--red)"><div style="color:var(--red)">Opp Board</div><div class="sublabel">40 x 256</div></div>
+          <div class="encoder-box" style="border-color:var(--blue)"><div style="color:var(--blue)">Hand</div><div class="sublabel">15 x 256</div></div>
+          <div class="encoder-box" style="border-color:var(--teal)"><div style="color:var(--teal)">My Graveyard</div><div class="sublabel">20 x 256</div></div>
+          <div class="encoder-box" style="border-color:var(--peach)"><div style="color:var(--peach)">Opp Graveyard</div><div class="sublabel">20 x 256</div></div>
+          <div class="encoder-box" style="border-color:var(--mauve)"><div style="color:var(--mauve)">Stack</div><div class="sublabel">10 x 256</div></div>
+        </div>
+
+        <svg width="800" height="50" id="encoder-arrows-svg" style="overflow:visible">
+          <defs><marker id="arrowDown" markerWidth="8" markerHeight="6" refX="4" refY="6" orient="auto"><path d="M0 0 L4 6 L8 0" fill="var(--blue)"/></marker></defs>
+        </svg>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;width:100%">
+          <div class="encoder-box" style="background:var(--mantle)"><div class="text-green fw-bold">CardSetEncoder</div><div class="sublabel">Self-Attention + Pool</div></div>
+          <div class="encoder-box" style="background:var(--mantle)"><div class="text-red fw-bold">CardSetEncoder</div><div class="sublabel">Self-Attention + Pool</div></div>
+          <div class="encoder-box" style="background:var(--mantle)"><div class="text-blue fw-bold">CardSetEncoder</div><div class="sublabel">Self-Attention + Pool</div></div>
+          <div class="encoder-box" style="background:var(--mantle)"><div class="text-teal fw-bold">CardSetEncoder</div><div class="sublabel">Self-Attention + Pool</div></div>
+          <div class="encoder-box" style="background:var(--mantle)"><div class="text-peach fw-bold">CardSetEncoder</div><div class="sublabel">Self-Attention + Pool</div></div>
+          <div class="encoder-box" style="background:var(--mantle)"><div class="text-mauve fw-bold">CardSetEncoder</div><div class="sublabel">Self-Attention + Pool</div></div>
+        </div>
+
+        <div class="text-sm text-subtext">Each zone is processed independently by its own transformer encoder</div>
+      </div>
+    </div>
+
+    <!-- Step 1: CardSetEncoder Detail -->
+    <div class="substep" id="p1s1">
+      <div class="flex-col gap-24" style="align-items:center;width:100%;max-width:700px">
+        <div class="text-lg fw-bold">Inside a CardSetEncoder</div>
+        <svg width="700" height="300" viewBox="0 0 700 300" id="encoder-detail-svg">
+          <!-- Input cards -->
+          <rect x="20" y="40" width="120" height="30" rx="6" fill="var(--green)" opacity="0.7"/>
+          <text x="80" y="60" text-anchor="middle" fill="var(--bg)" font-size="11" font-weight="600">Baloth 256D</text>
+          <rect x="20" y="90" width="120" height="30" rx="6" fill="var(--green)" opacity="0.6"/>
+          <text x="80" y="110" text-anchor="middle" fill="var(--bg)" font-size="11" font-weight="600">Elf 256D</text>
+          <rect x="20" y="140" width="120" height="30" rx="6" fill="var(--green)" opacity="0.5"/>
+          <text x="80" y="160" text-anchor="middle" fill="var(--bg)" font-size="11" font-weight="600">Forest 256D</text>
+
+          <!-- Project -->
+          <rect x="180" y="75" width="90" height="60" rx="8" fill="var(--surface)" stroke="var(--surface1)"/>
+          <text x="225" y="100" text-anchor="middle" fill="var(--text)" font-size="10">Linear</text>
+          <text x="225" y="115" text-anchor="middle" fill="var(--subtext)" font-size="9">256 → 128</text>
+          <line x1="140" y1="55" x2="180" y2="90" stroke="var(--subtext)" stroke-width="1"/>
+          <line x1="140" y1="105" x2="180" y2="105" stroke="var(--subtext)" stroke-width="1"/>
+          <line x1="140" y1="155" x2="180" y2="120" stroke="var(--subtext)" stroke-width="1"/>
+
+          <!-- Attention box -->
+          <rect x="310" y="45" width="160" height="120" rx="10" fill="var(--surface)" stroke="var(--blue)" stroke-width="2"/>
+          <text x="390" y="70" text-anchor="middle" fill="var(--blue)" font-size="12" font-weight="600">Self-Attention</text>
+          <text x="390" y="88" text-anchor="middle" fill="var(--subtext)" font-size="10">4 heads, 2 layers</text>
+
+          <!-- Attention connections -->
+          <path d="M340 100 Q 390 80 440 100" fill="none" stroke="var(--yellow)" stroke-width="1.5" class="attention-line" opacity="0.7"/>
+          <path d="M340 120 Q 390 100 440 120" fill="none" stroke="var(--yellow)" stroke-width="1.5" class="attention-line" opacity="0.5" style="animation-delay:-0.3s"/>
+          <path d="M340 140 Q 390 120 440 140" fill="none" stroke="var(--yellow)" stroke-width="1.5" class="attention-line" opacity="0.6" style="animation-delay:-0.6s"/>
+          <!-- Cross connections -->
+          <path d="M350 100 Q 390 130 430 120" fill="none" stroke="var(--peach)" stroke-width="1" class="attention-line" opacity="0.4" style="animation-delay:-0.2s"/>
+          <path d="M350 120 Q 390 90 430 100" fill="none" stroke="var(--peach)" stroke-width="1" class="attention-line" opacity="0.4" style="animation-delay:-0.5s"/>
+          <path d="M350 140 Q 390 110 430 100" fill="none" stroke="var(--peach)" stroke-width="1" class="attention-line" opacity="0.3" style="animation-delay:-0.8s"/>
+
+          <line x1="270" y1="105" x2="310" y2="105" stroke="var(--subtext)" stroke-width="1" marker-end="url(#arrowBlue)"/>
+
+          <!-- Pool -->
+          <rect x="510" y="75" width="80" height="60" rx="8" fill="var(--surface)" stroke="var(--teal)"/>
+          <text x="550" y="100" text-anchor="middle" fill="var(--teal)" font-size="11" font-weight="600">Pool</text>
+          <text x="550" y="115" text-anchor="middle" fill="var(--subtext)" font-size="9">masked mean</text>
+          <line x1="470" y1="105" x2="510" y2="105" stroke="var(--subtext)" stroke-width="1" marker-end="url(#arrowBlue)"/>
+
+          <!-- Output -->
+          <rect x="620" y="85" width="70" height="36" rx="6" fill="var(--blue)" opacity="0.8"/>
+          <text x="655" y="108" text-anchor="middle" fill="var(--bg)" font-size="12" font-weight="700">128D</text>
+          <line x1="590" y1="105" x2="620" y2="103" stroke="var(--blue)" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+          <!-- Bottom labels -->
+          <text x="80" y="210" text-anchor="middle" fill="var(--subtext)" font-size="11">Card vectors in</text>
+          <text x="390" y="195" text-anchor="middle" fill="var(--subtext)" font-size="11">Cards attend to each other:</text>
+          <text x="390" y="210" text-anchor="middle" fill="var(--subtext)" font-size="10">"Does equipment boost this creature?"</text>
+          <text x="390" y="225" text-anchor="middle" fill="var(--subtext)" font-size="10">"Are there synergies between these cards?"</text>
+          <text x="655" y="145" text-anchor="middle" fill="var(--subtext)" font-size="11">Zone summary</text>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Step 2: All Encoders Combine -->
+    <div class="substep" id="p1s2">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:800px">
+        <div class="text-lg fw-bold">Combining Zone Embeddings</div>
+
+        <div class="flex-row gap-8" style="flex-wrap:wrap;justify-content:center" id="zone-bars">
+          <div class="dim-bar" style="background:var(--green);opacity:0.7;width:90px;color:var(--bg)">128D</div>
+          <div class="dim-bar" style="background:var(--red);opacity:0.7;width:90px;color:var(--bg)">128D</div>
+          <div class="dim-bar" style="background:var(--blue);opacity:0.7;width:90px;color:var(--bg)">128D</div>
+          <div class="dim-bar" style="background:var(--teal);opacity:0.7;width:90px;color:var(--bg)">128D</div>
+          <div class="dim-bar" style="background:var(--peach);opacity:0.7;width:90px;color:var(--bg)">128D</div>
+          <div class="dim-bar" style="background:var(--mauve);opacity:0.7;width:90px;color:var(--bg)">128D</div>
+          <div class="dim-bar" style="background:var(--yellow);opacity:0.7;width:90px;color:var(--bg)">128D</div>
+        </div>
+
+        <div class="flex-row gap-8 text-xs text-subtext" style="flex-wrap:wrap;justify-content:center">
+          <span>My Board</span><span>Opp Board</span><span>Hand</span>
+          <span>My GY</span><span>Opp GY</span><span>Stack</span>
+          <span style="color:var(--yellow)">Global</span>
+        </div>
+
+        <svg width="100" height="40"><path d="M50 5 L50 35" stroke="var(--blue)" stroke-width="2" marker-end="url(#arrowBlue)"/></svg>
+
+        <div class="flex-row gap-8" style="align-items:center">
+          <div class="text-subtext text-sm">concatenate</div>
+          <div class="dim-bar" style="background:linear-gradient(90deg,var(--green),var(--red),var(--blue),var(--teal),var(--peach),var(--mauve),var(--yellow));width:420px;color:var(--bg);font-size:14px;height:32px">
+            7 x 128 = 896D
+          </div>
+        </div>
+
+        <div class="text-sm text-subtext">Seven 128D zone embeddings: 6 zones + global features, all via MLP</div>
+      </div>
+    </div>
+
+    <!-- Step 3: Final Projection -->
+    <div class="substep" id="p1s3">
+      <div class="flex-col gap-24" style="align-items:center;width:100%;max-width:700px">
+        <div class="dim-bar" style="background:linear-gradient(90deg,var(--green),var(--red),var(--blue),var(--teal),var(--peach),var(--mauve),var(--yellow));width:420px;color:var(--bg);height:32px">896D</div>
+
+        <svg width="100" height="60">
+          <rect x="15" y="10" width="70" height="40" rx="8" fill="var(--surface)" stroke="var(--surface1)"/>
+          <text x="50" y="35" text-anchor="middle" fill="var(--text)" font-size="11">MLP</text>
+        </svg>
+
+        <div id="state-embed-bar" class="dim-bar glow-blue" style="background:var(--blue);width:300px;color:var(--bg);height:40px;font-size:16px;font-weight:700">
+          512D Game State
+        </div>
+
+        <div class="text-center" style="max-width:500px">
+          <div class="text-lg fw-bold mb-8" style="color:var(--blue)">The model's complete understanding</div>
+          <div class="text-sm text-subtext">
+            This 512-dimensional vector is the shared representation used by every decision head.
+            It captures board position, threats, resources, and tempo — everything needed to make good decisions.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== PHASE 3: Decision Heads ==================== -->
+  <section class="phase" id="phase-2">
+    <div class="phase-title">Decision Heads</div>
+    <div class="phase-subtitle">Specialized heads for each type of MTG decision</div>
+
+    <!-- Step 0: Overview -->
+    <div class="substep active" id="p2s0">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:800px">
+        <div id="state-bar-heads" class="dim-bar glow-blue" style="background:var(--blue);width:260px;color:var(--bg);height:36px;font-size:14px;font-weight:700">
+          512D Game State
+        </div>
+
+        <svg width="800" height="80" style="overflow:visible">
+          <line x1="400" y1="0" x2="133" y2="70" stroke="var(--blue)" stroke-width="2"/>
+          <line x1="400" y1="0" x2="400" y2="70" stroke="var(--green)" stroke-width="2"/>
+          <line x1="400" y1="0" x2="667" y2="70" stroke="var(--mauve)" stroke-width="2"/>
+        </svg>
+
+        <div class="flex-row gap-24" style="width:100%;justify-content:center">
+          <div class="head-box blue">
+            <div class="fw-bold text-blue">Priority Head</div>
+            <div class="text-xs text-subtext mt-8">Which spell to cast?<br>Which land to play?<br>Or pass priority?</div>
+          </div>
+          <div class="head-box green">
+            <div class="fw-bold text-green">Attack Head</div>
+            <div class="text-xs text-subtext mt-8">Which creatures attack?<br>Independent sigmoid per<br>creature (multi-select)</div>
+          </div>
+          <div class="head-box mauve">
+            <div class="fw-bold text-mauve">Target Head</div>
+            <div class="text-xs text-subtext mt-8">Choose targets for spells.<br>Uses ownership flags<br>for polarity</div>
+          </div>
+        </div>
+
+        <div class="flex-row gap-16 text-xs text-subtext" style="flex-wrap:wrap;justify-content:center;margin-top:8px">
+          <span>+ Block Head</span>
+          <span>+ Card Select Head</span>
+          <span>+ Mulligan Head</span>
+          <span>+ Binary Head</span>
+          <span>+ Value Network (critic)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 1: Priority Head -->
+    <div class="substep" id="p2s1">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:800px">
+        <div class="text-lg fw-bold text-blue">Priority Head — Cross-Attention</div>
+
+        <div class="flex-row gap-32" style="align-items:flex-start;width:100%;justify-content:center">
+          <div class="flex-col gap-8" style="align-items:center">
+            <div class="dim-bar" style="background:var(--blue);opacity:0.7;width:140px;color:var(--bg);height:28px;font-size:12px">512D State</div>
+            <div class="text-xs text-subtext">Query</div>
+          </div>
+
+          <svg width="80" height="80" style="overflow:visible">
+            <path d="M0 10 Q40 40 80 10" fill="none" stroke="var(--yellow)" stroke-width="1.5" class="attention-line"/>
+            <path d="M0 30 Q40 50 80 30" fill="none" stroke="var(--yellow)" stroke-width="1.5" class="attention-line" style="animation-delay:-0.3s"/>
+            <path d="M0 50 Q40 60 80 50" fill="none" stroke="var(--yellow)" stroke-width="1.5" class="attention-line" style="animation-delay:-0.6s"/>
+          </svg>
+
+          <div class="flex-col gap-6" style="align-items:center">
+            <div class="dim-bar" style="background:var(--green);opacity:0.6;width:140px;color:var(--bg);height:24px;font-size:11px">Play Creature</div>
+            <div class="dim-bar" style="background:var(--blue);opacity:0.6;width:140px;color:var(--bg);height:24px;font-size:11px">Cast Removal</div>
+            <div class="dim-bar" style="background:var(--surface1);width:140px;color:var(--text);height:24px;font-size:11px">Pass</div>
+            <div class="text-xs text-subtext">64D action embeddings (Keys)</div>
+          </div>
+        </div>
+
+        <svg width="40" height="40"><path d="M20 5 L20 35" stroke="var(--blue)" stroke-width="2" marker-end="url(#arrowBlue)"/></svg>
+
+        <div class="prob-bar-container" style="max-width:500px">
+          <div class="prob-bar-row">
+            <div class="prob-bar-label text-green">Play Creature</div>
+            <div class="prob-bar-track">
+              <div class="prob-bar-fill" id="prio-bar-0" style="width:0%;background:var(--green)">45%</div>
+            </div>
+          </div>
+          <div class="prob-bar-row">
+            <div class="prob-bar-label text-blue">Cast Removal</div>
+            <div class="prob-bar-track">
+              <div class="prob-bar-fill" id="prio-bar-1" style="width:0%;background:var(--blue)">30%</div>
+            </div>
+          </div>
+          <div class="prob-bar-row">
+            <div class="prob-bar-label text-subtext">Pass</div>
+            <div class="prob-bar-track">
+              <div class="prob-bar-fill" id="prio-bar-2" style="width:0%;background:var(--surface1);color:var(--text)">25%</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-xs text-subtext">Softmax probabilities — sample one action</div>
+      </div>
+    </div>
+
+    <!-- Step 2: Attack Head -->
+    <div class="substep" id="p2s2">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:700px">
+        <div class="text-lg fw-bold text-green">Attack Head — Independent Sigmoids</div>
+        <div class="text-sm text-subtext">Each creature gets an independent attack probability</div>
+
+        <div class="flex-row gap-48" style="justify-content:center;margin-top:16px">
+          <div class="flex-col gap-12" style="align-items:center">
+            <div class="mtg-card color-G highlight" style="height:100px;width:90px">
+              <div class="card-name-box"><span class="card-name">Leatherback Baloth</span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">4/5</span></div>
+            </div>
+
+            <svg width="120" height="120" viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="50" fill="none" stroke="var(--surface1)" stroke-width="6"/>
+              <circle cx="60" cy="60" r="50" fill="none" stroke="var(--green)" stroke-width="6"
+                stroke-dasharray="257" id="gauge-baloth" stroke-dashoffset="257"
+                transform="rotate(-90 60 60)" stroke-linecap="round"/>
+              <text x="60" y="60" text-anchor="middle" dominant-baseline="middle" fill="var(--green)" font-size="22" font-weight="700" id="gauge-baloth-text">0%</text>
+            </svg>
+            <div class="flex-row gap-4">
+              <span style="color:var(--green);font-size:20px" id="baloth-check" style="opacity:0">&#10003;</span>
+              <span class="fw-bold text-green">ATTACK</span>
+            </div>
+          </div>
+
+          <div class="flex-col gap-12" style="align-items:center">
+            <div class="mtg-card color-G" style="height:100px;width:90px">
+              <div class="card-name-box"><span class="card-name">Elvish Mystic</span></div>
+              <div class="card-text-box"><span class="card-type">Creature</span></div>
+              <div class="card-pt-box"><span class="card-pt">1/1</span></div>
+            </div>
+
+            <svg width="120" height="120" viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="50" fill="none" stroke="var(--surface1)" stroke-width="6"/>
+              <circle cx="60" cy="60" r="50" fill="none" stroke="var(--red)" stroke-width="6"
+                stroke-dasharray="257" id="gauge-elf" stroke-dashoffset="257"
+                transform="rotate(-90 60 60)" stroke-linecap="round"/>
+              <text x="60" y="60" text-anchor="middle" dominant-baseline="middle" fill="var(--red)" font-size="22" font-weight="700" id="gauge-elf-text">0%</text>
+            </svg>
+            <div class="flex-row gap-4">
+              <span style="color:var(--red);font-size:20px" id="elf-x">&#10007;</span>
+              <span class="fw-bold text-red">HOLD</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-xs text-subtext mt-8">Self-attention between creatures, then per-creature sigmoid. Threshold at 0.5 — each creature is an independent decision.</div>
+      </div>
+    </div>
+
+    <!-- Step 3: Target Head -->
+    <div class="substep" id="p2s3">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:900px">
+        <div class="text-lg fw-bold text-mauve">Target Head — Ownership-Aware Targeting</div>
+
+        <div class="flex-row gap-32" style="width:100%;justify-content:center;flex-wrap:wrap">
+          <!-- Pump scenario -->
+          <div class="flex-col gap-12" style="align-items:center;padding:16px;background:var(--mantle);border-radius:12px;border:1px solid var(--green);min-width:340px">
+            <div class="fw-bold text-green">Giant Growth (Pump)</div>
+            <div class="flex-row gap-8">
+              <div class="mtg-card color-G" style="height:110px;width:85px;border:2px solid var(--green);box-shadow:0 0 10px rgba(166,227,161,0.3)">
+                <div class="card-name-box"><span class="card-name">Baloth</span></div>
+                <div class="card-text-box"><span class="card-type">Creature</span></div>
+                <div class="card-pt-box"><span class="card-pt">4/5</span></div>
+                <div class="text-xs" style="color:var(--green);position:absolute;bottom:4px;left:4px;font-size:8px">[190]=1 Mine</div>
+              </div>
+              <div class="mtg-card color-G" style="height:110px;width:85px;opacity:0.4">
+                <div class="card-name-box"><span class="card-name">Elf</span></div>
+                <div class="card-text-box"><span class="card-type">Creature</span></div>
+                <div class="card-pt-box"><span class="card-pt">1/1</span></div>
+                <div class="text-xs" style="color:var(--green);position:absolute;bottom:4px;left:4px;font-size:8px">[190]=1 Mine</div>
+              </div>
+              <div class="mtg-card color-W" style="height:110px;width:85px;opacity:0.2">
+                <div class="card-name-box"><span class="card-name">Soldier</span></div>
+                <div class="card-text-box"><span class="card-type">Creature</span></div>
+                <div class="card-pt-box"><span class="card-pt">2/1</span></div>
+                <div class="text-xs" style="color:var(--red);position:absolute;bottom:4px;left:4px;font-size:8px">[191]=1 Opp</div>
+              </div>
+            </div>
+            <div class="text-sm">
+              <span style="color:var(--green)">&#9654;</span> Pump targets <span class="fw-bold text-green">my creatures</span>
+            </div>
+            <div class="text-xs text-subtext">Ownership flag [190] guides target selection</div>
+          </div>
+
+          <!-- Damage scenario -->
+          <div class="flex-col gap-12" style="align-items:center;padding:16px;background:var(--mantle);border-radius:12px;border:1px solid var(--red);min-width:340px">
+            <div class="fw-bold text-red">Lightning Bolt (Damage)</div>
+            <div class="flex-row gap-8">
+              <div class="mtg-card color-G" style="height:110px;width:85px;opacity:0.2">
+                <div class="card-name-box"><span class="card-name">Baloth</span></div>
+                <div class="card-text-box"><span class="card-type">Creature</span></div>
+                <div class="card-pt-box"><span class="card-pt">4/5</span></div>
+                <div class="text-xs" style="color:var(--green);position:absolute;bottom:4px;left:4px;font-size:8px">[190]=1 Mine</div>
+              </div>
+              <div class="mtg-card color-W" style="height:110px;width:85px;border:2px solid var(--red);box-shadow:0 0 10px rgba(243,139,168,0.3)">
+                <div class="card-name-box"><span class="card-name">Captain</span></div>
+                <div class="card-text-box"><span class="card-type">Creature</span></div>
+                <div class="card-pt-box"><span class="card-pt">2/2</span></div>
+                <div class="text-xs" style="color:var(--red);position:absolute;bottom:4px;left:4px;font-size:8px">[191]=1 Opp</div>
+              </div>
+              <div class="mtg-card color-W" style="height:110px;width:85px;opacity:0.4">
+                <div class="card-name-box"><span class="card-name">Soldier</span></div>
+                <div class="card-text-box"><span class="card-type">Creature</span></div>
+                <div class="card-pt-box"><span class="card-pt">2/1</span></div>
+                <div class="text-xs" style="color:var(--red);position:absolute;bottom:4px;left:4px;font-size:8px">[191]=1 Opp</div>
+              </div>
+            </div>
+            <div class="text-sm">
+              <span style="color:var(--red)">&#9654;</span> Removal targets <span class="fw-bold text-red">opponent's creatures</span>
+            </div>
+            <div class="text-xs text-subtext">Ownership flag [191] guides target selection</div>
+          </div>
+        </div>
+
+        <div class="text-sm text-subtext mt-8">
+          The target polarity feature tells the model whether a spell wants to target friendly or hostile permanents — no hardcoded rules needed.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== PHASE 4: Imitation Learning ==================== -->
+  <section class="phase" id="phase-3">
+    <div class="phase-title">Imitation Learning</div>
+    <div class="phase-subtitle">Learning from 1,000 heuristic AI games</div>
+
+    <!-- Step 0: Game Grid -->
+    <div class="substep active" id="p3s0">
+      <div class="flex-col gap-24" style="align-items:center">
+        <div class="flex-row gap-32" style="align-items:center">
+          <div>
+            <div class="text-sm fw-bold mb-8">1,000 Heuristic Games (4 decks)</div>
+            <div class="game-grid" id="game-grid"></div>
+            <div class="flex-row gap-16 mt-8 text-xs">
+              <div class="flex-row gap-4"><span style="width:12px;height:12px;background:var(--green);border-radius:2px;display:inline-block"></span> Win</div>
+              <div class="flex-row gap-4"><span style="width:12px;height:12px;background:var(--red);border-radius:2px;display:inline-block"></span> Loss</div>
+            </div>
+          </div>
+
+          <div style="font-size:32px;color:var(--blue)">&#10132;</div>
+
+          <div class="flex-col gap-8" style="align-items:center">
+            <svg width="80" height="80" viewBox="0 0 80 80">
+              <rect x="5" y="5" width="50" height="60" rx="4" fill="var(--surface)" stroke="var(--surface1)" stroke-width="2"/>
+              <rect x="15" y="15" width="50" height="60" rx="4" fill="var(--surface)" stroke="var(--surface1)" stroke-width="2"/>
+              <rect x="25" y="25" width="50" height="60" rx="4" fill="var(--surface)" stroke="var(--blue)" stroke-width="2"/>
+              <text x="50" y="60" text-anchor="middle" fill="var(--blue)" font-size="10" font-weight="600">JSONL</text>
+            </svg>
+            <div class="text-sm fw-bold">JSONL Trajectories</div>
+            <div class="text-xs text-subtext">~15 decisions per game<br>~15,000 training samples</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 1: Training Panels -->
+    <div class="substep" id="p3s1">
+      <div class="flex-row gap-32" style="align-items:flex-start;justify-content:center;width:100%;max-width:900px;flex-wrap:wrap">
+        <!-- Value Network -->
+        <div class="flex-col gap-12" style="align-items:center;padding:20px;background:var(--mantle);border-radius:12px;border:1px solid var(--surface1);min-width:320px">
+          <div class="text-lg fw-bold text-peach">Value Network</div>
+          <div class="text-xs text-subtext">Predicts game outcome from any state</div>
+          <div class="text-sm" style="margin:8px 0">Game State &#8594; V(s) &#8594; compare to win/loss</div>
+
+          <svg width="300" height="150" viewBox="0 0 300 150" id="loss-curve-svg">
+            <line x1="40" y1="10" x2="40" y2="130" stroke="var(--surface1)" stroke-width="1"/>
+            <line x1="40" y1="130" x2="290" y2="130" stroke="var(--surface1)" stroke-width="1"/>
+            <text x="15" y="20" fill="var(--subtext)" font-size="9">0.8</text>
+            <text x="15" y="70" fill="var(--subtext)" font-size="9">0.4</text>
+            <text x="15" y="130" fill="var(--subtext)" font-size="9">0.0</text>
+            <text x="160" y="148" text-anchor="middle" fill="var(--subtext)" font-size="9">Epochs</text>
+            <path id="loss-curve-path" d="" fill="none" stroke="var(--peach)" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+
+        <!-- Decision Heads -->
+        <div class="flex-col gap-12" style="align-items:center;padding:20px;background:var(--mantle);border-radius:12px;border:1px solid var(--surface1);min-width:320px">
+          <div class="text-lg fw-bold text-blue">Decision Heads</div>
+          <div class="text-xs text-subtext">Accuracy matching heuristic AI decisions</div>
+
+          <div class="prob-bar-container" style="margin-top:12px">
+            <div class="prob-bar-row">
+              <div class="prob-bar-label text-sm">Priority</div>
+              <div class="prob-bar-track"><div class="prob-bar-fill" id="acc-bar-0" style="width:0%;background:var(--blue)">93.4%</div></div>
+            </div>
+            <div class="prob-bar-row">
+              <div class="prob-bar-label text-sm">Attack</div>
+              <div class="prob-bar-track"><div class="prob-bar-fill" id="acc-bar-1" style="width:0%;background:var(--green)">84.7%</div></div>
+            </div>
+            <div class="prob-bar-row">
+              <div class="prob-bar-label text-sm">Target</div>
+              <div class="prob-bar-track"><div class="prob-bar-fill" id="acc-bar-2" style="width:0%;background:var(--mauve)">77.5%</div></div>
+            </div>
+            <div class="prob-bar-row">
+              <div class="prob-bar-label text-sm">Block</div>
+              <div class="prob-bar-track"><div class="prob-bar-fill" id="acc-bar-3" style="width:0%;background:var(--peach)">64.8%</div></div>
+            </div>
+            <div class="prob-bar-row">
+              <div class="prob-bar-label text-sm">Mulligan</div>
+              <div class="prob-bar-track"><div class="prob-bar-fill" id="acc-bar-4" style="width:0%;background:var(--teal)">99.2%</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Baseline -->
+    <div class="substep" id="p3s2">
+      <div class="flex-col gap-24" style="align-items:center">
+        <div class="text-xl fw-bold">Result: <span class="text-yellow">29% win rate</span> vs heuristic AI</div>
+
+        <div style="width:400px;height:32px;background:var(--mantle);border-radius:8px;overflow:hidden;border:1px solid var(--surface1)">
+          <div id="baseline-bar" style="width:0%;height:100%;background:linear-gradient(90deg,var(--green),var(--yellow));border-radius:8px;transition:width 1.5s cubic-bezier(0.4,0,0.2,1);display:flex;align-items:center;justify-content:flex-end;padding-right:12px;font-weight:700;font-size:14px">
+            29%
+          </div>
+        </div>
+
+        <div class="flex-col gap-8" style="align-items:center;max-width:500px;text-align:center">
+          <div class="text-sm text-subtext">
+            The model copies the heuristic AI's decisions well, but can't improve beyond it.
+            Imitation learning hits a ceiling — the student can't surpass the teacher.
+          </div>
+          <div class="text-lg mt-16" style="color:var(--yellow)">How do we get better?</div>
+          <div class="text-sm text-subtext">We need the model to discover strategies on its own...</div>
+          <div style="font-size:32px;color:var(--blue);margin-top:16px">&#10132;</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== PHASE 5: PPO Self-Play ==================== -->
+  <section class="phase" id="phase-4">
+    <div class="phase-title">PPO Self-Play</div>
+    <div class="phase-subtitle">Reinforcement learning through self-play</div>
+
+    <!-- Step 0: Self-Play -->
+    <div class="substep active" id="p4s0">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:800px">
+        <div class="text-lg fw-bold">Self-Play: Learning by Playing Itself</div>
+
+        <div class="flex-row gap-16" style="align-items:center;justify-content:center;width:100%">
+          <!-- Left NN -->
+          <div class="flex-col gap-8" style="align-items:center">
+            <svg width="100" height="100" viewBox="0 0 100 100">
+              <circle cx="50" cy="25" r="12" fill="var(--blue)" opacity="0.8"/>
+              <circle cx="30" cy="55" r="10" fill="var(--blue)" opacity="0.6"/>
+              <circle cx="70" cy="55" r="10" fill="var(--blue)" opacity="0.6"/>
+              <circle cx="50" cy="80" r="10" fill="var(--blue)" opacity="0.7"/>
+              <line x1="50" y1="37" x2="30" y2="45" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+              <line x1="50" y1="37" x2="70" y2="45" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+              <line x1="30" y1="65" x2="50" y2="70" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+              <line x1="70" y1="65" x2="50" y2="70" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+            </svg>
+            <div class="text-sm fw-bold text-blue">Same Model</div>
+            <div class="text-xs text-subtext">(Player 1)</div>
+          </div>
+
+          <!-- Battle icon -->
+          <div class="flex-col gap-8" style="align-items:center;padding:16px 24px;background:var(--mantle);border-radius:12px;border:1px solid var(--surface1)">
+            <div style="font-size:32px">&#9876;</div>
+            <div class="text-sm fw-bold">Game</div>
+            <div class="text-xs text-subtext">Both sides record<br>trajectories</div>
+          </div>
+
+          <!-- Right NN (mirror) -->
+          <div class="flex-col gap-8" style="align-items:center">
+            <svg width="100" height="100" viewBox="0 0 100 100" style="transform:scaleX(-1)">
+              <circle cx="50" cy="25" r="12" fill="var(--blue)" opacity="0.8"/>
+              <circle cx="30" cy="55" r="10" fill="var(--blue)" opacity="0.6"/>
+              <circle cx="70" cy="55" r="10" fill="var(--blue)" opacity="0.6"/>
+              <circle cx="50" cy="80" r="10" fill="var(--blue)" opacity="0.7"/>
+              <line x1="50" y1="37" x2="30" y2="45" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+              <line x1="50" y1="37" x2="70" y2="45" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+              <line x1="30" y1="65" x2="50" y2="70" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+              <line x1="70" y1="65" x2="50" y2="70" stroke="var(--blue)" stroke-width="1.5" opacity="0.4"/>
+            </svg>
+            <div class="text-sm fw-bold text-blue">Same Model</div>
+            <div class="text-xs text-subtext">(Player 2)</div>
+          </div>
+        </div>
+
+        <div class="encoder-box" style="border-color:var(--green);padding:16px 32px">
+          <div class="text-lg fw-bold text-green">50% win rate = balanced training signal</div>
+          <div class="text-xs text-subtext mt-8">Every game produces useful data for both winner and loser</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 1: GAE Advantage -->
+    <div class="substep" id="p4s1">
+      <div class="flex-col gap-12" style="align-items:center;width:100%;max-width:900px">
+        <div class="text-lg fw-bold">GAE: Generalized Advantage Estimation</div>
+        <div class="text-sm text-subtext">Which specific decisions were good or bad?</div>
+
+        <!-- Timeline -->
+        <div style="position:relative;width:100%;max-width:800px;padding:30px 0">
+          <div style="display:flex;justify-content:space-between;align-items:center;position:relative">
+            <div style="position:absolute;top:50%;left:20px;right:20px;height:2px;background:var(--surface1)"></div>
+            <div class="timeline-point" id="tp-d1">d1</div>
+            <div class="timeline-point" id="tp-d2">d2</div>
+            <div class="timeline-point" id="tp-d3">d3</div>
+            <div class="timeline-point" id="tp-d4">d4</div>
+            <div class="timeline-point" id="tp-d5">d5</div>
+            <div class="timeline-point" id="tp-d6">d6</div>
+            <div class="timeline-point" id="tp-d7">d7</div>
+            <div class="timeline-point" id="tp-d8">d8</div>
+          </div>
+
+          <!-- Value bars above timeline -->
+          <div style="display:flex;justify-content:space-between;margin-top:8px;padding:0 4px">
+            <div class="text-xs text-subtext" style="text-align:center;width:70px">V=-0.1</div>
+            <div class="text-xs text-subtext" style="text-align:center;width:70px">V=+0.2</div>
+            <div class="text-xs text-subtext" style="text-align:center;width:70px">V=+0.5</div>
+            <div class="text-xs text-green" style="text-align:center;width:70px;font-weight:600" id="v4-label">V=-0.3</div>
+            <div class="text-xs text-green" style="text-align:center;width:70px;font-weight:600" id="v5-label">V=+0.1</div>
+            <div class="text-xs text-subtext" style="text-align:center;width:70px">V=+0.3</div>
+            <div class="text-xs text-subtext" style="text-align:center;width:70px">V=+0.2</div>
+            <div class="text-xs text-subtext" style="text-align:center;width:70px">V=+0.4</div>
+          </div>
+        </div>
+
+        <!-- Example: Good decision -->
+        <div class="flex-row gap-24" style="width:100%;justify-content:center;flex-wrap:wrap">
+          <div id="gae-good" class="flex-col gap-8" style="padding:16px;background:var(--mantle);border-radius:12px;border:2px solid var(--green);min-width:340px;opacity:0;transition:opacity 0.6s,transform 0.6s;transform:translateY(10px)">
+            <div class="fw-bold text-green">d4: "Cast Path to Exile on opponent's creature"</div>
+            <div class="text-sm" style="font-family:monospace;background:var(--surface);padding:8px;border-radius:6px">
+              <span style="color:var(--subtext)">delta</span> = r<sub>t</sub> + 0.95 * V(t+1) - V(t)<br>
+              <span style="color:var(--subtext)">delta</span> = 0 + 0.95 * (+0.1) - (-0.3)<br>
+              <span style="color:var(--green);font-weight:700">delta = +0.395</span>
+            </div>
+            <div class="text-sm" style="color:var(--green)">
+              GOOD: Made things better, even in a losing game
+            </div>
+          </div>
+
+          <div id="gae-bad" class="flex-col gap-8" style="padding:16px;background:var(--mantle);border-radius:12px;border:2px solid var(--red);min-width:340px;opacity:0;transition:opacity 0.6s 0.4s,transform 0.6s 0.4s;transform:translateY(10px)">
+            <div class="fw-bold text-red">d3: "Accidentally Path own creature"</div>
+            <div class="text-sm" style="font-family:monospace;background:var(--surface);padding:8px;border-radius:6px">
+              <span style="color:var(--subtext)">delta</span> = r<sub>t</sub> + 0.95 * V(t+1) - V(t)<br>
+              <span style="color:var(--subtext)">delta</span> = 0 + 0.95 * (+0.1) - (+0.5)<br>
+              <span style="color:var(--red);font-weight:700">delta = -0.405</span>
+            </div>
+            <div class="text-sm" style="color:var(--red)">
+              BAD: Made things worse, even in a winning game
+            </div>
+          </div>
+        </div>
+
+        <div class="text-xs text-subtext mt-8" style="max-width:600px;text-align:center">
+          GAE propagates advantages right-to-left with <span class="fw-bold">lambda=0.90</span> decay, so good/bad decisions get credit even many turns before the outcome.
+          Formula: A_t = sum of (gamma*lambda)^l * delta_{t+l}
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: PPO Update -->
+    <div class="substep" id="p4s2">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:700px">
+        <div class="text-lg fw-bold">PPO: Conservative Policy Updates</div>
+
+        <div class="flex-col gap-12" style="width:100%;max-width:500px">
+          <div class="text-sm fw-bold">Attack with Baloth — before vs after update:</div>
+
+          <div class="prob-bar-container">
+            <div class="prob-bar-row">
+              <div class="prob-bar-label text-sm text-subtext">Old policy</div>
+              <div class="prob-bar-track">
+                <div class="prob-bar-fill" id="ppo-old" style="width:60%;background:var(--surface1);color:var(--text)">60%</div>
+              </div>
+            </div>
+            <div class="prob-bar-row">
+              <div class="prob-bar-label text-sm text-green">New policy</div>
+              <div class="prob-bar-track">
+                <div class="prob-bar-fill" id="ppo-new" style="width:0%;background:var(--green)">75%</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="text-sm" style="font-family:monospace;text-align:center;margin:8px 0">
+            ratio = 0.75 / 0.60 = <span class="fw-bold text-yellow">1.25</span>
+          </div>
+
+          <!-- Clipping visualization -->
+          <div class="flex-col gap-8">
+            <div class="text-sm fw-bold">Clipping: keep ratio in [0.8, 1.2]</div>
+            <div style="position:relative;width:100%;height:50px">
+              <div class="clip-bar-track">
+                <!-- Labels -->
+                <div style="position:absolute;top:-18px;left:20%;transform:translateX(-50%);font-size:10px;color:var(--subtext)">0.8</div>
+                <div style="position:absolute;top:-18px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--subtext)">1.0</div>
+                <div style="position:absolute;top:-18px;left:80%;transform:translateX(-50%);font-size:10px;color:var(--subtext)">1.2</div>
+                <!-- Allowed zone -->
+                <div class="clip-bar-zone" style="left:20%;right:20%"></div>
+                <!-- Center line -->
+                <div style="position:absolute;top:0;bottom:0;left:50%;width:2px;background:var(--subtext);opacity:0.3"></div>
+                <!-- Ratio marker (unclipped) -->
+                <div id="ratio-marker-raw" class="clip-bar-marker" style="left:62.5%;background:var(--yellow);opacity:0.4">
+                </div>
+                <!-- Ratio marker (clipped) -->
+                <div id="ratio-marker-clip" class="clip-bar-marker" style="left:50%;background:var(--green)">
+                </div>
+              </div>
+            </div>
+            <div class="flex-row gap-8 text-xs" style="justify-content:center">
+              <span class="text-yellow">&#9632; Unclipped: 1.25</span>
+              <span class="text-green">&#9632; Clipped to: 1.2</span>
+            </div>
+          </div>
+
+          <div class="text-sm text-subtext text-center mt-8">
+            Conservative updates prevent catastrophic forgetting — don't change too much at once
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3: Entropy -->
+    <div class="substep" id="p4s3">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:700px">
+        <div class="text-lg fw-bold">Entropy Bonus: Encouraging Exploration</div>
+
+        <div class="flex-row gap-32" style="justify-content:center;width:100%;flex-wrap:wrap">
+          <!-- High entropy -->
+          <div class="flex-col gap-8" style="align-items:center;padding:16px;background:var(--mantle);border-radius:12px;border:1px solid var(--teal);min-width:250px">
+            <div class="text-sm fw-bold text-teal">High Entropy</div>
+            <div class="text-xs text-subtext">Lots of exploration</div>
+            <svg width="200" height="100" viewBox="0 0 200 100">
+              <rect x="20" y="30" width="30" height="60" rx="3" fill="var(--blue)" opacity="0.7"/>
+              <rect x="60" y="25" width="30" height="65" rx="3" fill="var(--green)" opacity="0.7"/>
+              <rect x="100" y="35" width="30" height="55" rx="3" fill="var(--mauve)" opacity="0.7"/>
+              <rect x="140" y="28" width="30" height="62" rx="3" fill="var(--peach)" opacity="0.7"/>
+              <text x="100" y="15" text-anchor="middle" fill="var(--teal)" font-size="11">~uniform</text>
+            </svg>
+            <div class="text-xs text-subtext">Tries many different actions</div>
+          </div>
+
+          <!-- Low entropy -->
+          <div class="flex-col gap-8" style="align-items:center;padding:16px;background:var(--mantle);border-radius:12px;border:1px solid var(--red);min-width:250px">
+            <div class="text-sm fw-bold text-red">Low Entropy</div>
+            <div class="text-xs text-subtext">Very confident</div>
+            <svg width="200" height="100" viewBox="0 0 200 100">
+              <rect x="20" y="80" width="30" height="10" rx="3" fill="var(--blue)" opacity="0.3"/>
+              <rect x="60" y="15" width="30" height="75" rx="3" fill="var(--green)" opacity="0.9"/>
+              <rect x="100" y="75" width="30" height="15" rx="3" fill="var(--mauve)" opacity="0.3"/>
+              <rect x="140" y="82" width="30" height="8" rx="3" fill="var(--peach)" opacity="0.2"/>
+              <text x="100" y="10" text-anchor="middle" fill="var(--red)" font-size="11">peaked</text>
+            </svg>
+            <div class="text-xs text-subtext">Always picks the same action</div>
+          </div>
+        </div>
+
+        <div class="encoder-box" style="border-color:var(--yellow);max-width:500px">
+          <div class="text-sm">
+            <span class="fw-bold text-yellow">Entropy bonus</span> in the loss function rewards exploration.
+            Without it, the model converges prematurely to a single strategy
+            and never discovers better ones.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 4: Training Curve -->
+    <div class="substep" id="p4s4">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:800px">
+        <div class="text-lg fw-bold">PPO Training Progress</div>
+
+        <div style="width:100%;max-width:700px;background:var(--mantle);border-radius:12px;padding:24px;border:1px solid var(--surface1)">
+          <svg width="100%" viewBox="0 0 650 300" id="training-chart-svg">
+            <!-- Grid -->
+            <line x1="60" y1="20" x2="60" y2="260" stroke="var(--surface1)" stroke-width="1"/>
+            <line x1="60" y1="260" x2="630" y2="260" stroke="var(--surface1)" stroke-width="1"/>
+
+            <!-- Y-axis labels -->
+            <text x="50" y="260" text-anchor="end" fill="var(--subtext)" font-size="11">0%</text>
+            <text x="50" y="212" text-anchor="end" fill="var(--subtext)" font-size="11">10%</text>
+            <text x="50" y="164" text-anchor="end" fill="var(--subtext)" font-size="11">20%</text>
+            <text x="50" y="116" text-anchor="end" fill="var(--subtext)" font-size="11">30%</text>
+            <text x="50" y="68" text-anchor="end" fill="var(--subtext)" font-size="11">40%</text>
+            <text x="50" y="25" text-anchor="end" fill="var(--subtext)" font-size="11">50%</text>
+
+            <!-- Y gridlines -->
+            <line x1="60" y1="212" x2="630" y2="212" stroke="var(--surface1)" stroke-width="0.5" opacity="0.5"/>
+            <line x1="60" y1="164" x2="630" y2="164" stroke="var(--surface1)" stroke-width="0.5" opacity="0.5"/>
+            <line x1="60" y1="116" x2="630" y2="116" stroke="var(--surface1)" stroke-width="0.5" opacity="0.5"/>
+            <line x1="60" y1="68" x2="630" y2="68" stroke="var(--surface1)" stroke-width="0.5" opacity="0.5"/>
+
+            <!-- X-axis labels -->
+            <text x="345" y="290" text-anchor="middle" fill="var(--subtext)" font-size="12">PPO Round</text>
+
+            <!-- Baseline dotted line at 25% -->
+            <line x1="60" y1="140" x2="630" y2="140" stroke="var(--yellow)" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.6"/>
+            <text x="635" y="143" fill="var(--yellow)" font-size="10" opacity="0.8">25% baseline</text>
+
+            <!-- Training curve -->
+            <polyline id="training-curve" fill="none" stroke="var(--green)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points=""/>
+
+            <!-- Data point circles -->
+            <g id="training-dots"></g>
+
+            <!-- Best marker -->
+            <g id="best-marker" opacity="0">
+              <circle cx="0" cy="0" r="8" fill="none" stroke="var(--yellow)" stroke-width="2"/>
+              <text x="0" y="-14" text-anchor="middle" fill="var(--yellow)" font-size="11" font-weight="600">best</text>
+            </g>
+          </svg>
+        </div>
+
+        <div class="text-sm text-subtext">
+          Each round: 200 self-play games + PPO optimization. Win rate measured against the heuristic AI.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== PHASE 6: Deployment ==================== -->
+  <section class="phase" id="phase-5">
+    <div class="phase-title">Deployment</div>
+    <div class="phase-subtitle">From PyTorch to real-time game inference</div>
+
+    <!-- Step 0: ONNX Export -->
+    <div class="substep active" id="p5s0">
+      <div class="flex-col gap-24" style="align-items:center;width:100%;max-width:700px">
+        <div class="flex-row gap-16" style="align-items:center">
+          <div class="encoder-box" style="border-color:var(--peach);padding:20px 28px">
+            <div style="font-size:32px;color:var(--peach)">&#128293;</div>
+            <div class="text-lg fw-bold mt-8">PyTorch</div>
+            <div class="text-sm text-subtext">11M parameters</div>
+            <div class="text-xs text-subtext">42MB .pt file</div>
+          </div>
+
+          <div style="font-size:32px;color:var(--blue)">&#10132;</div>
+
+          <div class="flex-col gap-8" style="align-items:center">
+            <div class="text-sm fw-bold text-peach mb-8">ONNX Export (9 files)</div>
+            <div class="onnx-grid" id="onnx-grid">
+              <div class="onnx-file"><div class="icon">&#128200;</div>state_encoder</div>
+              <div class="onnx-file"><div class="icon">&#128176;</div>value_head</div>
+              <div class="onnx-file"><div class="icon">&#9889;</div>priority_head</div>
+              <div class="onnx-file"><div class="icon">&#127919;</div>target_head</div>
+              <div class="onnx-file"><div class="icon">&#9876;</div>attack_head</div>
+              <div class="onnx-file"><div class="icon">&#128737;</div>block_head</div>
+              <div class="onnx-file"><div class="icon">&#127183;</div>card_select</div>
+              <div class="onnx-file"><div class="icon">&#9999;</div>mulligan_head</div>
+              <div class="onnx-file"><div class="icon">&#10004;</div>binary_head</div>
+            </div>
+            <div class="text-sm text-subtext mt-8">Total: <span class="fw-bold text-green">2.2 MB</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 1: Inference Pipeline -->
+    <div class="substep" id="p5s1">
+      <div class="flex-col gap-24" style="align-items:center;width:100%;max-width:800px">
+        <div class="text-lg fw-bold">Real-Time Inference Pipeline</div>
+
+        <div class="flex-row gap-16" style="align-items:center">
+          <div class="encoder-box" style="border-color:var(--red)">
+            <div style="color:var(--red)">&#9749;</div>
+            <div class="text-sm fw-bold">Java</div>
+            <div class="text-xs text-subtext">ONNX Runtime</div>
+          </div>
+          <div class="text-sm text-subtext">loads</div>
+          <div class="encoder-box" style="border-color:var(--peach)">
+            <div class="text-sm fw-bold text-peach">9 ONNX files</div>
+          </div>
+        </div>
+
+        <div class="pipeline" id="inference-pipeline">
+          <div class="pipeline-stage">
+            <div class="fw-bold">Board State</div>
+            <div class="text-xs text-subtext">Raw game data</div>
+          </div>
+          <div class="pipeline-arrow">&#10132;</div>
+          <div class="pipeline-stage">
+            <div class="fw-bold text-blue">Encode</div>
+            <div class="timing">~3ms</div>
+          </div>
+          <div class="pipeline-arrow">&#10132;</div>
+          <div class="pipeline-stage">
+            <div class="fw-bold text-mauve">Embed</div>
+            <div class="timing">~1ms</div>
+          </div>
+          <div class="pipeline-arrow">&#10132;</div>
+          <div class="pipeline-stage">
+            <div class="fw-bold text-green">Decision</div>
+            <div class="timing">~1ms</div>
+          </div>
+          <div class="pipeline-arrow">&#10132;</div>
+          <div class="pipeline-stage">
+            <div class="fw-bold text-peach">Action</div>
+            <div class="text-xs text-subtext">Play card / attack</div>
+          </div>
+        </div>
+
+        <div class="encoder-box" style="border-color:var(--green);padding:16px 32px">
+          <div class="text-lg fw-bold text-green">~5ms per decision</div>
+          <div class="text-xs text-subtext mt-8">Real-time inference — imperceptible to the player</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Full Loop -->
+    <div class="substep" id="p5s2">
+      <div class="flex-col gap-16" style="align-items:center;width:100%;max-width:800px">
+        <div class="text-lg fw-bold">The Complete Loop</div>
+
+        <svg width="700" height="350" viewBox="0 0 700 350" id="loop-svg">
+          <!-- Loop path -->
+          <path id="loop-path" d="M 100 175 L 250 175 L 350 100 L 450 175 L 600 175 L 550 250 L 350 280 L 150 250 Z"
+            fill="none" stroke="var(--blue)" stroke-width="2" stroke-dasharray="8 4"
+            style="animation: loop-arrow 4s linear infinite"/>
+
+          <!-- Board State -->
+          <rect x="30" y="140" width="140" height="70" rx="10" fill="var(--surface)" stroke="var(--green)" stroke-width="2"/>
+          <text x="100" y="170" text-anchor="middle" fill="var(--green)" font-size="13" font-weight="600">Board State</text>
+          <text x="100" y="190" text-anchor="middle" fill="var(--subtext)" font-size="10">37,216 floats</text>
+
+          <!-- Encode -->
+          <rect x="250" y="60" width="120" height="60" rx="10" fill="var(--surface)" stroke="var(--blue)" stroke-width="2"/>
+          <text x="310" y="87" text-anchor="middle" fill="var(--blue)" font-size="13" font-weight="600">Encode</text>
+          <text x="310" y="105" text-anchor="middle" fill="var(--subtext)" font-size="10">Transformer</text>
+
+          <!-- Decision -->
+          <rect x="430" y="140" width="140" height="70" rx="10" fill="var(--surface)" stroke="var(--mauve)" stroke-width="2"/>
+          <text x="500" y="170" text-anchor="middle" fill="var(--mauve)" font-size="13" font-weight="600">Decision Head</text>
+          <text x="500" y="190" text-anchor="middle" fill="var(--subtext)" font-size="10">5ms total</text>
+
+          <!-- Action -->
+          <rect x="280" y="245" width="140" height="60" rx="10" fill="var(--surface)" stroke="var(--peach)" stroke-width="2"/>
+          <text x="350" y="272" text-anchor="middle" fill="var(--peach)" font-size="13" font-weight="600">Action</text>
+          <text x="350" y="290" text-anchor="middle" fill="var(--subtext)" font-size="10">Attack / Cast / Pass</text>
+
+          <!-- Animated particle on path -->
+          <circle id="loop-particle" r="6" fill="var(--blue)">
+            <animateMotion dur="4s" repeatCount="indefinite">
+              <mpath href="#loop-path"/>
+            </animateMotion>
+          </circle>
+        </svg>
+
+        <div class="text-sm text-subtext text-center" style="max-width:600px">
+          Every decision point in the game: encode the board state, run the appropriate decision head,
+          take the action, observe the new state. The model plays full games of Magic in real time.
+        </div>
+
+        <div class="encoder-box" style="border-color:var(--yellow);padding:16px 32px;max-width:500px">
+          <div class="text-sm">
+            <span class="fw-bold text-yellow">11M parameters</span> trained through imitation + self-play,
+            exported as <span class="fw-bold text-green">2.2MB ONNX</span>,
+            running at <span class="fw-bold text-blue">5ms</span> per decision in Java.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div><!-- /phase-container -->
+
+<!-- ===== BOTTOM BAR ===== -->
+<div id="bottombar">
+  <button class="nav-btn" id="btn-prev" disabled>
+    <span>&#8592;</span> Previous
+  </button>
+  <div id="step-indicator">
+    <span id="step-label">Step 1 of 4</span>
+    <div class="step-dots" id="step-dots"></div>
+  </div>
+  <button class="nav-btn" id="btn-next">
+    Next <span>&#8594;</span>
+  </button>
+</div>
+
+<script>
+// ===== State =====
+const PHASE_STEPS = [4, 4, 4, 3, 5, 3]; // number of sub-steps per phase
+let currentPhase = 0;
+let currentStep = 0;
+let animFrameId = null;
+
+// ===== DOM refs =====
+const phaseContainer = document.getElementById('phase-container');
+const phaseDots = document.querySelectorAll('.phase-dot');
+const btnPrev = document.getElementById('btn-prev');
+const btnNext = document.getElementById('btn-next');
+const stepLabel = document.getElementById('step-label');
+const stepDotsContainer = document.getElementById('step-dots');
+
+// ===== Navigation =====
+function goToPhase(phaseIdx, stepIdx = 0) {
+  if (phaseIdx < 0 || phaseIdx >= PHASE_STEPS.length) return;
+  currentPhase = phaseIdx;
+  currentStep = Math.min(stepIdx, PHASE_STEPS[phaseIdx] - 1);
+
+  phaseContainer.style.transform = `translateX(-${currentPhase * 100}vw)`;
+
+  // Update dots
+  phaseDots.forEach((dot, i) => {
+    dot.classList.toggle('active', i === currentPhase);
+    if (i < currentPhase) dot.classList.add('visited');
+  });
+
+  updateSubsteps();
+  updateNav();
+  runPhaseAnimations();
+}
+
+function updateSubsteps() {
+  const phaseEl = document.getElementById(`phase-${currentPhase}`);
+  if (!phaseEl) return;
+
+  // Show titles
+  const title = phaseEl.querySelector('.phase-title');
+  const subtitle = phaseEl.querySelector('.phase-subtitle');
+  if (title) title.classList.add('visible');
+  if (subtitle) subtitle.classList.add('visible');
+
+  // Show/hide substeps
+  const substeps = phaseEl.querySelectorAll('.substep');
+  substeps.forEach((ss, i) => {
+    ss.classList.toggle('active', i === currentStep);
+  });
+
+  updateStepDots();
+}
+
+function updateStepDots() {
+  const total = PHASE_STEPS[currentPhase];
+  stepLabel.textContent = `Step ${currentStep + 1} of ${total}`;
+
+  stepDotsContainer.innerHTML = '';
+  for (let i = 0; i < total; i++) {
+    const dot = document.createElement('div');
+    dot.className = 'sdot';
+    if (i === currentStep) dot.classList.add('active');
+    else if (i < currentStep) dot.classList.add('done');
+    stepDotsContainer.appendChild(dot);
+  }
+}
+
+function updateNav() {
+  btnPrev.disabled = (currentPhase === 0 && currentStep === 0);
+  btnNext.disabled = (currentPhase === PHASE_STEPS.length - 1 && currentStep === PHASE_STEPS[currentPhase] - 1);
+}
+
+function advanceStep() {
+  if (currentStep < PHASE_STEPS[currentPhase] - 1) {
+    currentStep++;
+    updateSubsteps();
+    updateNav();
+    runPhaseAnimations();
+  } else if (currentPhase < PHASE_STEPS.length - 1) {
+    goToPhase(currentPhase + 1, 0);
+  }
+}
+
+function retreatStep() {
+  if (currentStep > 0) {
+    currentStep--;
+    updateSubsteps();
+    updateNav();
+    runPhaseAnimations();
+  } else if (currentPhase > 0) {
+    goToPhase(currentPhase - 1, PHASE_STEPS[currentPhase - 1] - 1);
+  }
+}
+
+// Event listeners
+btnNext.addEventListener('click', advanceStep);
+btnPrev.addEventListener('click', retreatStep);
+
+phaseDots.forEach(dot => {
+  dot.addEventListener('click', () => {
+    goToPhase(parseInt(dot.dataset.phase));
+  });
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight') {
+    goToPhase(Math.min(currentPhase + 1, PHASE_STEPS.length - 1));
+  } else if (e.key === 'ArrowLeft') {
+    goToPhase(Math.max(currentPhase - 1, 0));
+  } else if (e.key === ' ' || e.key === 'Enter') {
+    e.preventDefault();
+    advanceStep();
+  }
+});
+
+// Click on phase area also advances
+phaseContainer.addEventListener('click', (e) => {
+  // Don't advance if clicking on interactive elements
+  if (e.target.closest('.nav-btn') || e.target.closest('.phase-dot')) return;
+  advanceStep();
+});
+
+// ===== Phase Animations =====
+function runPhaseAnimations() {
+  if (animFrameId) cancelAnimationFrame(animFrameId);
+
+  const key = `${currentPhase}-${currentStep}`;
+
+  switch(key) {
+    case '0-1': animateFeatureVector(); break;
+    case '0-2': animateZoneMatrices(); break;
+    case '0-3': animateCounter(); break;
+    case '2-1': animatePriorityBars(); break;
+    case '2-2': animateGauges(); break;
+    case '3-0': animateGameGrid(); break;
+    case '3-1': animateAccuracyBars(); animateLossCurve(); break;
+    case '3-2': animateBaselineBar(); break;
+    case '4-1': animateGAE(); break;
+    case '4-2': animatePPOBars(); break;
+    case '4-4': animateTrainingCurve(); break;
+    case '5-0': animateONNX(); break;
+    case '5-1': animatePipeline(); break;
+  }
+}
+
+// ===== Phase 1 Animations =====
+function animateFeatureVector() {
+  const bar = document.getElementById('feature-vector-bar');
+  if (bar.children.length > 0) {
+    // Already built, just animate annotations
+    showFeatureAnnotations();
+    return;
+  }
+
+  // Build 256 cells
+  for (let i = 0; i < 128; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'feature-cell';
+    bar.appendChild(cell);
+  }
+
+  // Highlight key indices with stagger
+  const highlights = [
+    { idx: 0, cls: 'active-g', delay: 300 },
+    { idx: 6, cls: 'active-g', delay: 600 },
+    { idx: 26, cls: 'active-y', delay: 900 },
+    { idx: 27, cls: 'active-y', delay: 1200 },
+    { idx: 95, cls: 'active-b', delay: 1500 },
+    { idx: 96, cls: 'active-r', delay: 1800 },
+  ];
+
+  highlights.forEach(h => {
+    setTimeout(() => {
+      if (bar.children[h.idx]) {
+        bar.children[h.idx].className = 'feature-cell ' + h.cls;
+        bar.children[h.idx].style.height = '32px';
+        bar.children[h.idx].style.width = '5px';
+      }
+    }, h.delay);
+  });
+
+  showFeatureAnnotations();
+}
+
+function showFeatureAnnotations() {
+  for (let i = 0; i <= 5; i++) {
+    const el = document.getElementById(`feat-${i}`);
+    if (el) {
+      setTimeout(() => { el.style.opacity = '1'; }, i * 300);
+    }
+  }
+}
+
+function animateZoneMatrices() {
+  const zones = [
+    { id: 'zone-myboard-rows', total: 20, filled: 5, color: 'var(--green)' },
+    { id: 'zone-oppboard-rows', total: 20, filled: 5, color: 'var(--red)' },
+    { id: 'zone-hand-rows', total: 10, filled: 3, color: 'var(--blue)' },
+    { id: 'zone-mygy-rows', total: 10, filled: 0, color: 'var(--teal)' },
+    { id: 'zone-oppgy-rows', total: 10, filled: 0, color: 'var(--peach)' },
+    { id: 'zone-stack-rows', total: 6, filled: 0, color: 'var(--mauve)' },
+  ];
+
+  zones.forEach(z => {
+    const container = document.getElementById(z.id);
+    if (container.children.length > 0) return; // already built
+
+    for (let r = 0; r < z.total; r++) {
+      const row = document.createElement('div');
+      row.className = 'zone-row ' + (r < z.filled ? 'filled' : 'empty');
+      row.style.opacity = '0';
+      row.style.transition = `opacity 0.3s ease ${r * 40}ms`;
+
+      const cellCount = 40; // visual representation
+      for (let c = 0; c < cellCount; c++) {
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        if (r < z.filled) {
+          cell.style.background = z.color;
+          cell.style.opacity = 0.4 + Math.random() * 0.4;
+        }
+        row.appendChild(cell);
+      }
+      container.appendChild(row);
+
+      // Stagger reveal
+      setTimeout(() => { row.style.opacity = '1'; }, r * 40);
+    }
+  });
+}
+
+function animateCounter() {
+  const counterEl = document.getElementById('counter-value');
+  const target = 37216;
+  let current = 0;
+  const duration = 2000;
+  const start = performance.now();
+
+  function tick(now) {
+    const elapsed = now - start;
+    const progress = Math.min(elapsed / duration, 1);
+    // ease out
+    const eased = 1 - Math.pow(1 - progress, 3);
+    current = Math.round(eased * target);
+    counterEl.textContent = current.toLocaleString();
+
+    if (progress < 1) {
+      animFrameId = requestAnimationFrame(tick);
+    }
+  }
+  animFrameId = requestAnimationFrame(tick);
+}
+
+// ===== Phase 3 Animations =====
+function animatePriorityBars() {
+  setTimeout(() => {
+    document.getElementById('prio-bar-0').style.width = '45%';
+    document.getElementById('prio-bar-1').style.width = '30%';
+    document.getElementById('prio-bar-2').style.width = '25%';
+  }, 300);
+}
+
+function animateGauges() {
+  const circumference = 2 * Math.PI * 50; // ~314
+
+  // Baloth: 82%
+  setTimeout(() => {
+    const g = document.getElementById('gauge-baloth');
+    g.style.transition = 'stroke-dashoffset 1.5s cubic-bezier(0.4,0,0.2,1)';
+    g.style.strokeDashoffset = circumference * (1 - 0.82);
+    document.getElementById('gauge-baloth-text').textContent = '82%';
+  }, 300);
+
+  // Elf: 23%
+  setTimeout(() => {
+    const g = document.getElementById('gauge-elf');
+    g.style.transition = 'stroke-dashoffset 1.5s cubic-bezier(0.4,0,0.2,1)';
+    g.style.strokeDashoffset = circumference * (1 - 0.23);
+    document.getElementById('gauge-elf-text').textContent = '23%';
+  }, 500);
+}
+
+// ===== Phase 4 Animations =====
+function animateGameGrid() {
+  const grid = document.getElementById('game-grid');
+  if (grid.children.length > 0) return;
+
+  const totalCells = 200; // 20x10
+  for (let i = 0; i < totalCells; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'game-cell';
+    grid.appendChild(cell);
+  }
+
+  // Stagger fill
+  const cells = grid.querySelectorAll('.game-cell');
+  const indices = Array.from({length: totalCells}, (_, i) => i);
+  // Shuffle
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+
+  indices.forEach((idx, order) => {
+    setTimeout(() => {
+      const isWin = Math.random() > 0.5;
+      cells[idx].classList.add(isWin ? 'win' : 'loss');
+    }, order * 10);
+  });
+}
+
+function animateAccuracyBars() {
+  const targets = [93.4, 84.7, 77.5, 64.8, 99.2];
+  targets.forEach((t, i) => {
+    setTimeout(() => {
+      document.getElementById(`acc-bar-${i}`).style.width = `${t}%`;
+    }, 200 + i * 150);
+  });
+}
+
+function animateLossCurve() {
+  const path = document.getElementById('loss-curve-path');
+  // Loss curve: starts at ~0.75, drops to ~0.15
+  const points = [
+    [40, 18], [65, 25], [90, 38], [115, 50], [140, 60], [165, 68],
+    [190, 78], [215, 88], [240, 98], [265, 105], [290, 112]
+  ];
+
+  let d = `M ${points[0][0]} ${points[0][1]}`;
+  let drawn = 1;
+
+  function drawNext() {
+    if (drawn >= points.length) return;
+    d += ` L ${points[drawn][0]} ${points[drawn][1]}`;
+    path.setAttribute('d', d);
+    drawn++;
+    setTimeout(drawNext, 150);
+  }
+  drawNext();
+}
+
+function animateBaselineBar() {
+  setTimeout(() => {
+    document.getElementById('baseline-bar').style.width = '29%';
+  }, 300);
+}
+
+// ===== Phase 5 Animations =====
+function animateGAE() {
+  setTimeout(() => {
+    document.getElementById('tp-d4').classList.add('highlight-good');
+    const good = document.getElementById('gae-good');
+    good.style.opacity = '1';
+    good.style.transform = 'translateY(0)';
+  }, 400);
+
+  setTimeout(() => {
+    document.getElementById('tp-d3').classList.add('highlight-bad');
+    const bad = document.getElementById('gae-bad');
+    bad.style.opacity = '1';
+    bad.style.transform = 'translateY(0)';
+  }, 800);
+}
+
+function animatePPOBars() {
+  setTimeout(() => {
+    document.getElementById('ppo-new').style.width = '75%';
+  }, 300);
+
+  // Animate clip markers
+  setTimeout(() => {
+    document.getElementById('ratio-marker-raw').style.left = '62.5%';
+    document.getElementById('ratio-marker-clip').style.left = '80%'; // clipped to 1.2 = 80% position
+  }, 600);
+}
+
+function animateTrainingCurve() {
+  const data = [19, 29, 24, 28, 22, 27, 28, 35, 30, 32, 29, 33, 31, 34, 28, 32, 35, 33, 30, 34];
+  const curve = document.getElementById('training-curve');
+  const dotsGroup = document.getElementById('training-dots');
+  const bestMarker = document.getElementById('best-marker');
+
+  // Clear
+  curve.setAttribute('points', '');
+  dotsGroup.innerHTML = '';
+  bestMarker.style.opacity = '0';
+
+  const xStart = 60;
+  const xEnd = 630;
+  const xStep = (xEnd - xStart) / (data.length - 1);
+  const yBottom = 260;
+  const yScale = 4.8; // pixels per percentage point
+
+  let points = '';
+  let bestVal = 0;
+  let bestX = 0, bestY = 0;
+  let idx = 0;
+
+  function addPoint() {
+    if (idx >= data.length) {
+      // Show best marker
+      bestMarker.setAttribute('transform', `translate(${bestX}, ${bestY})`);
+      bestMarker.style.opacity = '1';
+      return;
+    }
+
+    const x = xStart + idx * xStep;
+    const y = yBottom - data[idx] * yScale;
+    points += `${x},${y} `;
+    curve.setAttribute('points', points.trim());
+
+    // Add dot
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', x);
+    circle.setAttribute('cy', y);
+    circle.setAttribute('r', 4);
+    circle.setAttribute('fill', data[idx] > 25 ? 'var(--green)' : 'var(--blue)');
+    circle.style.opacity = '0';
+    circle.style.transition = 'opacity 0.3s';
+    dotsGroup.appendChild(circle);
+    setTimeout(() => { circle.style.opacity = '1'; }, 50);
+
+    // Add X label every 5 rounds
+    if (idx % 5 === 0 || idx === data.length - 1) {
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', x);
+      text.setAttribute('y', 275);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('fill', 'var(--subtext)');
+      text.setAttribute('font-size', '10');
+      text.textContent = idx + 1;
+      dotsGroup.appendChild(text);
+    }
+
+    if (data[idx] > bestVal) {
+      bestVal = data[idx];
+      bestX = x;
+      bestY = y;
+    }
+
+    idx++;
+    setTimeout(addPoint, 150);
+  }
+
+  setTimeout(addPoint, 300);
+}
+
+// ===== Phase 6 Animations =====
+function animateONNX() {
+  const files = document.querySelectorAll('.onnx-file');
+  files.forEach((f, i) => {
+    setTimeout(() => {
+      f.classList.add('visible');
+    }, 100 + i * 120);
+  });
+}
+
+function animatePipeline() {
+  const stages = document.querySelectorAll('#inference-pipeline .pipeline-stage');
+  const arrows = document.querySelectorAll('#inference-pipeline .pipeline-arrow');
+
+  stages.forEach((s, i) => {
+    setTimeout(() => { s.classList.add('visible'); }, i * 250);
+  });
+  arrows.forEach((a, i) => {
+    setTimeout(() => { a.classList.add('visible'); }, 150 + i * 250);
+  });
+}
+
+// ===== Init =====
+goToPhase(0, 0);
+
+</script>
+</body>
+</html>

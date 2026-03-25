@@ -15,6 +15,9 @@ import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.MagicStack;
 import forge.game.zone.ZoneType;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Converts the full game state into a GameStateFeatures object suitable for neural network input.
  * This is the bridge between Forge's rich game objects and the flat tensor representation.
@@ -56,6 +59,37 @@ public class GameStateEncoder {
                 opponent != null ? opponent.getCardsIn(ZoneType.Graveyard) : new CardCollection(),
                 config.getMaxGraveyardCards(), player);
         ZoneEncoding stack = encodeStack(game.getStack(), player);
+
+        // Phase 2: Inject combat math features into battlefield creature feature vectors [208-231]
+        CardCollectionView myBoardCards = player.getCardsIn(ZoneType.Battlefield);
+        CardCollectionView oppBoardCards = opponent != null ? opponent.getCardsIn(ZoneType.Battlefield) : new CardCollection();
+
+        List<Card> myCreatureList = new ArrayList<>();
+        for (Card c : myBoardCards) {
+            if (c.isCreature()) myCreatureList.add(c);
+        }
+        List<Card> oppCreatureList = new ArrayList<>();
+        for (Card c : oppBoardCards) {
+            if (c.isCreature()) oppCreatureList.add(c);
+        }
+
+        // Inject into myBoard features
+        int myCount = Math.min(myBoardCards.size(), config.getMaxBoardCreatures());
+        for (int i = 0; i < myCount; i++) {
+            Card c = myBoardCards.get(i);
+            if (c.isCreature()) {
+                CombatMath.injectPerCardFeatures(myBoard.features[i], c, oppCreatureList, myCreatureList);
+            }
+        }
+
+        // Inject into oppBoard features
+        int oppCount = Math.min(oppBoardCards.size(), config.getMaxBoardCreatures());
+        for (int i = 0; i < oppCount; i++) {
+            Card c = oppBoardCards.get(i);
+            if (c.isCreature()) {
+                CombatMath.injectPerCardFeatures(oppBoard.features[i], c, myCreatureList, oppCreatureList);
+            }
+        }
 
         return new GameStateFeatures(
                 globalFeatures,
@@ -119,7 +153,26 @@ public class GameStateEncoder {
      * [73]    : my artifact count (normalized)
      * [74]    : opponent enchantment count (normalized)
      * [75]    : opponent artifact count (normalized)
-     * [76-95] : reserved
+     * [76]    : my attackable power (norm/60)
+     * [77]    : my evasive power (norm/40)
+     * [78]    : opp attackable power (norm/60)
+     * [79]    : opp evasive power (norm/40)
+     * [80]    : lethal on board (my attackable >= opp life)
+     * [81]    : opp lethal on board
+     * [82]    : evasive lethal (my evasive >= opp life)
+     * [83]    : opp evasive lethal
+     * [84]    : my safe attack power (norm/40)
+     * [85]    : board power advantage (centered)
+     * [86]    : board toughness advantage (centered)
+     * [87]    : creature count advantage (centered)
+     * [88]    : my first strikers (norm/10)
+     * [89]    : opp first strikers (norm/10)
+     * [90]    : my deathtouchers (norm/10)
+     * [91]    : opp deathtouchers (norm/10)
+     * [92]    : alpha strike estimated kills (norm/20)
+     * [93]    : turns to lethal (norm/10)
+     * [94]    : opp turns to lethal (norm/10)
+     * [95]    : combat dominance (clamp 0-1)
      */
     private float[] encodeGlobalState(Game game, Player me, Player opp) {
         float[] features = new float[GLOBAL_FEATURE_SIZE];
@@ -317,7 +370,19 @@ public class GameStateEncoder {
         features[74] = normalize(oppEnchantments, 0, 10);
         features[75] = normalize(oppArtifacts, 0, 10);
 
-        // [76-95] reserved
+        // [76-95] Combat math global features
+        List<Card> myCreaturesList = new ArrayList<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isCreature()) myCreaturesList.add(c);
+        }
+        List<Card> oppCreaturesList = new ArrayList<>();
+        if (opp != null) {
+            for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isCreature()) oppCreaturesList.add(c);
+            }
+        }
+        CombatMath.computeGlobalCombatFeatures(features, myCreaturesList, oppCreaturesList,
+                me.getLife(), opp != null ? opp.getLife() : 20);
 
         return features;
     }
