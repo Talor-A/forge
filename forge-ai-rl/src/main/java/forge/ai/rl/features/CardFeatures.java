@@ -91,9 +91,10 @@ import forge.game.zone.ZoneType;
  * [229]    : best_blocker_toughness (norm/20)
  * [230]    : n_profitable_blocks (norm/10)
  * [231]    : power_surplus ((power - best_blocker_toughness) / 20)
+ * [232]    : needs_gang_block (toughness > every blocker's power, can't be killed 1v1)
  *
- * === RESERVED + HASH [232-255] ===
- * [232-251]: reserved for future
+ * === RESERVED + HASH [233-255] ===
+ * [233-251]: reserved for future
  * [252-255]: card identity hash (4 bytes, normalized)
  */
 public class CardFeatures {

@@ -337,7 +337,7 @@ The `PlayerControllerRL` class extends `PlayerControllerAi` and overrides all 7 
 
 For priority decisions, a modified `AiController.chooseSpellAbilityToPlayFromList` evaluates ALL candidates through the engine's `canPlayAndPayFor()` validation rather than short-circuiting at the first playable spell. The mechanically-legal candidate list (spells passing timing + cost checks) is cached separately from the heuristic-approved list. This gives the RL model visibility into options the heuristic would reject — enabling it to discover unconventional plays during PPO self-play.
 
-Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 37,216-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and intermediate reward signals from the `RewardShaper`.
+Each game produces two trajectory files (one per player perspective), containing 50-400 decision records depending on game length. Each record includes the full 37,216-float game state, candidate feature vectors where applicable, the indices of the heuristic AI's choices, and lightweight intermediate reward signals (life/card/board advantage deltas).
 
 **Preprocessing and discounted returns.** Raw trajectory JSONL files are preprocessed into memory-mapped numpy arrays for efficient training (18.8 GB for 127K records). During preprocessing, discounted returns are computed backward through each trajectory:
 
@@ -594,7 +594,7 @@ Each PPO round consists of four phases:
 
 1. **Game collection.** The RL model plays 400 games against the heuristic AI via the GRPC model server. The Java game engine calls the model for every decision (priority, attack, block, target, mulligan, binary), recording the full game state, candidate features, selected action, action probability under the current policy, and intermediate reward signals. Each game produces two trajectory files (one per player perspective).
 
-2. **Data loading and advantage computation.** Trajectory files are parsed and decisions are separated by type. For each decision in a trajectory, GAE advantages are computed backward using the algorithm described in Section 3.2.2, with $r_t$ incorporating the intermediate reward from the `RewardShaper` (life/card/board advantage changes) and the terminal reward (+1/-1) on the final step. The value estimates $V(s_t)$ are recorded at decision time by the model server.
+2. **Data loading and advantage computation.** Trajectory files are parsed and decisions are separated by type. For each decision in a trajectory, GAE advantages are computed backward using the algorithm described in Section 3.2.2, with $r_t$ incorporating the intermediate reward signals (life/card/board advantage deltas) and the terminal reward (+1/-1) on the final step. The value estimates $V(s_t)$ are recorded at decision time by the model server.
 
 3. **Policy gradient updates.** For each of 4 PPO epochs, the data is shuffled and processed in mini-batches of 64. The clipped objective (Section 3.2.3) is applied to all heads, but each head type computes the importance sampling ratio differently because the action structures differ:
 
@@ -620,7 +620,7 @@ This is motivated by the observation that the encoder's representation is traine
 
 #### 5.4.3 Reward Shaping and Credit Assignment
 
-MTG's terminal reward (win/loss) is extremely sparse — a game involves 50-400 decisions before the outcome is determined. The `RewardShaper` (Java) computes per-decision intermediate rewards by tracking delta changes in game state metrics between consecutive decisions:
+MTG's terminal reward (win/loss) is extremely sparse — a game involves 50-400 decisions before the outcome is determined. The trajectory recorder computes lightweight per-decision intermediate rewards by tracking delta changes in game state metrics between consecutive decisions:
 
 | Signal | Reward | Rationale |
 |--------|--------|-----------|
@@ -629,9 +629,8 @@ MTG's terminal reward (win/loss) is extremely sparse — a game involves 50-400 
 | Life advantage change | ±0.01 per point | Tracks damage race |
 | Card advantage change | ±0.05 per card | Card advantage is a fundamental MTG concept |
 | Board advantage change | ±0.02 per creature | Board presence correlates with winning |
-| Total power advantage | ±0.005 per power | Quality of board matters, not just quantity |
 
-These intermediate signals are combined with the terminal reward through GAE, providing denser gradient signal during early training. Shaping rewards are multiplied by a decay factor ($\alpha = 0.9999$ per training step) so the agent eventually optimizes purely for win rate.
+These shaping signals are recorded in trajectory files and used during imitation learning preprocessing to compute discounted return targets. However, **the PPO training loop currently zeros out intermediate shaping rewards**, relying purely on the terminal outcome (±1.0) and the value network's per-step assessments for credit assignment via GAE. The rationale: the value network already observes the full 37,216-float game state — including life totals, hand sizes, board counts, and combat math features — and learns their correlation with winning through discounted return targets. The crude shaping signals duplicate information the value network already models, and can actively contradict it on correct plays that sacrifice short-term metrics (e.g., sacrificing a creature to draw cards yields a negative board delta despite being a strong play). With the value network at low loss (0.032), GAE's per-step TD residuals ($\delta_t = \gamma V(s_{t+1}) - V(s_t)$) provide cleaner credit assignment than layering hand-coded deltas on top.
 
 #### 5.4.4 Full Autonomy
 

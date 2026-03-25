@@ -250,6 +250,20 @@ public class CombatMath {
 
         // [231] power_surplus: (power - best_blocker_toughness) / 20, clamp 0-1
         features[231] = normalize((double)(power - bestBlockerToughness) / 20.0, 0, 1);
+
+        // [232] needs_gang_block: toughness > every single blocker's power (can't be killed 1v1)
+        boolean needsGangBlock = !oppUntapped.isEmpty();
+        for (Card opp : oppUntapped) {
+            if (CombatUtil.canBlock(card, opp) && canKillInCombat(opp, card)) {
+                needsGangBlock = false;
+                break;
+            }
+        }
+        // Only meaningful if there ARE blockers — otherwise it's just "unblockable"
+        if (oppUntapped.isEmpty()) {
+            needsGangBlock = false;
+        }
+        features[232] = needsGangBlock ? 1f : 0f;
     }
 
     /**
@@ -452,7 +466,7 @@ public class CombatMath {
      */
     public static void injectPerCardFeatures(float[] features, Card card,
                                               forge.game.player.Player perspective) {
-        if (!card.isCreature() || perspective == null || features.length <= 231) return;
+        if (!card.isCreature() || perspective == null || features.length <= 232) return;
 
         // Collect creatures on both sides
         List<Card> myCreatures = new ArrayList<>();

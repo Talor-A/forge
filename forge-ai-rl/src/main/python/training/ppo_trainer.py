@@ -74,10 +74,13 @@ def _compute_gae_returns(records, won):
         return []
 
     # Extract rewards and value estimates
+    # Intermediate shaping rewards (life/card/board deltas) are zeroed out —
+    # the value network already captures these from the full game state.
+    # Only terminal reward is used; GAE credit assignment relies on
+    # per-step value function deltas: delta_t = gamma * V(t+1) - V(t)
     rewards = np.zeros(n, dtype=np.float32)
     values = np.zeros(n, dtype=np.float32)
     for i, rec in enumerate(records):
-        rewards[i] = rec.get('intermediateReward', 0.0)
         values[i] = rec.get('valueEstimate', 0.0)
 
     # Terminal reward on last step

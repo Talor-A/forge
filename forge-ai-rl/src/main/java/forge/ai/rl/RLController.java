@@ -9,7 +9,6 @@ import forge.ai.rl.features.GameStateFeatures;
 import forge.ai.rl.model.ModelServerClient;
 import forge.ai.rl.model.ONNXModelClient;
 import forge.ai.rl.training.TrajectoryRecorder;
-import forge.ai.rl.training.RewardShaper;
 import forge.game.Game;
 import forge.game.GameEntity;
 import forge.game.card.Card;
@@ -47,7 +46,6 @@ public class RLController {
     private final ModelServerClient modelClient;
     private final ONNXModelClient onnxClient;
     private final TrajectoryRecorder trajectoryRecorder;
-    private final RewardShaper rewardShaper;
 
     private Player player;
     private Game game;
@@ -68,7 +66,6 @@ public class RLController {
         this.trajectoryRecorder = config.isRecordTrajectories()
                 ? new TrajectoryRecorder(config.getTrajectoryOutputDir())
                 : null;
-        this.rewardShaper = new RewardShaper(1.0, config.getRewardShapingDecay());
     }
 
     public void setPlayer(Player player) {
@@ -95,7 +92,6 @@ public class RLController {
      * Start a new game — initialize trajectory recording.
      */
     public void onGameStart(String gameId) {
-        rewardShaper.reset();
         if (trajectoryRecorder != null) {
             trajectoryRecorder.startGame(gameId);
         }

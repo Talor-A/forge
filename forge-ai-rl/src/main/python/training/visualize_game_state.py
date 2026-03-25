@@ -124,7 +124,35 @@ def decode_card(feats):
     [200-201] pump magnitude (power boost, toughness boost)
     [202-207] aura/equipment host (is_attached, host_power, host_toughness, host_is_creature, host_is_mine, host_cmc)
 
-    === RESERVED + HASH [208-255] ===
+    === COMBAT MATH [208-231] (battlefield creatures only) ===
+    [208]    can_attack
+    [209]    is_evasive
+    [210]    frac_can_block_this
+    [211]    frac_this_kills
+    [212]    frac_kills_this
+    [213]    lethal_damage_remaining
+    [214]    power_vs_avg_toughness
+    [215]    toughness_vs_avg_power
+    [216]    has_first_strike_advantage
+    [217]    has_deathtouch (combat)
+    [218]    has_indestructible (combat)
+    [219]    has_lifelink (combat)
+    [220]    has_trample (combat)
+    [221]    can_trade_up
+    [222]    can_trade_even
+    [223]    is_biggest_creature
+    [224]    power_rank_my_board
+    [225]    toughness_rank_my_board
+    [226]    safe_attacker
+    [227]    must_be_double_blocked
+    [228]    best_blocker_power (norm/20)
+    [229]    best_blocker_toughness (norm/20)
+    [230]    n_profitable_blocks (norm/10)
+    [231]    power_surplus
+
+    [232]    needs_gang_block (toughness > every blocker's power)
+
+    === RESERVED + HASH [233-255] ===
     [252-255] card identity hash
     """
     if len(feats) < 30:
@@ -316,6 +344,39 @@ def decode_card(feats):
     host_is_mine = feats[206] > 0.5 if len(feats) > 206 and is_attached else False
     host_cmc = round(feats[207] * 16) if len(feats) > 207 and is_attached else None
 
+    # === COMBAT MATH [208-232] ===
+    combat = None
+    if "Creature" in types and len(feats) > 232:
+        has_any = any(feats[i] != 0 for i in range(208, 233))
+        if has_any:
+            combat = {
+                "can_attack": feats[208] > 0.5,
+                "is_evasive": feats[209] > 0.5,
+                "frac_can_block": round(feats[210], 2),
+                "frac_this_kills": round(feats[211], 2),
+                "frac_kills_this": round(feats[212], 2),
+                "lethal_remaining": round(feats[213], 2),
+                "power_vs_avg_t": round(feats[214], 2),
+                "toughness_vs_avg_p": round(feats[215], 2),
+                "first_strike_adv": feats[216] > 0.5,
+                "has_deathtouch": feats[217] > 0.5,
+                "has_indestructible": feats[218] > 0.5,
+                "has_lifelink": feats[219] > 0.5,
+                "has_trample": feats[220] > 0.5,
+                "can_trade_up": feats[221] > 0.5,
+                "can_trade_even": feats[222] > 0.5,
+                "is_biggest": feats[223] > 0.5,
+                "power_rank": round(feats[224], 2),
+                "toughness_rank": round(feats[225], 2),
+                "safe_attacker": feats[226] > 0.5,
+                "must_double_block": feats[227] > 0.5,
+                "best_blocker_power": round(feats[228] * 20),
+                "best_blocker_toughness": round(feats[229] * 20),
+                "n_profitable_blocks": round(feats[230] * 10, 1),
+                "power_surplus": round(feats[231], 2),
+                "needs_gang_block": feats[232] > 0.5,
+            }
+
     return {
         "label": label, "types": types, "colors": colors,
         "cmc": cmc, "power": power, "toughness": toughness,
@@ -369,6 +430,8 @@ def decode_card(feats):
         "host_is_creature": host_is_creature,
         "host_is_mine": host_is_mine,
         "host_cmc": host_cmc,
+        # Combat math
+        "combat": combat,
     }
 
 
@@ -549,6 +612,209 @@ def decode_action(feats):
         "can_target_own_player": can_target_own_player,
         "can_target_opp_player": can_target_opp_player,
     }
+
+
+# ── Combat math tooltip ───────────────────────────
+
+def format_combat_tooltip(info):
+    """Format combat math data for tooltip display."""
+    combat = info.get("combat")
+    if not combat:
+        return None
+
+    lines = []
+    label = info.get("label", "?")
+    if info.get("power") is not None:
+        label += f" {info['power']}/{info['toughness']}"
+    lines.append(f"=== Combat Math: {label} ===")
+    lines.append("")
+
+    # Attack readiness
+    flags = []
+    if combat["can_attack"]:
+        flags.append("CAN ATTACK")
+    if combat["is_evasive"]:
+        flags.append("EVASIVE")
+    if combat["safe_attacker"]:
+        flags.append("SAFE")
+    if combat["is_biggest"]:
+        flags.append("BIGGEST")
+    if combat["must_double_block"]:
+        flags.append("OVERWHELMS BLOCKERS")
+    if combat["needs_gang_block"]:
+        flags.append("NEEDS GANG BLOCK TO KILL")
+    if flags:
+        lines.append(" ".join(flags))
+        lines.append("")
+
+    # Combat keywords
+    ckws = []
+    if combat["has_deathtouch"]:
+        ckws.append("Deathtouch")
+    if combat["has_indestructible"]:
+        ckws.append("Indestructible")
+    if combat["has_lifelink"]:
+        ckws.append("Lifelink")
+    if combat["has_trample"]:
+        ckws.append("Trample")
+    if combat["first_strike_adv"]:
+        ckws.append("First Strike Advantage")
+    if ckws:
+        lines.append("Combat: " + ", ".join(ckws))
+
+    # Matchup stats
+    lines.append(f"Kills {combat['frac_this_kills']:.0%} of opp creatures")
+    lines.append(f"Killed by {combat['frac_kills_this']:.0%} of opp")
+    if combat["frac_can_block"] > 0:
+        lines.append(f"Blockable by {combat['frac_can_block']:.0%} of opp")
+
+    # Trade info
+    trades = []
+    if combat["can_trade_up"]:
+        trades.append("trades UP")
+    if combat["can_trade_even"]:
+        trades.append("trades even")
+    if trades:
+        lines.append("Can " + ", ".join(trades))
+
+    # Relative strength
+    lines.append("")
+    lines.append(f"Power rank: {combat['power_rank']:.0%}")
+    lines.append(f"Toughness rank: {combat['toughness_rank']:.0%}")
+    lines.append(f"P vs avg T: {combat['power_vs_avg_t']:.2f}")
+    lines.append(f"T vs avg P: {combat['toughness_vs_avg_p']:.2f}")
+
+    # Blocker info
+    if combat["best_blocker_power"] > 0:
+        lines.append(f"Best blocker: {combat['best_blocker_power']:.0f}/{combat['best_blocker_toughness']:.0f}")
+
+    # Defense
+    if combat["n_profitable_blocks"] > 0:
+        lines.append(f"Profitable blocks: {combat['n_profitable_blocks']:.0f}")
+
+    lines.append(f"HP remaining: {combat['lethal_remaining']:.0%}")
+
+    return "\n".join(lines)
+
+
+def decode_global_combat(gf):
+    """Decode global combat features [76-95] from global feature array."""
+    if len(gf) <= 95:
+        return None
+    # Check if any combat globals are populated
+    if not any(gf[i] != 0 for i in range(76, 96)):
+        return None
+    return {
+        "my_attackable_power": round(gf[76] * 60),
+        "my_evasive_power": round(gf[77] * 40),
+        "opp_attackable_power": round(gf[78] * 60),
+        "opp_evasive_power": round(gf[79] * 40),
+        "lethal_on_board": gf[80] > 0.5,
+        "opp_lethal_on_board": gf[81] > 0.5,
+        "evasive_lethal": gf[82] > 0.5,
+        "opp_evasive_lethal": gf[83] > 0.5,
+        "my_safe_attack_power": round(gf[84] * 40),
+        "board_power_adv": round((gf[85] * 120 - 60)),
+        "board_toughness_adv": round((gf[86] * 120 - 60)),
+        "creature_count_adv": round((gf[87] * 40 - 20)),
+        "my_first_strikers": round(gf[88] * 10),
+        "opp_first_strikers": round(gf[89] * 10),
+        "my_deathtouchers": round(gf[90] * 10),
+        "opp_deathtouchers": round(gf[91] * 10),
+        "alpha_strike_kills": round(gf[92] * 20),
+        "turns_to_lethal": round(gf[93] * 10),
+        "opp_turns_to_lethal": round(gf[94] * 10),
+        "combat_dominance": round(gf[95], 2),
+    }
+
+
+def format_global_combat(gc):
+    """Format global combat features for display in the right panel."""
+    if not gc:
+        return ""
+    lines = []
+    lines.append("=== Combat Overview ===")
+    lines.append("")
+
+    # Lethal checks (most important)
+    if gc["lethal_on_board"]:
+        lines.append("!! LETHAL ON BOARD !!")
+    if gc["evasive_lethal"]:
+        lines.append("!! EVASIVE LETHAL !!")
+    if gc["opp_lethal_on_board"]:
+        lines.append("!! OPP HAS LETHAL !!")
+    if gc["opp_evasive_lethal"]:
+        lines.append("!! OPP EVASIVE LETHAL !!")
+
+    # Power summary
+    lines.append(f"My attack power: {gc['my_attackable_power']}"
+                 f" (safe: {gc['my_safe_attack_power']},"
+                 f" evasive: {gc['my_evasive_power']})")
+    lines.append(f"Opp attack power: {gc['opp_attackable_power']}"
+                 f" (evasive: {gc['opp_evasive_power']})")
+    lines.append("")
+
+    # Board advantage
+    pwr = gc["board_power_adv"]
+    tgh = gc["board_toughness_adv"]
+    cnt = gc["creature_count_adv"]
+    lines.append(f"Board advantage:")
+    lines.append(f"  Power: {pwr:+d}  Toughness: {tgh:+d}"
+                 f"  Count: {cnt:+d}")
+
+    # Special creatures
+    specials = []
+    if gc["my_first_strikers"]:
+        specials.append(f"My FS: {gc['my_first_strikers']}")
+    if gc["opp_first_strikers"]:
+        specials.append(f"Opp FS: {gc['opp_first_strikers']}")
+    if gc["my_deathtouchers"]:
+        specials.append(f"My DT: {gc['my_deathtouchers']}")
+    if gc["opp_deathtouchers"]:
+        specials.append(f"Opp DT: {gc['opp_deathtouchers']}")
+    if specials:
+        lines.append("  " + "  ".join(specials))
+
+    lines.append("")
+    lines.append(f"Alpha strike kills: {gc['alpha_strike_kills']}")
+    lines.append(f"Turns to lethal: {gc['turns_to_lethal']}")
+    lines.append(f"Opp turns to lethal: {gc['opp_turns_to_lethal']}")
+    lines.append(f"Combat dominance: {gc['combat_dominance']:.2f}")
+
+    return "\n".join(lines)
+
+
+class CardTooltip:
+    """Tooltip that shows combat math on card mouseover."""
+
+    def __init__(self, widget, text_func):
+        self.widget = widget
+        self.text_func = text_func
+        self.tipwindow = None
+        widget.bind("<Enter>", self.show)
+        widget.bind("<Leave>", self.hide)
+
+    def show(self, event=None):
+        text = self.text_func()
+        if not text:
+            return
+        self.hide()
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        lbl = tk.Label(tw, text=text, justify=tk.LEFT,
+                       bg="#1e1e2e", fg="#cdd6f4",
+                       font=("Consolas", 9),
+                       relief=tk.SOLID, borderwidth=1,
+                       padx=8, pady=6)
+        lbl.pack()
+
+    def hide(self, event=None):
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
 
 
 # ── Card rendering (MTG card style) ───────────────
@@ -1603,14 +1869,14 @@ class GameStateViewer:
         priority_imgs = self._pre_render_priority(s)
 
         # Now do all UI updates in one batch
-        self._apply_cards(self.opp_creatures, opp_creature_imgs, opp_creatures, new_photos)
+        self._apply_cards(self.opp_creatures, opp_creature_imgs, opp_creatures, new_photos, show_combat_tips=True)
         self._apply_cards(self.opp_lands, opp_land_imgs, opp_lands, new_photos)
-        self._apply_cards(self.my_creatures, my_creature_imgs, my_creatures, new_photos)
+        self._apply_cards(self.my_creatures, my_creature_imgs, my_creatures, new_photos, show_combat_tips=True)
         self._apply_cards(self.my_lands, my_land_imgs, my_lands, new_photos)
         self._apply_cards(self.hand_frame, hand_imgs, hand, new_photos)
         self._apply_cards(self.stack_frame, stack_imgs,
                           zones.get("stack", []), new_photos)
-        self._apply_priority(self.priority_frame, priority_imgs, new_photos)
+        self._apply_priority(self.priority_frame, priority_imgs, new_photos, s)
 
         # Swap photo references atomically
         self.card_photos = new_photos
@@ -1665,7 +1931,8 @@ class GameStateViewer:
                 info, is_chosen=is_chosen, is_pass=is_pass))
         return images
 
-    def _apply_cards(self, frame, images, cards, photos_out):
+    def _apply_cards(self, frame, images, cards, photos_out,
+                     show_combat_tips=False):
         """Apply pre-rendered images to a frame, minimizing flicker."""
         for w in frame.winfo_children():
             w.destroy()
@@ -1692,9 +1959,13 @@ class GameStateViewer:
                                font=("Consolas", 8), width=14, height=5,
                                relief="raised", borderwidth=2)
                 lbl.pack(side=tk.LEFT, padx=1, pady=2)
+            # Add combat math tooltip for battlefield creatures only
+            if show_combat_tips:
+                card_info = info
+                CardTooltip(lbl, lambda ci=card_info: format_combat_tooltip(ci))
 
-    def _apply_priority(self, frame, images, photos_out):
-        """Apply pre-rendered priority images."""
+    def _apply_priority(self, frame, images, photos_out, s=None):
+        """Apply pre-rendered priority images with optional tooltips."""
         for w in frame.winfo_children():
             w.destroy()
 
@@ -1707,13 +1978,25 @@ class GameStateViewer:
                          side=tk.LEFT, padx=10, pady=8)
             return
 
-        for img in images:
+        # Decode candidates for tooltips (card-based decisions only)
+        candidates = s.get("candidates", []) if s else []
+        dt = s.get("type", "") if s else ""
+        is_card_decision = dt in ("TARGET_SELECTION", "CARD_SELECTION",
+                                   "MULLIGAN", "DECLARE_ATTACKERS",
+                                   "DECLARE_BLOCKERS")
+
+        for i, img in enumerate(images):
             if img and HAS_PIL:
                 photo = ImageTk.PhotoImage(img)
                 photos_out.append(photo)
                 lbl = tk.Label(frame, image=photo,
                                bg=frame["bg"])
                 lbl.pack(side=tk.LEFT, padx=1, pady=2)
+                # Add tooltip for card-based candidates
+                if is_card_decision and i < len(candidates):
+                    info = decode_card(candidates[i])
+                    if info:
+                        CardTooltip(lbl, lambda ci=info: format_combat_tooltip(ci))
 
     def _update_eval_bar(self, value=None):
         """Draw a lichess-style vertical eval bar.
@@ -2120,6 +2403,13 @@ class GameStateViewer:
                     lines.append("MATCH!")
                 else:
                     lines.append("DIFFERENT")
+
+            # Append global combat overview
+            gc = decode_global_combat(gf)
+            if gc:
+                lines.append("")
+                lines.append("")
+                lines.append(format_global_combat(gc))
 
             self.pred_text.insert("1.0", "\n".join(lines))
         self.pred_text.config(state=tk.DISABLED)
