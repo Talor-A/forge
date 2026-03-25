@@ -7,7 +7,6 @@ import forge.ai.rl.decisions.DecisionResult;
 import forge.ai.rl.decisions.DecisionType;
 import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.CardFeatures;
-import forge.ai.rl.features.CombatMath;
 import forge.ai.rl.features.GameStateEncoder;
 import forge.ai.rl.features.GameStateFeatures;
 import forge.ai.rl.training.TrajectoryRecorder;
@@ -190,8 +189,6 @@ public class RecordingControllerAi extends PlayerControllerAi {
         for (Card c : creatureList) {
             creatureFeats.add(CardFeatures.encode(c, player));
         }
-        CombatMath.enrichCandidates(creatureFeats, creatureList, player);
-
         super.declareAttackers(attacker, combat);
 
         // Record which creatures are now attacking
@@ -220,8 +217,6 @@ public class RecordingControllerAi extends PlayerControllerAi {
         for (Card c : defenderCreatures) {
             creatureFeats.add(CardFeatures.encode(c, player));
         }
-        CombatMath.enrichCandidates(creatureFeats, defenderCreatures, player);
-
         super.declareBlockers(defender, combat);
 
         // Record blocking assignments
@@ -257,7 +252,6 @@ public class RecordingControllerAi extends PlayerControllerAi {
                 feats.add(CardFeatures.encode(c, player));
                 cardList.add(c);
             }
-            CombatMath.enrichCandidates(feats, cardList, player);
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
                 int idx = sourceList.indexOf(c);
@@ -286,7 +280,6 @@ public class RecordingControllerAi extends PlayerControllerAi {
                 feats.add(CardFeatures.encode(c, player));
                 cardList.add(c);
             }
-            CombatMath.enrichCandidates(feats, cardList, player);
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
                 int idx = validTargets.indexOf(c);
@@ -315,7 +308,6 @@ public class RecordingControllerAi extends PlayerControllerAi {
             for (Card c : cardList) {
                 feats.add(CardFeatures.encode(c, player));
             }
-            CombatMath.enrichCandidates(feats, cardList, player);
             List<Integer> indices = new ArrayList<>();
             for (Card c : result) {
                 int idx = validCards.indexOf(c);
@@ -383,8 +375,6 @@ public class RecordingControllerAi extends PlayerControllerAi {
         for (Card c : cardList) {
             feats.add(CardFeatures.encode(c, player));
         }
-        CombatMath.enrichCandidates(feats, cardList, player);
-
         ImmutablePair<CardCollection, CardCollection> result =
                 super.arrangeForScry(topN);
 
@@ -416,22 +406,14 @@ public class RecordingControllerAi extends PlayerControllerAi {
                 isOptional, targetedPlayer, params);
         if (result != null && optionList.size() > 1) {
             List<float[]> feats = new ArrayList<>();
-            List<Card> cardEntities = new ArrayList<>();
-            List<float[]> cardFeatsOnly = new ArrayList<>();
             for (T entity : optionList) {
                 if (entity instanceof Card) {
-                    float[] f = CardFeatures.encode(
-                            (Card) entity, player);
-                    feats.add(f);
-                    cardEntities.add((Card) entity);
-                    cardFeatsOnly.add(f);
+                    feats.add(CardFeatures.encode(
+                            (Card) entity, player));
                 } else {
                     feats.add(ActionEncoder.encodeTarget(
                             entity));
                 }
-            }
-            if (!cardEntities.isEmpty()) {
-                CombatMath.enrichCandidates(cardFeatsOnly, cardEntities, player);
             }
             int idx = 0;
             for (int i = 0; i < optionList.size(); i++) {

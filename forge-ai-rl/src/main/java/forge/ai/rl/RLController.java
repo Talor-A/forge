@@ -193,8 +193,6 @@ public class RLController {
         for (Card c : possibleAttackers) {
             candidates.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
-        forge.ai.rl.features.CombatMath.enrichCandidates(candidates, possibleAttackers, player);
-
         DecisionContext context = DecisionContext.multiSelect(
                 DecisionType.DECLARE_ATTACKERS, gameState, candidates,
                 0, possibleAttackers.size(), "declare_attackers");
@@ -230,18 +228,16 @@ public class RLController {
 
         GameStateFeatures gameState = stateEncoder.encode(game, player);
 
-        // Pre-encode and enrich all blockers and attackers with combat math
+        // Pre-encode all blockers and attackers (combat math injected automatically by encode)
         List<float[]> blockerFeats = new ArrayList<>();
         for (Card c : possibleBlockers) {
             blockerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
-        forge.ai.rl.features.CombatMath.enrichCandidates(blockerFeats, possibleBlockers, player);
 
         List<float[]> attackerFeats = new ArrayList<>();
         for (Card c : attackers) {
             attackerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
-        forge.ai.rl.features.CombatMath.enrichCandidates(attackerFeats, attackers, player);
 
         // Each candidate is a (blocker, attacker) pair
         List<float[]> candidates = new ArrayList<>();
@@ -301,8 +297,6 @@ public class RLController {
             candidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c, player));
             cardList.add(c);
         }
-        forge.ai.rl.features.CombatMath.enrichCandidates(candidateFeatures, cardList, player);
-
         DecisionContext context = DecisionContext.multiSelect(
                 DecisionType.CARD_SELECTION, gameState, candidateFeatures, min, max, "card_selection");
 
@@ -397,7 +391,6 @@ public class RLController {
         for (Card c : candidates) {
             cachedCandidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
-        forge.ai.rl.features.CombatMath.enrichCandidates(cachedCandidateFeatures, candidates, player);
     }
 
     /**
@@ -460,13 +453,11 @@ public class RLController {
         for (Card c : possibleBlockers) {
             blockerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
-        forge.ai.rl.features.CombatMath.enrichCandidates(blockerFeats, possibleBlockers, player);
 
         List<float[]> attackerFeats = new ArrayList<>();
         for (Card c : attackers) {
             attackerFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
-        forge.ai.rl.features.CombatMath.enrichCandidates(attackerFeats, attackers, player);
 
         // Build (blocker, attacker) pair candidates
         List<float[]> candidates = new ArrayList<>();

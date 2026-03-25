@@ -145,18 +145,22 @@ public class CardFeatures {
     }
 
     /**
-     * Encode a card with ownership context.
-     * @param perspective the player whose perspective we're encoding from (null = no ownership info)
+     * Encode a card with ownership context and automatic combat math enrichment.
+     * When perspective is non-null and the card is a creature, combat features [208-231]
+     * are automatically computed — no separate enrichment step needed.
+     * @param perspective the player whose perspective we're encoding from (null = no ownership/combat info)
      */
     public static float[] encode(Card card, forge.game.player.Player perspective) {
         float[] features = new float[FEATURE_SIZE];
         if (card == null) return features;
         try {
             encodeImpl(card, features, perspective);
-            // Ownership flag at index 190 (first reserved slot)
+            // Ownership flag at index 190
             if (perspective != null) {
                 features[190] = (card.getController() == perspective) ? 1f : 0f;
                 features[191] = (card.getController() != perspective) ? 1f : 0f;
+                // Combat math features [208-231] — automatically injected for creatures
+                CombatMath.injectPerCardFeatures(features, card, perspective);
             }
             return features;
         } catch (Exception e) {

@@ -443,42 +443,35 @@ public class CombatMath {
     }
 
     /**
-     * Enrich a list of candidate card features with combat math.
-     * Call after CardFeatures.encode() for each candidate.
+     * Inject combat math features using the perspective player to derive creature lists.
+     * Called automatically by CardFeatures.encode(Card, Player) — no manual enrichment needed.
      *
-     * @param candidateFeatures  list of 256-float feature arrays
-     * @param candidates         the corresponding Card objects
-     * @param perspectivePlayer  the player making the decision
+     * @param features    the 256-float feature array for this card
+     * @param card        the card whose features we're computing
+     * @param perspective the player whose perspective we're encoding from
      */
-    public static void enrichCandidates(List<float[]> candidateFeatures,
-                                         List<Card> candidates,
-                                         forge.game.player.Player perspectivePlayer) {
-        if (perspectivePlayer == null || candidates.isEmpty()) return;
+    public static void injectPerCardFeatures(float[] features, Card card,
+                                              forge.game.player.Player perspective) {
+        if (!card.isCreature() || perspective == null || features.length <= 231) return;
 
         // Collect creatures on both sides
         List<Card> myCreatures = new ArrayList<>();
         List<Card> oppCreatures = new ArrayList<>();
-        for (Card c : perspectivePlayer.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+        for (Card c : perspective.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
             if (c.isCreature()) myCreatures.add(c);
         }
-        forge.game.player.Player opp = perspectivePlayer.getWeakestOpponent();
+        forge.game.player.Player opp = perspective.getWeakestOpponent();
         if (opp != null) {
             for (Card c : opp.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
                 if (c.isCreature()) oppCreatures.add(c);
             }
         }
 
-        for (int i = 0; i < candidates.size(); i++) {
-            Card card = candidates.get(i);
-            float[] features = candidateFeatures.get(i);
-            if (card.isCreature() && features.length > 231) {
-                boolean isMine = card.getController() == perspectivePlayer;
-                if (isMine) {
-                    injectPerCardFeatures(features, card, oppCreatures, myCreatures);
-                } else {
-                    injectPerCardFeatures(features, card, myCreatures, oppCreatures);
-                }
-            }
+        boolean isMine = card.getController() == perspective;
+        if (isMine) {
+            injectPerCardFeatures(features, card, oppCreatures, myCreatures);
+        } else {
+            injectPerCardFeatures(features, card, myCreatures, oppCreatures);
         }
     }
 

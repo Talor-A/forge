@@ -5,7 +5,6 @@ import forge.ai.rl.RLConfig;
 import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.CardFeatures;
 import forge.ai.rl.features.GameStateEncoder;
-import forge.ai.rl.features.CombatMath;
 import forge.ai.rl.features.GameStateFeatures;
 import forge.ai.rl.decisions.DecisionContext;
 import forge.ai.rl.decisions.DecisionResult;
@@ -160,7 +159,6 @@ public class HumanGameRecorder implements IGameRecorder {
             for (Card c : possibleAttackers) {
                 cachedCandidates.add(CardFeatures.encode(c, player));
             }
-            CombatMath.enrichCandidates(cachedCandidates, possibleAttackers, player);
         } catch (Exception e) {
             Logger.warn("HumanGameRecorder: Failed to capture attack state: {}", e.getMessage());
             cachedState = null;
@@ -213,18 +211,16 @@ public class HumanGameRecorder implements IGameRecorder {
         try {
             GameStateFeatures state = stateEncoder.encode(game, player);
 
-            // Pre-encode and enrich blockers and attackers separately
+            // Pre-encode blockers and attackers (combat math injected automatically by encode)
             List<float[]> blockerFeats = new ArrayList<>();
             for (Card c : possibleBlockers) {
                 blockerFeats.add(CardFeatures.encode(c, player));
             }
-            CombatMath.enrichCandidates(blockerFeats, possibleBlockers, player);
 
             List<float[]> attackerFeats = new ArrayList<>();
             for (Card c : attackers) {
                 attackerFeats.add(CardFeatures.encode(c, player));
             }
-            CombatMath.enrichCandidates(attackerFeats, attackers, player);
 
             // Build (blocker, attacker) pair candidates
             List<float[]> candidates = new ArrayList<>();
@@ -310,28 +306,13 @@ public class HumanGameRecorder implements IGameRecorder {
         try {
             GameStateFeatures state = stateEncoder.encode(game, player);
             List<float[]> candidateFeatures = new ArrayList<>();
-            List<Card> cardCandidates = new ArrayList<>();
             for (Object obj : candidates) {
                 if (obj instanceof Card) {
-                    Card card = (Card) obj;
-                    candidateFeatures.add(CardFeatures.encode(card, player));
-                    cardCandidates.add(card);
+                    candidateFeatures.add(CardFeatures.encode((Card) obj, player));
                 } else {
                     candidateFeatures.add(new float[256]); // player or other entity
                 }
             }
-            // Enrich Card candidates with combat math (non-creatures are skipped internally)
-            if (!cardCandidates.isEmpty()) {
-                // Build parallel lists of only the Card entries for enrichment
-                List<float[]> cardFeatsOnly = new ArrayList<>();
-                for (int i = 0; i < candidates.size(); i++) {
-                    if (candidates.get(i) instanceof Card) {
-                        cardFeatsOnly.add(candidateFeatures.get(i));
-                    }
-                }
-                CombatMath.enrichCandidates(cardFeatsOnly, cardCandidates, player);
-            }
-
             DecisionContext context = DecisionContext.multiSelect(
                     DecisionType.TARGET_SELECTION, state, candidateFeatures,
                     1, 1,
