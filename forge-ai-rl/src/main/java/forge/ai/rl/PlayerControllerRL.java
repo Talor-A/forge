@@ -286,9 +286,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     @Override
     public boolean playChosenSpellAbility(SpellAbility sa) {
         // Capture targeting decisions BEFORE the spell goes on the stack.
-        // At this point sa.getTargets() contains the finalized targets
-        // (set by the handler during canPlayForRL/canPlayAndPayForFacade).
-        if (sa.usesTargeting() && sa.isTargetNumberValid()) {
+        // Only record in heuristic mode — in GRPC mode, the RL path in
+        // chooseSpellAbilityToPlay already recorded the targeting decision.
+        if (!rl.isModelServerAvailable()
+                && sa.usesTargeting() && sa.isTargetNumberValid()) {
             try {
                 recordSpellTargeting(sa);
             } catch (Exception e) {
@@ -370,19 +371,17 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             // RL model picks the target
             List<GameEntity> targets = new ArrayList<>(optionList);
             List<Integer> selected = rl.decideTargets(targets, 1, 1);
+            int idx = 0; // default to first if model returns empty/invalid
             if (!selected.isEmpty()) {
-                int idx = selected.get(0);
-                if (idx >= 0 && idx < optionList.size()) {
-                    return optionList.get(idx);
-                }
+                idx = Math.max(0, Math.min(selected.get(0), optionList.size() - 1));
             }
-            // Fallback to heuristic if model fails
+            return optionList.get(idx);
         }
 
         T result = super.chooseSingleEntityForEffect(
                 optionList, delayedReveal, sa, title,
                 isOptional, targetedPlayer, params);
-        // Record heuristic's choice
+        // Record heuristic's choice (RECORD_HEURISTIC mode only)
         if (result != null && optionList.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (T entity : optionList) {
@@ -414,6 +413,14 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             String title, int min, int max,
             boolean isOptional,
             Map<String, Object> params) {
+        if (rl.isModelServerAvailable() && sourceList.size() > 1) {
+            List<Integer> selected = rl.decideCardSelection(sourceList, min, max);
+            CardCollection rlResult = new CardCollection();
+            for (int idx : selected) {
+                if (idx >= 0 && idx < sourceList.size()) rlResult.add(sourceList.get(idx));
+            }
+            return rlResult;
+        }
         CardCollectionView result = super.chooseCardsForEffect(
                 sourceList, sa, title, min, max,
                 isOptional, params);
@@ -438,6 +445,14 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     public CardCollectionView choosePermanentsToSacrifice(
             SpellAbility sa, int min, int max,
             CardCollectionView validTargets, String msg) {
+        if (rl.isModelServerAvailable() && validTargets.size() > 1) {
+            List<Integer> selected = rl.decideCardSelection(validTargets, min, max);
+            CardCollection rlResult = new CardCollection();
+            for (int idx : selected) {
+                if (idx >= 0 && idx < validTargets.size()) rlResult.add(validTargets.get(idx));
+            }
+            return rlResult;
+        }
         CardCollectionView result = super.choosePermanentsToSacrifice(
                 sa, min, max, validTargets, msg);
         if (result != null && validTargets.size() > 1) {
@@ -461,6 +476,14 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     public CardCollection chooseCardsToDiscardFrom(
             Player p, SpellAbility sa,
             CardCollection validCards, int min, int max) {
+        if (rl.isModelServerAvailable() && validCards.size() > 1) {
+            List<Integer> selected = rl.decideCardSelection(validCards, min, max);
+            CardCollection rlResult = new CardCollection();
+            for (int idx : selected) {
+                if (idx >= 0 && idx < validCards.size()) rlResult.add(validCards.get(idx));
+            }
+            return rlResult;
+        }
         CardCollectionView result = super.chooseCardsToDiscardFrom(
                 p, sa, validCards, min, max);
         if (result != null && validCards.size() > 1) {

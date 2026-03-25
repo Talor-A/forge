@@ -85,7 +85,19 @@ public class RLController {
         if (config.getMode() == RLModelMode.ONNX) {
             return onnxClient != null && onnxClient.isLoaded();
         }
-        return config.getMode() == RLModelMode.GRPC && modelClient.isConnected();
+        if (config.getMode() == RLModelMode.GRPC) {
+            if (modelClient.isConnected()) return true;
+            // Try to connect — retry a few times
+            for (int attempt = 0; attempt < 3; attempt++) {
+                if (modelClient.connect()) return true;
+                try { Thread.sleep(500 * (attempt + 1)); } catch (InterruptedException e) { break; }
+            }
+            // GRPC mode MUST have a server — throw, don't silently fall back
+            throw new ModelServerException(
+                    "Cannot connect to model server at " + config.getGrpcHost() + ":" + config.getGrpcPort()
+                    + " — refusing to fall back to heuristic");
+        }
+        return false;
     }
 
     /**
@@ -623,8 +635,10 @@ public class RLController {
                     type, gs,
                     candidateFeats != null ? candidateFeats : List.of(),
                     selected.size(), numCandidates, info);
+            boolean isFallback = config.getMode() != RLModelMode.GRPC
+                    && config.getMode() != RLModelMode.ONNX;
             DecisionResult res = new DecisionResult(
-                    selected, new float[0], 0f, true);
+                    selected, new float[0], 0f, isFallback);
             recordDecision(ctx, res);
         } catch (Exception e) {
             // Never crash the game due to recording errors

@@ -5,9 +5,9 @@ package forge.ai.rl;
  */
 public class RLConfig {
     // Model server connection
-    private String grpcHost = "localhost";
+    private String grpcHost = "127.0.0.1";
     private int grpcPort = 50051;
-    private int grpcTimeoutMs = 5000;
+    private int grpcTimeoutMs = 30000;
 
     // Feature dimensions
     private int gameStateEmbeddingDim = 512;

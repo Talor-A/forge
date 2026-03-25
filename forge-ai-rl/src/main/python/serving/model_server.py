@@ -136,7 +136,7 @@ class ModelServer:
         """Handle a single client connection."""
         self._client_semaphore.acquire()
         try:
-            client_socket.settimeout(300)  # 5 min timeout
+            client_socket.settimeout(600)  # 10 min timeout per client
             while self.running:
                 # Read length prefix
                 length_bytes = self._recv_exact(client_socket, 4)

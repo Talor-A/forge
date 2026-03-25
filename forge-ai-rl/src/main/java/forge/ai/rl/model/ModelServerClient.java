@@ -2,6 +2,7 @@ package forge.ai.rl.model;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import forge.ai.rl.ModelServerException;
 import forge.ai.rl.RLConfig;
 import forge.ai.rl.decisions.DecisionContext;
 import forge.ai.rl.decisions.DecisionResult;
@@ -67,56 +68,66 @@ public class ModelServerClient {
         connected = false;
     }
 
+    private static final int MAX_RETRIES = 3;
+    private static final long RETRY_DELAY_MS = 500;
+
     /**
      * Send a decision request to the model server and get the result.
-     * Returns null if the server is unavailable.
+     * Retries on failure with backoff. Throws ModelServerException if
+     * all retries fail — callers must NOT silently fall back to heuristic.
      */
     public synchronized DecisionResult requestDecision(DecisionContext context) {
-        if (!connected && !connect()) {
-            return null;
+        IOException lastError = null;
+
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            if (!connected && !connect()) {
+                // Connection failed — wait and retry
+                lastError = new IOException("Failed to connect to model server");
+                try { Thread.sleep(RETRY_DELAY_MS * (attempt + 1)); } catch (InterruptedException ie) { break; }
+                continue;
+            }
+
+            try {
+                InferenceRequest request = new InferenceRequest();
+                request.decisionType = context.getType().name();
+                request.globalFeatures = context.getGameState().getGlobalFeatures();
+                request.gameStateFlat = context.getGameState().flatten();
+                request.candidateFeatures = context.getCandidateFeatures().toArray(new float[0][]);
+                request.minSelections = context.getMinSelections();
+                request.maxSelections = context.getMaxSelections();
+                request.contextInfo = context.getContextInfo();
+
+                String json = gson.toJson(request);
+                byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+
+                out.writeInt(payload.length);
+                out.write(payload);
+                out.flush();
+
+                int responseLen = in.readInt();
+                byte[] responseBytes = new byte[responseLen];
+                in.readFully(responseBytes);
+                String responseJson = new String(responseBytes, StandardCharsets.UTF_8);
+
+                InferenceResponse response = gson.fromJson(responseJson, InferenceResponse.class);
+                return new DecisionResult(
+                        response.selectedIndices != null ? response.selectedIndices : List.of(),
+                        response.actionProbabilities != null ? response.actionProbabilities : new float[0],
+                        response.valueEstimate,
+                        false
+                );
+
+            } catch (IOException e) {
+                lastError = e;
+                Logger.warn("Model server error (attempt {}/{}): {}", attempt + 1, MAX_RETRIES, e.getMessage());
+                connected = false;
+                try { Thread.sleep(RETRY_DELAY_MS * (attempt + 1)); } catch (InterruptedException ie) { break; }
+            }
         }
 
-        try {
-            // Serialize request — send the flat game state array
-            // (same format as trajectory files) so the Python server
-            // parses it with the exact same parse_game_state() used
-            // during training. No encoding mismatch possible.
-            InferenceRequest request = new InferenceRequest();
-            request.decisionType = context.getType().name();
-            request.globalFeatures = context.getGameState().getGlobalFeatures();
-            request.gameStateFlat = context.getGameState().flatten();
-            request.candidateFeatures = context.getCandidateFeatures().toArray(new float[0][]);
-            request.minSelections = context.getMinSelections();
-            request.maxSelections = context.getMaxSelections();
-            request.contextInfo = context.getContextInfo();
-
-            String json = gson.toJson(request);
-            byte[] payload = json.getBytes(StandardCharsets.UTF_8);
-
-            // Send: length prefix + payload
-            out.writeInt(payload.length);
-            out.write(payload);
-            out.flush();
-
-            // Receive: length prefix + payload
-            int responseLen = in.readInt();
-            byte[] responseBytes = new byte[responseLen];
-            in.readFully(responseBytes);
-            String responseJson = new String(responseBytes, StandardCharsets.UTF_8);
-
-            InferenceResponse response = gson.fromJson(responseJson, InferenceResponse.class);
-            return new DecisionResult(
-                    response.selectedIndices != null ? response.selectedIndices : List.of(),
-                    response.actionProbabilities != null ? response.actionProbabilities : new float[0],
-                    response.valueEstimate,
-                    false
-            );
-
-        } catch (IOException e) {
-            Logger.warn("Model server communication error: {}", e.getMessage());
-            connected = false;
-            return null;
-        }
+        // All retries exhausted — throw, do NOT return null
+        throw new ModelServerException(
+                "Model server unreachable after " + MAX_RETRIES + " retries: " + lastError.getMessage());
     }
 
     /**
