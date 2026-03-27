@@ -579,7 +579,7 @@ This leaves 34 CardFeatures slots and 32 global slots still reserved for full ca
 
 ### Priority Head Class Imbalance — IMPLEMENTED 2026-03-23
 
-- **Class-weighted cross-entropy for priority head**: The heuristic passes priority ~85% of the time even with playable spells available. Standard cross-entropy lets the model achieve high accuracy by learning a pass-heavy distribution, which is exposed during PPO's stochastic sampling (78% creature miss rate during main phases). Under argmax (ONNX deployment) the model performs well (54% win rate, heuristic parity), but the underlying distribution is too peaked at pass for PPO to explore effectively.
+- **Class-weighted cross-entropy for priority head**: The heuristic passes priority ~85% of the time even with playable spells available. Standard cross-entropy lets the model achieve high accuracy by learning a pass-heavy distribution, which is exposed during PPO's stochastic sampling (78% creature miss rate during main phases). Under argmax (ONNX deployment) the model performs well (29% win rate, heuristic parity), but the underlying distribution is too peaked at pass for PPO to explore effectively.
 
   **Fix applied**: Inverse-frequency per-sample weighting in `make_priority_batch()`. Each sample gets weight `n_pass/n_total` if it's a play decision, or `n_play/n_total` if it's a pass. This equalizes gradient contribution without discarding data. The pass action is identified per-sample as `selected_idx == n_actions - 1` (pass is always the last candidate). Only the priority head needs this — other heads have naturally balanced distributions.
 
@@ -599,7 +599,7 @@ This leaves 34 CardFeatures slots and 32 global slots still reserved for full ca
 
 - **Held-out evaluation.** Current eval uses the same 4 decks for training and testing. Add held-out decks (different builds of the same archetypes, or a 5th archetype) to test generalization. Also add exploitability tests: a targeted opponent bot that exploits known weaknesses (e.g., never blocking because the model rarely attacks).
 
-- **Argmax eval during PPO as the true performance signal.** PPO eval currently uses stochastic sampling, which conflates "is the policy better?" with "how much does exploration hurt?". The imitation model shows a ~20 point gap between argmax (54%) and sampling (24-28%) win rates due to the pass-heavy distribution. This means a model achieving 35% under PPO sampling could actually be performing at 55%+ under argmax — genuinely surpassing the heuristic — but we can't see it. Run a periodic argmax eval (e.g., 20 ONNX games every 5 rounds) as the true performance metric. Use this for: (1) checkpoint selection (save best argmax model, not best sampling model), (2) learning rate scheduling (reduce LR if argmax plateaus), (3) early stopping (halt if argmax declines for 10 rounds). This doesn't change the PPO gradient computation — just controls the training process using the metric that reflects deployment performance.
+- **Argmax eval during PPO.** PPO eval uses stochastic sampling, which conflates "is the policy better?" with "how much does exploration hurt?". The true baseline under both argmax and sampling is ~29-31% (the previously reported 54% argmax result was a heuristic fallback bug). Periodic argmax eval would still be useful for checkpoint selection and learning rate scheduling, but the gap between sampling and argmax performance is smaller than previously believed.
 
 ### Hidden Information and Belief State (Priority: High impact, High effort — v2)
 
@@ -620,13 +620,13 @@ PPO in complex game domains requires vastly more data than we're currently gener
 
 We are 3-4 orders of magnitude below typical PPO data requirements for complex games. The oscillation and flat win rate we observe (20-34% across 20 rounds, with catastrophic mulligan collapses) may be normal variance at this scale rather than a fundamentally broken algorithm.
 
-**Key insight:** AlphaStar's imitation-only model (before any RL) already beat 84% of human players — because it trained on millions of games. Our imitation model at 54% win rate from 1,000 games is actually a strong result given the data scale. PPO improving beyond this may require 100-1,000× more games than we've tried.
+**Key insight:** AlphaStar's imitation-only model (before any RL) already beat 84% of human players — because it trained on millions of games. Our imitation model at 29% win rate from 1,000 games is actually a strong result given the data scale. PPO improving beyond this may require 100-1,000× more games than we've tried.
 
 **Practical options:**
 1. Run PPO much longer (500+ rounds × 400 games = 200K+ games, ~50 hours). Accept that improvement will be gradual.
 2. Switch to offline RL (AWR) which is more sample-efficient for our setup (see below).
 3. Focus on improving the imitation model instead — better features, human data, class-weighted loss — since that's where our wins have come from so far.
-4. Accept 54% argmax win rate as a strong baseline and invest in feature encoding improvements (documented above) rather than RL training compute.
+4. Accept 29% win rate as a strong baseline and invest in feature encoding improvements (documented above) rather than RL training compute.
 
 ### Self-Play + Reward Shaping (Priority: Medium — after joint training + improved PPO)
 
@@ -641,12 +641,12 @@ Tried 3+ rounds of self-play PPO from the 39% vs-heuristic model. Infrastructure
 ### Alternative RL Approaches (Priority: High — PPO may not be viable at our scale)
 
 - **Advantage-weighted regression (AWR) / offline RL.** The most promising alternative to PPO for our compute budget. Instead of PPO's stochastic sampling (which degrades play quality and requires importance sampling ratios), AWR:
-  1. Collects games under **argmax** — the model plays at full strength (54% win rate, not 28%)
+  1. Collects games under **argmax** — the model plays at full strength (29% win rate, not 28%)
   2. Computes GAE advantages for each decision in the trajectory
   3. Updates the policy by **weighting the supervised loss** by the advantage — actions with positive advantage get upweighted, negative get downweighted
   4. No importance sampling ratios needed, no clipping, no stochastic sampling
 
-  **Why this may work better for us:** The fundamental PPO problem is that stochastic sampling produces games where the model plays badly (passes on creatures 78% of the time), wins rarely (~28%), and therefore generates mostly negative advantage signals. The model can't learn what good play looks like because it almost never plays well during data collection. AWR avoids this entirely — the model plays its best, wins 54% of the time, and learns from both wins and losses at full strength.
+  **Why this may work better for us:** The fundamental PPO problem is that stochastic sampling produces games where the model plays badly (passes on creatures 78% of the time), wins rarely (~28%), and therefore generates mostly negative advantage signals. The model can't learn what good play looks like because it almost never plays well during data collection. AWR avoids this entirely — the model plays its best (~29% under argmax), and learns from both wins and losses at full strength rather than degraded sampling.
 
   **Implementation:** Replace the GRPC model server's `multinomial` sampling with `argmax`, record action probabilities for all candidates (not just the chosen one), and replace the PPO clipped objective with advantage-weighted cross-entropy: `loss = -advantage * log(π(a|s))` for positive-advantage actions only (or with exponential weighting).
 

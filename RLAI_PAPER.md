@@ -579,11 +579,11 @@ Train/val splits use game-level grouping (both P1/P2 perspectives in the same sp
 
 #### 5.3.1 Going-First Asymmetry and Class Imbalance
 
-Evaluation of the imitation-learned model under argmax (ONNX deployment) shows 54% overall win rate against the heuristic — at parity — but with a stark positional asymmetry: 34% win rate going first vs 74% going second. By comparison, the heuristic vs itself shows only a mild going-second advantage (47%/53%) in these aggro matchups.
+Evaluation of the imitation-learned model shows approximately 29-31% win rate against the heuristic AI under both argmax and stochastic sampling. Note: earlier reported "54%" win rates were artifacts of a heuristic fallback bug where the ONNX flag was silently ignored, causing the model to delegate decisions to the heuristic rather than making its own choices.
 
-Analysis of the model's probability distribution reveals the cause: during own main phases with creatures available, the model passes 78% of the time. This pass-heavy distribution — learned from the 85% pass rate in imitation data — is masked by argmax (which always picks the top action, often correctly) but exposed under the stochastic sampling required for PPO exploration. The model learned an exaggerated version of the heuristic's going-second preference because reactive play patterns (holding removal, blocking) are easier to learn from pass-heavy data than proactive patterns (playing creatures on curve).
+Analysis of the model's probability distribution reveals that during own main phases with creatures available, the model passes 78% of the time. This pass-heavy distribution — learned from the 85% pass rate in imitation data — means the model rarely deploys threats proactively. Under stochastic sampling (required for PPO exploration), this manifests as very low spells-per-turn (~0.5-0.6).
 
-The class-weighted cross-entropy fix (Section 3.1.3) addresses this by equalizing gradient contribution between play and pass decisions, encouraging the model to develop a more balanced probability distribution that supports both greedy deployment (argmax) and effective exploration (sampling for PPO).
+The class-weighted cross-entropy fix (Section 3.1.3) addresses this by equalizing gradient contribution between play and pass decisions, encouraging a more balanced probability distribution.
 
 ### 5.4 PPO Training
 
