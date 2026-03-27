@@ -353,14 +353,46 @@ The final card representation is the **concatenation of all four**, projected to
 2. ✅ PPO training loop with GAE per-decision advantages
 3. ✅ Reward shaping implemented (life/card/board advantage signals with decay)
 4. ✅ Frozen encoder during PPO (separate LRs: heads 3e-5, value 1e-4)
-5. 🔄 PPO training: 400 games/round, 4 epochs, batch 64, clip 0.1, entropy 0.005
-   - Initial results: eval win rate climbed 14%→34% in 5 rounds, then degraded
-   - Fixed: GAE advantages, frozen encoder, reduced entropy — re-running
-6. ⬜ Investigate going-first weakness (10% vs 37% going-second)
-   - Analysis shows model wastes burn spells early instead of saving for strategic moments
-   - Not a bug in creature deployment (matches heuristic rates)
-   - PPO with GAE should help learn spell sequencing
-7. ⬜ Elo tracking and benchmarking
+5. ✅ PPO vs heuristic: 43 rounds (17,200 games), plateaued at 30-39% win rate
+   - Best: 39% at round 21, no sustained upward trend
+   - Per-deck: White 46%, Green 32%, Red 21-40%, Blue (old) 5-15%
+   - Weight analysis: heads changed 10-20% L2 but win rate didn't improve
+   - Root cause: frozen encoder limits what heads can learn (see Phase 3b below)
+6. ✅ Encoder reconstruction experiment confirmed the problem:
+   - Value-only encoder retained only 24% R² of basic game state features
+   - Opponent life R² = -0.02 (worse than mean), creature counts R² negative
+   - Combat math features largely discarded (power/toughness R² negative)
+   - Encoder was optimized for value prediction, threw away decision-critical info
+7. ✅ Blue Tempo deck replaced with Mono Blue Tempest Djinn (MTGGoldfish #1361608)
+   - Old deck: Delver/Counterspell — heuristic couldn't play it (~5-15% win rate)
+   - New deck: Mist-Cloaked Herald, Tempest Djinn, Curious Obsession, Dive Down
+   - New meta: Green 61%, White 56%, Blue 44%, Red 38% (much healthier)
+8. ⬜ Elo tracking and benchmarking
+
+### Phase 3b: Joint Training + PPO Improvements (2026-03-27) 🔄 IN PROGRESS
+
+Key insight: the encoder must be trained jointly with ALL heads (not value-only then freeze).
+Dense supervised signal from imitation data is far more effective for encoder training than
+sparse PPO signal. Joint training gives the encoder balanced gradients from all 7 heads +
+value network simultaneously.
+
+1. ✅ Implemented `--joint` mode in `train_decisions_ui.py`:
+   - Round-robin training: all heads + value network + unfrozen encoder
+   - Encoder LR at 1/10th of head LR (1e-4 vs 1e-3)
+   - Per-head optimizers with gradient accumulation across heads
+   - Encoder stepped once per round-robin cycle with combined gradients
+2. ✅ PPO hyperparameter improvements:
+   - GAE gamma 0.95 → 0.99 (better early-game credit assignment)
+   - GAE lambda 0.90 → 0.95 (longer effective horizon: ~20 steps vs ~7)
+   - Entropy coefficient 0.005 → 0.03 (prevents policy collapse)
+   - Games per round 400 → 800 (more data for rare heads)
+3. 🔄 Joint training in progress (3 epochs completed before interruption):
+   - After 3 epochs: encoder R² improved from 0.24 → 0.47 (basic globals)
+   - Card combat R²: 0.31 → 0.54 (survives_block 0.59→0.80, evasive 0.26→0.54)
+   - Decision head accuracies: priority 86.8%, attack 86.4%, block 59.0%
+   - Training continuing to 10 epochs
+4. ⬜ PPO with improved encoder + hyperparameters
+5. ⬜ Self-play if PPO vs heuristic plateaus again
 
 ### Phase 4: RL Training — Full Complexity (weeks 15-22)
 1. Train on full card pools (Standard, Modern, or curated sets)
@@ -555,11 +587,11 @@ This leaves 34 CardFeatures slots and 32 global slots still reserved for full ca
 
 ### Encoder Architecture
 
-- **Encoder fine-tuning after head training**: Currently the encoder is frozen after value network training. This ensures stability (heads can't warp the shared representation) and prevents catastrophic forgetting between sequentially-trained heads. However, the encoder is optimized for value prediction, not action selection — it may compress away features irrelevant for evaluation but critical for decisions (e.g., combat math details for blocking). Recommended approach: after all heads are trained, unfreeze the encoder with a very low LR (1/100th of head LR, e.g., 1e-5) and train all heads jointly for 2-3 epochs. This lets the encoder adapt to what the heads actually need while the heads are already near-optimal, minimizing instability. Save pre-fine-tune checkpoint as fallback.
+- **Joint multi-task encoder training (IMPLEMENTED 2026-03-27)**: The encoder is now trained jointly with ALL 7 decision heads + value network from the start via `--joint` mode. Each task contributes gradients via round-robin batching with per-head optimizers. Encoder uses 1/10th LR (1e-4 vs 1e-3 for heads) to prevent any single head from dominating. This replaced the previous two-phase approach (value-only encoder → frozen encoder + sequential heads) which produced an encoder optimized only for value prediction that discarded decision-critical information (life totals R²=0.23, creature counts R²<0, combat math largely lost). After 3 epochs of joint training, encoder reconstruction R² improved from 0.24 → 0.47 for basic globals and 0.31 → 0.54 for combat features.
 
-- **Per-head encoders (investigated, not recommended at current scale)**: Giving each head its own 3.5M-param encoder would allow full specialization (attack encoder emphasizes combat stats, priority encoder focuses on mana/timing). However: (1) rare decision types (block 2.7K, binary 2K samples) cannot train a 3.5M encoder — they'd memorize instantly; (2) inference cost multiplies by 6× since each decision type needs a full encoder forward pass instead of reusing one shared embedding; (3) the value network's critic assessment becomes inconsistent with each head's world model, breaking PPO advantage estimation; (4) model size triples (~32M params) and ONNX deployment goes from 9 to 14 files. Per-head encoders make sense at much larger data scale (millions of samples per type) or if decision types were truly unrelated tasks. At current scale, the shared encoder with fine-tuning is the right approach.
+- **Per-head encoders (investigated, not recommended at current scale)**: Giving each head its own 3.5M-param encoder would allow full specialization (attack encoder emphasizes combat stats, priority encoder focuses on mana/timing). However: (1) rare decision types (block 2.7K, binary 2K samples) cannot train a 3.5M encoder — they'd memorize instantly; (2) inference cost multiplies by 6× since each decision type needs a full encoder forward pass instead of reusing one shared embedding; (3) the value network's critic assessment becomes inconsistent with each head's world model, breaking PPO advantage estimation; (4) model size triples (~32M params) and ONNX deployment goes from 9 to 14 files. Per-head encoders make sense at much larger data scale (millions of samples per type) or if decision types were truly unrelated tasks. At current scale, the shared encoder with joint training is the right approach.
 
-- **Multi-task encoder training**: Train the encoder with value prediction plus auxiliary decision losses simultaneously from the start, rather than value-only then freeze. Each task contributes gradients weighted by sample count and loss magnitude. This is closer to what AlphaStar does (policy + value trained together). Would produce a more balanced representation but requires all data loaded simultaneously and careful loss balancing (priority's 104K samples would dominate block's 2.7K without reweighting).
+- **Encoder capacity analysis (2026-03-27)**: The 512-dim bottleneck compresses 37,216 input floats at 72:1 raw ratio, but effective compression is ~3:1 (most card slots are empty/zero-padded, ~1,300-1,500 meaningful floats). PCA shows 90% of embedding variance in 49 dims, 99% in 92 dims — all 512 dims are active (std 0.44-1.07) but information is concentrated. The encoder size appears adequate for the current 4-deck meta; the bottleneck was training methodology (value-only) not capacity.
 
 ### Evaluation and Metrics (Priority: High)
 
@@ -596,30 +628,15 @@ We are 3-4 orders of magnitude below typical PPO data requirements for complex g
 3. Focus on improving the imitation model instead — better features, human data, class-weighted loss — since that's where our wins have come from so far.
 4. Accept 54% argmax win rate as a strong baseline and invest in feature encoding improvements (documented above) rather than RL training compute.
 
-### Self-Play + Reward Shaping (Priority: High — next after current PPO run)
+### Self-Play + Reward Shaping (Priority: Medium — after joint training + improved PPO)
 
-The fundamental problem with PPO vs heuristic at 25-30% win rate: reward signal is sparse and noisy. Most wins are due to opponent bad luck, not good play. PPO can't learn what works when it almost never wins.
+**Reward Shaping — investigated and intentionally disabled.**
+Intermediate rewards (life/card/board deltas) are recorded in Java but zeroed during GAE computation. The value network's per-step delta `V(s_{t+1}) - V(s_t)` already provides implicit reward shaping — and more accurately than hand-tuned weights, since V sees the full 37K-float game state. Adding explicit shaped rewards risks double-counting (the value function learns the shaping signal, then GAE subtracts V but also adds the raw shaping reward).
 
-**Reward Shaping — per-decision intermediate rewards:**
-- Board advantage delta: +reward when creature count/power improves relative to opponent
-- Life delta: +reward for dealing damage, -reward for taking damage
-- Correct targeting: +reward when removal hits opponent creature, pump hits own creature
-- Mana efficiency: +reward for spending mana on curve
-- Card advantage: +reward for drawing, -reward for discarding
+**Self-Play — attempted, useful but not a silver bullet.**
+Tried 3+ rounds of self-play PPO from the 39% vs-heuristic model. Infrastructure works (`runSelfPlayMode`, `--collect-mode selfplay`, Elo tracking). Self-play guarantees 50% win rate for balanced signal and 2x data per game. However, at 30-39% strength the model is too weak for productive self-play — risk of degenerate strategies. Better to improve the model via joint training + improved PPO first, then revisit self-play once it's consistently >45% vs heuristic.
 
-Add to `RewardShaper` with small blending weight (0.1-0.2) so game outcome still dominates. Risk: shaped rewards can create degenerate strategies (farming life gain instead of winning). Keep weight low and monitor.
-
-**Self-Play — guaranteed 50% win rate:**
-Both players use the RL model (GRPC/sampling). Every game produces one win and one loss — balanced signal. Record trajectories for both players — 2x data per game.
-
-Infrastructure already exists: `runSelfPlayMode` in SimulateRLTraining.
-
-**Phased approach:**
-1. **Phase 1: Self-play + shaped rewards** — train until model develops consistent strategy (creature deployment, correct targeting, combat). The combination gives both balanced win signal AND per-decision feedback.
-2. **Phase 2: vs Heuristic** — once self-play plateaus (~50 rounds), switch to heuristic opponent to learn from a stronger player.
-3. **Phase 3: Mixed** — alternate self-play and vs-heuristic rounds.
-
-**Concerns:** Self-play can develop degenerate strategies that beat itself but lose to everything else (e.g., both players learn to never attack). Mitigate with periodic heuristic eval, shaped rewards that encourage aggressive play, and early stopping if heuristic win rate drops.
+**Current approach:** Joint encoder+head training (dense supervised signal) → PPO vs heuristic with improved hyperparameters (gamma 0.99, entropy 0.03, 800 games/round) → self-play if PPO plateaus again.
 
 ### Alternative RL Approaches (Priority: High — PPO may not be viable at our scale)
 
