@@ -97,6 +97,9 @@ public class TrajectoryRecorder {
         // Store candidate features
         record.candidateFeatures = context.getCandidateFeatures().toArray(new float[0][]);
 
+        // Store spell features for target decisions
+        record.spellFeatures = context.getSpellFeatures();
+
         currentGame.add(record);
     }
 
@@ -177,5 +180,6 @@ public class TrajectoryRecorder {
         boolean usedFallback;
         double intermediateReward;
         double terminalReward;
+        float[] spellFeatures; // 64-dim source spell for target decisions
     }
 }

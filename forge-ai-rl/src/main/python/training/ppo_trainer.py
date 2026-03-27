@@ -275,6 +275,14 @@ def load_ppo_data(traj_dir):
                         p = max(old_probs[selected_idx], 1e-8)
                         old_lp = float(np.log(p))
 
+                    # Spell features for targeting context
+                    sf = rec.get('spellFeatures')
+                    spell_feats = np.zeros(64, dtype=np.float32)
+                    if sf is not None:
+                        sl = min(len(sf), 64)
+                        spell_feats[:sl] = np.array(
+                            sf[:sl], dtype=np.float32)
+
                     target_samples.append({
                         'global_features': gf,
                         'game_state_flat': flat,
@@ -284,6 +292,7 @@ def load_ppo_data(traj_dir):
                         'outcome': outcome,
                         'advantage': advantage,
                         'old_log_prob': old_lp,
+                        'spell_features': spell_feats,
                     })
 
                 elif dt == 'MULLIGAN':
@@ -813,6 +822,8 @@ def compute_ppo_target_batch(model, samples, device,
     stm = torch.zeros(bs, 10, dtype=torch.bool,
                        device=device)
 
+    sf = torch.zeros(bs, 64, device=device)
+
     for i, s in enumerate(samples):
         nt = s['n_targets']
         tf[i, :nt] = torch.from_numpy(s['target_features'])
@@ -821,6 +832,9 @@ def compute_ppo_target_batch(model, samples, device,
         outcomes[i] = float(s['outcome'])
         gae_advantages[i] = float(s['advantage'])
         old_log_probs[i] = float(s['old_log_prob'])
+        spell = s.get('spell_features')
+        if spell is not None:
+            sf[i] = torch.from_numpy(spell)
 
         g, zones, masks_d = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -843,7 +857,8 @@ def compute_ppo_target_batch(model, samples, device,
             gf, mb, mbm, ob, obm, h, hm,
             mg, mgm, og, ogm, st, stm)
         value = model.get_value(state.detach()).squeeze(-1)
-        logits = model.target_head(state, tf, tm)
+        logits = model.target_head(state, tf, tm,
+                                    spell_features=sf)
         dist = torch.distributions.Categorical(logits=logits)
         log_probs = dist.log_prob(actions)
 
