@@ -284,9 +284,8 @@ def awr_thread(state, args):
         model = MTGModel.load(args.checkpoint, device=device)
         log(state, "Model loaded.")
 
-        # Freeze encoder
-        for p in model.state_encoder.parameters():
-            p.requires_grad = False
+        # Unfreeze encoder with very low LR
+        encoder_params = list(model.state_encoder.parameters())
 
         head_params = (
             list(model.priority_head.parameters()) +
@@ -296,9 +295,11 @@ def awr_thread(state, args):
         value_params = list(model.value_network.parameters())
 
         optimizer = optim.AdamW([
+            {'params': encoder_params, 'lr': args.lr * 0.1},  # encoder: slow
             {'params': head_params, 'lr': args.lr},
             {'params': value_params, 'lr': args.lr * 3},
         ], weight_decay=1e-5)
+        log(state, f"Encoder UNFROZEN at LR={args.lr * 0.1:.1e}")
         scaler = (torch.amp.GradScaler('cuda')
                   if use_amp else None)
 

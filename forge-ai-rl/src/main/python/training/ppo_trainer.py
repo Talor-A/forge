@@ -337,7 +337,7 @@ def load_ppo_data(traj_dir):
 # ── PPO batch computation ────────────────────────────
 
 def compute_ppo_batch(model, head, samples, device,
-                      use_amp, clip_eps=0.2):
+                      use_amp, clip_eps=0.1):
     """
     Compute PPO loss for a batch of attack/block decisions.
 
@@ -464,7 +464,7 @@ def compute_ppo_batch(model, head, samples, device,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.03 * entropy)
+            0.03 * entropy)  # attack: high exploration ok
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -478,7 +478,7 @@ def compute_ppo_batch(model, head, samples, device,
 
 
 def compute_ppo_block_batch(model, samples, device,
-                            use_amp, clip_eps=0.2):
+                            use_amp, clip_eps=0.1):
     """
     Compute PPO loss for block decisions using the proper BlockHead.
 
@@ -639,7 +639,7 @@ def compute_ppo_block_batch(model, samples, device,
         value_loss = F.mse_loss(value, outcomes)
         entropy = total_entropy.mean()
 
-        total_loss = policy_loss + 0.5 * value_loss - 0.005 * entropy
+        total_loss = policy_loss + 0.5 * value_loss - 0.01 * entropy  # block: moderate
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -654,7 +654,7 @@ def compute_ppo_block_batch(model, samples, device,
 
 def compute_ppo_priority_batch(model, head, samples,
                                device, use_amp,
-                               clip_eps=0.2):
+                               clip_eps=0.1):
     """
     Compute PPO loss for a batch of priority decisions.
 
@@ -771,7 +771,7 @@ def compute_ppo_priority_batch(model, head, samples,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.03 * entropy)
+            0.01 * entropy)  # priority: mild exploration
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -785,7 +785,7 @@ def compute_ppo_priority_batch(model, head, samples,
 
 
 def compute_ppo_target_batch(model, samples, device,
-                              use_amp, clip_eps=0.2):
+                              use_amp, clip_eps=0.1):
     """PPO loss for target selection (single-select softmax,
     same as priority but with 256-dim card features)."""
     bs = len(samples)
@@ -885,7 +885,7 @@ def compute_ppo_target_batch(model, samples, device,
 
 
 def compute_ppo_mulligan_batch(model, samples, device,
-                                use_amp, clip_eps=0.2):
+                                use_amp, clip_eps=0.1):
     """PPO loss for mulligan (binary keep/mull)."""
     bs = len(samples)
     max_h = max(s['n_cards'] for s in samples)
