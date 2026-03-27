@@ -32,7 +32,7 @@ else
 fi
 
 ROUNDS=${2:-50}
-GAMES=${3:-400}
+GAMES=${3:-800}
 
 echo "PPO Training: $ROUNDS rounds, $GAMES games/round"
 echo "Model: $MODEL"

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Step 4: Train attack/block/priority decision heads (imitation learning)
-# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads]
+# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads] [--joint]
 # heads: "all" (default), or comma-separated: "priority", "attack,block", etc.
+# --joint: train all heads simultaneously with unfrozen encoder
 set -e
 cd /home/maustin/forge/forge-ai-rl/src/main/python
 source /home/maustin/forge/forge-ai-rl/venv/bin/activate
@@ -10,6 +11,11 @@ EPOCHS=${1:-10}
 BATCH=${2:-256}
 CKPT_DIR=/home/maustin/forge/rl_data/checkpoints
 HEADS=${4:-all}
+JOINT_FLAG=""
+if [[ "$*" == *"--joint"* ]]; then
+    JOINT_FLAG="--joint"
+    echo "JOINT MODE: training all heads with unfrozen encoder"
+fi
 
 # Auto-select best available checkpoint if not explicitly provided
 if [ -z "$3" ]; then
@@ -52,4 +58,5 @@ python training/train_decisions_ui.py \
     --device cuda \
     --epochs "$EPOCHS" \
     --batch-size "$BATCH" \
-    --heads "$HEADS"
+    --heads "$HEADS" \
+    $JOINT_FLAG
