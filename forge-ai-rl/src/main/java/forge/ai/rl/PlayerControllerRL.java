@@ -35,6 +35,8 @@ import java.util.Map;
 public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     private final RLController rl;
+    private final forge.ai.rl.mcts.MCTSDecisionMaker mcts;
+    private final boolean useMCTS;
 
     // Diagnostic counters (per game)
     private int priorityModelAsked = 0;
@@ -49,6 +51,13 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                 : createFallbackLobby(lp.getName()));
         this.rl = new RLController(config);
         this.rl.setPlayer(p);
+        this.useMCTS = (config.getMode() == RLModelMode.MCTS);
+        if (useMCTS) {
+            this.mcts = new forge.ai.rl.mcts.MCTSDecisionMaker(
+                    config.getMctsRollouts(), 30);
+        } else {
+            this.mcts = null;
+        }
     }
 
     public void logDiagnostics() {
@@ -81,6 +90,56 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        if (useMCTS) {
+            // Let heuristic build candidate lists first
+            List<SpellAbility> heuristicResult = super.chooseSpellAbilityToPlay();
+            List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
+            if (candidates == null || candidates.isEmpty()) {
+                return heuristicResult;
+            }
+
+            int idx = mcts.decidePriority(getGame(), player, candidates);
+
+            // Record the MCTS decision as training data
+            rl.recordHeuristicPriority(candidates,
+                    idx < candidates.size() ? candidates.get(idx) : null);
+
+            if (idx >= candidates.size()) {
+                return null; // pass
+            }
+
+            SpellAbility chosen = candidates.get(idx);
+            chosen.setActivatingPlayer(player);
+
+            // Use heuristic for targeting (MCTS handles target separately if needed)
+            if (chosen.usesTargeting() && chosen.getTargetRestrictions() != null) {
+                List<GameEntity> legalTargets = chosen.getTargetRestrictions()
+                        .getAllCandidates(chosen, true);
+                if (legalTargets.isEmpty()) return null;
+
+                if (legalTargets.size() > 1) {
+                    int targetIdx = mcts.decideTarget(getGame(), player,
+                            legalTargets, chosen);
+                    chosen.resetTargets();
+                    if (targetIdx >= 0 && targetIdx < legalTargets.size()) {
+                        GameEntity target = legalTargets.get(targetIdx);
+                        if (chosen.canTarget(target)) {
+                            chosen.getTargets().add(target);
+                        }
+                    }
+                } else {
+                    chosen.resetTargets();
+                    chosen.getTargets().add(legalTargets.get(0));
+                }
+
+                if (!chosen.isTargetNumberValid()) return null;
+            }
+
+            List<SpellAbility> result = new ArrayList<>();
+            result.add(chosen);
+            return result;
+        }
+
         if (rl.isModelServerAvailable()) {
             // Let the heuristic build the candidate lists (lands, filtering, etc.)
             // then use the RL model to pick from the mechanically-legal set
@@ -207,6 +266,23 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
         }
         if (possibleAttackers.isEmpty()) return;
+
+        if (useMCTS) {
+            List<Integer> attackerIndices = mcts.decideAttackers(
+                    getGame(), attacker, possibleAttackers);
+            for (int idx : attackerIndices) {
+                if (idx >= 0 && idx < possibleAttackers.size()) {
+                    Card c = possibleAttackers.get(idx);
+                    if (CombatUtil.canAttack(c, defender)) {
+                        combat.addAttacker(c, defender);
+                    }
+                }
+            }
+            // Record MCTS decision
+            rl.capturePreDecisionState(possibleAttackers);
+            rl.recordHeuristicAttack(possibleAttackers, attackerIndices);
+            return;
+        }
 
         if (rl.isModelServerAvailable()) {
             // RL model makes the decision

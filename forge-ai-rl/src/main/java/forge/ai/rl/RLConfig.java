@@ -35,6 +35,9 @@ public class RLConfig {
     // Discount factor
     private double gamma = 0.999;
 
+    // MCTS settings (ExIt)
+    private int mctsRollouts = 5;
+
     public String getGrpcHost() { return grpcHost; }
     public void setGrpcHost(String grpcHost) { this.grpcHost = grpcHost; }
     public int getGrpcPort() { return grpcPort; }
@@ -73,4 +76,7 @@ public class RLConfig {
     public double getBoardAdvantageReward() { return boardAdvantageReward; }
     public double getRewardShapingDecay() { return rewardShapingDecay; }
     public double getGamma() { return gamma; }
+
+    public int getMctsRollouts() { return mctsRollouts; }
+    public void setMctsRollouts(int n) { this.mctsRollouts = n; }
 }

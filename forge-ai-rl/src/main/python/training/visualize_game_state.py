@@ -80,6 +80,69 @@ LAND_COLORS = {
 }
 
 
+def _is_player_target(feats):
+    """Detect if a 256-dim candidate is a player target (not a card).
+    Player targets are encoded by ActionEncoder.encodeTarget() as 64-dim
+    padded to 256: [life, poison, hand_size, creature_count, 1.0, 0...]
+    The player flag at index 4 is 1.0, and the rest (indices 5-255) are 0."""
+    if len(feats) < 10:
+        return False
+    # Player flag at index 4
+    if feats[4] < 0.5:
+        return False
+    # Real cards have type flags at [0-6] that are exactly 0 or 1;
+    # player targets have normalized life/poison at [0-1] which are
+    # fractional. Check that indices 5-13 are near zero (no card
+    # color/type data) and index 4 is the player flag.
+    has_no_colors = all(abs(feats[i]) < 0.1 for i in range(7, 13))
+    has_no_keywords = all(abs(feats[i]) < 0.1 for i in range(29, 40))
+    return has_no_colors and has_no_keywords
+
+
+def _decode_player_target(feats):
+    """Decode a player target encoded by ActionEncoder.encodeTarget().
+    Layout: [0]=life, [1]=poison, [2]=hand_size, [3]=creature_count, [4]=1.0"""
+    life = int(round(feats[0] * 50 - 10))  # normalized [-10, 40]
+    poison = int(round(feats[1] * 10))
+    hand = int(round(feats[2] * 15))
+    creatures = int(round(feats[3] * 20))
+
+    label = f"Player ({life} life)"
+    if poison > 0:
+        label += f", {poison} poison"
+
+    return {
+        "types": ["Player"],
+        "colors": [],
+        "cmc": 0,
+        "power": None,
+        "toughness": None,
+        "loyalty": None,
+        "tapped": False,
+        "sick": False,
+        "attacking": False,
+        "blocking": False,
+        "face_down": False,
+        "keywords": [],
+        "zone": None,
+        "primary_api": None,
+        "secondary_api": None,
+        "label": label,
+        "detail": f"Hand: {hand}, Creatures: {creatures}",
+        "p1p1": 0,
+        "m1m1": 0,
+        "loyalty_counters": 0,
+        "charge_counters": 0,
+        "other_counters": 0,
+        "attachments": 0,
+        "damage": 0,
+        "produces_mana": [],
+        "cost_str": "",
+        "cost_total": 0,
+        "triggers": [],
+    }
+
+
 def decode_card(feats):
     """Decode a 256-dim CardFeatures vector.
 
@@ -333,8 +396,8 @@ def decode_card(feats):
     combat_trig_magnitude = round(feats[197] * 20) if len(feats) > 197 and feats[197] > 0 else 0
 
     # === PUMP MAGNITUDE [200-201] ===
-    pump_power = round(feats[200] * 25 - 5) if len(feats) > 200 and feats[200] > 0 else None
-    pump_toughness = round(feats[201] * 25 - 5) if len(feats) > 201 and feats[201] > 0 else None
+    pump_power = round(feats[200] * 20) if len(feats) > 200 and feats[200] > 0 else None
+    pump_toughness = round(feats[201] * 20) if len(feats) > 201 and feats[201] > 0 else None
 
     # === AURA/EQUIPMENT HOST [202-207] ===
     is_attached = feats[202] > 0.5 if len(feats) > 202 else False
@@ -488,15 +551,19 @@ def decode_action(feats):
     if len(feats) < 18:
         return None
 
-    # Check pass action (feature[63] = 1.0)
+    # Check pass action: feature[63] = 1.0 AND no card type/color
+    # flags set (indices 0-12 all zero). This distinguishes from
+    # removal spells where [63] = removal_kills_biggest = 1.0.
     if len(feats) > 63 and feats[63] > 0.5:
-        return {"label": "PASS", "is_pass": True,
-                "types": [], "colors": [], "cmc": 0,
-                "sa_type": "pass", "api": None,
-                "targets": False, "detail": "",
-                "damage": 0, "cards_drawn": 0,
-                "power": None, "toughness": None,
-                "target_info": ""}
+        has_type_or_color = any(feats[i] > 0.3 for i in range(13))
+        if not has_type_or_color:
+            return {"label": "PASS", "is_pass": True,
+                    "types": [], "colors": [], "cmc": 0,
+                    "sa_type": "pass", "api": None,
+                    "targets": False, "detail": "",
+                    "damage": 0, "cards_drawn": 0,
+                    "power": None, "toughness": None,
+                    "target_info": ""}
 
     type_names = ["Creature", "Instant", "Sorcery",
                   "Enchantment", "Artifact", "Planeswalker",
@@ -552,8 +619,10 @@ def decode_action(feats):
     # Target polarity [56-59]
     can_target_own_creature = feats[56] > 0.5 if len(feats) > 56 else False
     can_target_opp_creature = feats[57] > 0.5 if len(feats) > 57 else False
-    can_target_own_player = feats[58] > 0.5 if len(feats) > 58 else False
-    can_target_opp_player = feats[59] > 0.5 if len(feats) > 59 else False
+    can_target_players = feats[58] > 0.5 if len(feats) > 58 else False
+    # [59] is duplicate of [58] in Java encoder
+    can_target_own_player = can_target_players
+    can_target_opp_player = can_target_players
 
     # Build target description with polarity
     target_parts = []
@@ -1907,7 +1976,13 @@ class GameStateViewer:
             selected = set(s.get("selected", []))
             images = []
             for i, cf in enumerate(candidates):
-                info = decode_card(cf)
+                # Detect player targets: 64-dim features padded to 256
+                # Player flag is at index 4 = 1.0, and card type flags
+                # [0-6] won't match real card patterns
+                if _is_player_target(cf):
+                    info = _decode_player_target(cf)
+                else:
+                    info = decode_card(cf)
                 if not info:
                     images.append(None)
                     continue
