@@ -7,12 +7,14 @@
 set -e
 
 GAMES=${1:-500}
-ROLLOUTS=${2:-5}
+ROLLOUTS=${2:-30}
 OUTPUT=/home/maustin/forge/rl_data/exit_trajectories
 
 echo "ExIt MCTS Collection: $GAMES games, $ROLLOUTS rollouts/candidate"
 echo "Output: $OUTPUT"
 echo ""
+
+mkdir -p "$OUTPUT"
 
 cd /home/maustin/forge/forge-gui-desktop
 java -Xmx12g \
@@ -26,4 +28,5 @@ java -Xmx12g \
     -d "Green Stompy.dck" -d "White Weenie.dck" \
     -d "Blue Tempo.dck" -d "Red Aggro.dck" \
     -n "$GAMES" -t 4 -r "$ROLLOUTS" \
+    -c 600 \
     -o "$OUTPUT"

@@ -1127,9 +1127,21 @@ def _darken(hex_color, factor):
     return f"#{int(r*factor):02x}{int(g*factor):02x}{int(b*factor):02x}"
 
 
+def _wr_color(wr):
+    """Color for a win rate: red(0%) → yellow(50%) → green(100%)."""
+    if wr <= 0.5:
+        r = 255
+        g = int(255 * wr * 2)
+    else:
+        r = int(255 * (1 - wr) * 2)
+        g = 255
+    return f"#{r:02x}{g:02x}40"
+
+
 def draw_action_card_image(info, is_chosen=False,
-                           is_pass=False):
-    """Draw a priority action candidate as a card."""
+                           is_pass=False, win_rate=None):
+    """Draw a priority action candidate as a card.
+    win_rate: MCTS rollout win rate (0-1) or None."""
     if not HAS_PIL:
         return None
 
@@ -1148,11 +1160,17 @@ def draw_action_card_image(info, is_chosen=False,
                 "DejaVuSansMono-Bold.ttf", 14)
         except (IOError, OSError):
             font = ImageFont.load_default()
-        d.text((ACTION_W//2, ACTION_H//2 - 8), "PASS",
+        d.text((ACTION_W//2, ACTION_H//2 - 14), "PASS",
                fill="#f9e2af" if is_chosen else "#6c7086",
                font=font, anchor='mt')
+        if win_rate is not None:
+            wr_color = (_wr_color(win_rate)
+                        if win_rate > 0 else "#6c7086")
+            d.text((ACTION_W//2, ACTION_H//2 + 2),
+                   f"{win_rate*100:.0f}%",
+                   fill=wr_color, font=font, anchor='mt')
         if is_chosen:
-            d.text((ACTION_W//2, ACTION_H//2 + 12),
+            d.text((ACTION_W//2, ACTION_H//2 + 18),
                    "CHOSEN",
                    fill="#a6e3a1", font=font, anchor='mt')
         return img
@@ -1254,9 +1272,16 @@ def draw_action_card_image(info, is_chosen=False,
         d.text((bx+3, by+1), pt,
                fill="#ffffff", font=font_lg)
 
+    # Win rate from MCTS rollouts
+    if win_rate is not None:
+        wr_color = _wr_color(win_rate)
+        d.text((4, ACTION_H - 28),
+               f"WR: {win_rate*100:.0f}%",
+               fill=wr_color, font=font_lg)
+
     # "CHOSEN" marker
     if is_chosen:
-        d.text((4, ACTION_H - 16), ">> CHOSEN",
+        d.text((4, ACTION_H - 14), ">> CHOSEN",
                fill="#a6e3a1", font=font_md)
 
     return img
@@ -1314,6 +1339,10 @@ def load_samples(data_dir, max_samples=500,
                     "candidates": cand,
                     "selected": rec.get(
                         "selectedIndices", []),
+                    "action_probs": rec.get(
+                        "actionProbabilities", []),
+                    "value_estimate": rec.get(
+                        "valueEstimate", 0.0),
                     "won": won,
                     "source": source_tag,
                 })
@@ -1542,7 +1571,7 @@ class GameStateViewer:
         """Filter samples to current mode and update mode indicator."""
         if self.mode == self.MODE_RL_REPLAY:
             filtered = [s for s in self.all_samples
-                        if s.get("source") == "ppo"]
+                        if s.get("source") in ("ppo", "exit")]
             self.mode_v.set("RL REPLAY")
             self.mode_lbl.configure(fg="#a6e3a1", bg="#2a3a2a")
         else:
@@ -1785,24 +1814,25 @@ class GameStateViewer:
         """Reload trajectory data from disk."""
         if not self.data_dir:
             return
-        # Also check PPO trajectories
+        # Also check PPO and ExIt trajectories
         dirs = [self.data_dir]
-        ppo_dir = os.path.join(
-            os.path.dirname(self.data_dir),
-            'ppo_trajectories')
-        if os.path.isdir(ppo_dir):
-            dirs.append(ppo_dir)
-        ppo_eval = ppo_dir + '_eval'
-        if os.path.isdir(ppo_eval):
-            dirs.append(ppo_eval)
+        base = os.path.dirname(self.data_dir)
+        for subdir in ['ppo_trajectories', 'ppo_trajectories_eval',
+                        'exit_trajectories']:
+            d = os.path.join(base, subdir)
+            if os.path.isdir(d):
+                dirs.append(d)
 
         all_samples = []
         for d in dirs:
             is_ppo = 'ppo' in d
-            tag = "ppo" if is_ppo else "heuristic"
+            is_exit = 'exit' in d
+            tag = ("exit" if is_exit
+                   else "ppo" if is_ppo
+                   else "heuristic")
             all_samples.extend(
                 load_samples(d, max_samples=100,
-                             rl_only=is_ppo,
+                             rl_only=(is_ppo or is_exit),
                              source_tag=tag))
         if all_samples:
             self.all_samples = all_samples
@@ -1974,11 +2004,9 @@ class GameStateViewer:
         if dt in ("TARGET_SELECTION", "CARD_SELECTION", "MULLIGAN"):
             candidates = s.get("candidates", [])
             selected = set(s.get("selected", []))
+            action_probs = s.get("action_probs", [])
             images = []
             for i, cf in enumerate(candidates):
-                # Detect player targets: 64-dim features padded to 256
-                # Player flag is at index 4 = 1.0, and card type flags
-                # [0-6] won't match real card patterns
                 if _is_player_target(cf):
                     info = _decode_player_target(cf)
                 else:
@@ -1987,12 +2015,24 @@ class GameStateViewer:
                     images.append(None)
                     continue
                 hl = "attack" if i in selected else None
-                images.append(draw_card_image(info, highlight=hl))
+                wr = (action_probs[i]
+                      if i < len(action_probs) else None)
+                img = draw_card_image(info, highlight=hl)
+                # Overlay win rate if available
+                if img and wr is not None and HAS_PIL:
+                    d = ImageDraw.Draw(img)
+                    _, _, font_lg = _load_fonts()
+                    wr_color = _wr_color(wr)
+                    d.text((4, img.height - 16),
+                           f"WR:{wr*100:.0f}%",
+                           fill=wr_color, font=font_lg)
+                images.append(img)
             return images if images else None
         if dt != "PRIORITY_ACTION":
             return None
         candidates = s.get("candidates", [])
         selected = s.get("selected", [])
+        action_probs = s.get("action_probs", [])
         sel_idx = selected[0] if selected else -1
         images = []
         for i, cf in enumerate(candidates):
@@ -2002,8 +2042,11 @@ class GameStateViewer:
                 continue
             is_chosen = (i == sel_idx)
             is_pass = info.get("is_pass", False)
+            win_rate = (action_probs[i]
+                        if i < len(action_probs) else None)
             images.append(draw_action_card_image(
-                info, is_chosen=is_chosen, is_pass=is_pass))
+                info, is_chosen=is_chosen, is_pass=is_pass,
+                win_rate=win_rate))
         return images
 
     def _apply_cards(self, frame, images, cards, photos_out,
@@ -2157,6 +2200,22 @@ class GameStateViewer:
             self._update_eval_bar(value)
 
             lines = []
+
+            # MCTS rollout info (ExIt trajectories)
+            action_probs = s.get("action_probs", [])
+            mcts_value = s.get("value_estimate", 0.0)
+            if action_probs and any(
+                    p > 0 for p in action_probs):
+                lines.append("=== MCTS Rollout ===")
+                lines.append(
+                    f"Value: {mcts_value:.1%} win rate")
+                for i, p in enumerate(action_probs):
+                    marker = " <<" if i in s.get(
+                        "selected", []) else ""
+                    lines.append(
+                        f"  [{i}] {p*100:5.1f}%{marker}")
+                lines.append("")
+
             lines.append(f"Win probability: {(value+1)/2:.0%}")
             lines.append(f"Value: {value:+.3f}")
             lines.append("")

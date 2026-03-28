@@ -54,7 +54,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         this.useMCTS = (config.getMode() == RLModelMode.MCTS);
         if (useMCTS) {
             this.mcts = new forge.ai.rl.mcts.MCTSDecisionMaker(
-                    config.getMctsRollouts(), 30);
+                    config.getMctsRollouts(), 60);
         } else {
             this.mcts = null;
         }
@@ -98,11 +98,16 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                 return heuristicResult;
             }
 
-            int idx = mcts.decidePriority(getGame(), player, candidates);
+            forge.ai.rl.mcts.MCTSResult mctsResult =
+                    mcts.decidePriority(getGame(), player, candidates);
+            int idx = mctsResult.getSelectedIndex();
 
-            // Record the MCTS decision as training data
-            rl.recordHeuristicPriority(candidates,
-                    idx < candidates.size() ? candidates.get(idx) : null);
+            // Record with MCTS win rates as action probabilities
+            // and MCTS value estimate
+            rl.recordMCTSPriority(candidates,
+                    idx < candidates.size() ? candidates.get(idx) : null,
+                    mctsResult.getWinRates(),
+                    mctsResult.getValueEstimate());
 
             if (idx >= candidates.size()) {
                 return null; // pass
@@ -111,23 +116,20 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             SpellAbility chosen = candidates.get(idx);
             chosen.setActivatingPlayer(player);
 
-            // Use heuristic for targeting (MCTS handles target separately if needed)
+            // MCTS already evaluated all (spell, target) pairs —
+            // use the target it chose
             if (chosen.usesTargeting() && chosen.getTargetRestrictions() != null) {
-                List<GameEntity> legalTargets = chosen.getTargetRestrictions()
-                        .getAllCandidates(chosen, true);
-                if (legalTargets.isEmpty()) return null;
-
-                if (legalTargets.size() > 1) {
-                    int targetIdx = mcts.decideTarget(getGame(), player,
-                            legalTargets, chosen);
+                GameEntity mctsTarget = mcts.getChosenTarget(idx);
+                if (mctsTarget != null) {
                     chosen.resetTargets();
-                    if (targetIdx >= 0 && targetIdx < legalTargets.size()) {
-                        GameEntity target = legalTargets.get(targetIdx);
-                        if (chosen.canTarget(target)) {
-                            chosen.getTargets().add(target);
-                        }
+                    if (chosen.canTarget(mctsTarget)) {
+                        chosen.getTargets().add(mctsTarget);
                     }
                 } else {
+                    // Single target or MCTS didn't evaluate targets
+                    List<GameEntity> legalTargets = chosen.getTargetRestrictions()
+                            .getAllCandidates(chosen, true);
+                    if (legalTargets.isEmpty()) return null;
                     chosen.resetTargets();
                     chosen.getTargets().add(legalTargets.get(0));
                 }
@@ -268,8 +270,21 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         if (possibleAttackers.isEmpty()) return;
 
         if (useMCTS) {
-            List<Integer> attackerIndices = mcts.decideAttackers(
-                    getGame(), attacker, possibleAttackers);
+            forge.ai.rl.mcts.MCTSResult mctsResult =
+                    mcts.decideAttackers(getGame(), attacker, possibleAttackers);
+
+            // Determine which creatures attack from best pattern
+            List<Integer> attackerIndices = new ArrayList<>();
+            int bestPattern = mctsResult.getSelectedIndex();
+            if (bestPattern == 1) {
+                // All-in
+                for (int i = 0; i < possibleAttackers.size(); i++) attackerIndices.add(i);
+            } else if (bestPattern >= 2) {
+                // Individual creature
+                attackerIndices.add(bestPattern - 2);
+            }
+            // bestPattern == 0 means no attack
+
             for (int idx : attackerIndices) {
                 if (idx >= 0 && idx < possibleAttackers.size()) {
                     Card c = possibleAttackers.get(idx);
@@ -278,9 +293,11 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                     }
                 }
             }
-            // Record MCTS decision
+
+            // Record with MCTS per-creature win rates
             rl.capturePreDecisionState(possibleAttackers);
-            rl.recordHeuristicAttack(possibleAttackers, attackerIndices);
+            rl.recordMCTSAttack(possibleAttackers, attackerIndices,
+                    mctsResult.getWinRates(), mctsResult.getValueEstimate());
             return;
         }
 

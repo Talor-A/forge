@@ -592,6 +592,88 @@ public class RLController {
         recordDecision(context, result);
     }
 
+    /**
+     * Record a priority decision made by MCTS with rollout win rates as soft targets.
+     */
+    public void recordMCTSPriority(List<SpellAbility> availableActions, SpellAbility chosenSa,
+                                    float[] winRates, float valueEstimate) {
+        if (trajectoryRecorder == null) return;
+        if (availableActions.isEmpty()) return;
+
+        GameStateFeatures gameState = stateEncoder.encode(game, player);
+
+        List<float[]> candidates = new ArrayList<>();
+        for (SpellAbility sa : availableActions) {
+            candidates.add(ActionEncoder.encode(sa));
+        }
+        candidates.add(ActionEncoder.encodePassAction());
+
+        int selectedIdx = availableActions.size(); // default = pass
+        if (chosenSa != null) {
+            for (int i = 0; i < availableActions.size(); i++) {
+                if (availableActions.get(i) == chosenSa) {
+                    selectedIdx = i;
+                    break;
+                }
+            }
+            if (selectedIdx == availableActions.size() && chosenSa.getHostCard() != null) {
+                String chosenName = chosenSa.getHostCard().getName();
+                Object chosenApi = chosenSa.getApi();
+                for (int i = 0; i < availableActions.size(); i++) {
+                    SpellAbility sa = availableActions.get(i);
+                    if (sa.getHostCard() != null
+                            && sa.getHostCard().getName().equals(chosenName)
+                            && sa.getApi() == chosenApi) {
+                        selectedIdx = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        DecisionContext context = DecisionContext.singleSelect(
+                DecisionType.PRIORITY_ACTION, gameState, candidates,
+                "mcts_priority_" + availableActions.size() + "_options");
+
+        // Store MCTS win rates as actionProbabilities and value estimate
+        DecisionResult result = new DecisionResult(
+                List.of(selectedIdx), winRates, valueEstimate, false);
+
+        recordDecision(context, result);
+    }
+
+    /**
+     * Record an attack decision made by MCTS with per-creature win rates.
+     */
+    public void recordMCTSAttack(List<Card> possibleAttackers, List<Integer> selectedIndices,
+                                  float[] creatureWinRates, float valueEstimate) {
+        if (trajectoryRecorder == null) return;
+
+        GameStateFeatures gameState = cachedPreDecisionState;
+        if (gameState == null) {
+            gameState = stateEncoder.encode(game, player);
+        }
+
+        List<float[]> candidateFeats = cachedCandidateFeatures;
+        if (candidateFeats == null) {
+            candidateFeats = new ArrayList<>();
+            for (Card c : possibleAttackers) {
+                candidateFeats.add(forge.ai.rl.features.CardFeatures.encode(c, player));
+            }
+        }
+
+        DecisionContext context = DecisionContext.multiSelect(
+                DecisionType.DECLARE_ATTACKERS, gameState, candidateFeats,
+                0, possibleAttackers.size(), "mcts_attack");
+
+        DecisionResult result = new DecisionResult(
+                selectedIndices, creatureWinRates, valueEstimate, false);
+
+        recordDecision(context, result);
+        cachedPreDecisionState = null;
+        cachedCandidateFeatures = null;
+    }
+
     // --- Internal helpers ---
 
     private DecisionResult requestDecision(DecisionContext context) {

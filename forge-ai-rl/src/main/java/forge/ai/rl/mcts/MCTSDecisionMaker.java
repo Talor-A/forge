@@ -1,9 +1,10 @@
 package forge.ai.rl.mcts;
 
-import forge.ai.ComputerUtil;
+import forge.ai.PlayerControllerAi;
 import forge.ai.simulation.GameCopier;
 import forge.ai.simulation.GameSimulator;
 import forge.ai.simulation.GameStateEvaluator;
+import forge.ai.simulation.SimulationController;
 import forge.game.*;
 import forge.game.card.Card;
 import forge.game.combat.Combat;
@@ -18,155 +19,369 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * Makes decisions via Monte Carlo rollouts: for each candidate action,
- * copy the game, apply the action, play the rest with heuristic AIs,
- * and pick the candidate with the highest win rate.
+ * Monte Carlo Tree Search decision maker using UCB1 for rollout allocation.
+ *
+ * For each decision point, expands all (spell, target) pairs as candidates,
+ * allocates a fixed rollout budget using UCB1 (explore promising candidates
+ * more, prune unpromising ones), and returns visit-count-based policy
+ * as soft training targets.
  *
  * Used by Expert Iteration (ExIt) to generate search-improved training data.
  */
 public class MCTSDecisionMaker {
 
-    private final int rolloutsPerCandidate;
-    private final int rolloutTimeoutSec;
-    private final Random rng;
+    // UCB1 exploration constant — sqrt(2) is theoretical optimum,
+    // lower values exploit more, higher explore more
+    private static final double UCB_C = 1.41;
 
-    // Stats for logging
+    private final int rolloutBudget;     // total rollouts per decision
+    private final int rolloutTimeoutSec; // timeout per individual rollout
+    private final Random rng;
+    private final Map<Integer, GameEntity> chosenTargets = new HashMap<>();
+
+    // Stats
     private int totalDecisions = 0;
     private int totalRollouts = 0;
     private long totalRolloutTimeMs = 0;
 
-    public MCTSDecisionMaker(int rolloutsPerCandidate, int rolloutTimeoutSec) {
-        this.rolloutsPerCandidate = rolloutsPerCandidate;
+    /**
+     * @param rolloutBudget total rollouts per decision (allocated via UCB1)
+     * @param rolloutTimeoutSec timeout for each individual game rollout
+     */
+    public MCTSDecisionMaker(int rolloutBudget, int rolloutTimeoutSec) {
+        this.rolloutBudget = rolloutBudget;
         this.rolloutTimeoutSec = rolloutTimeoutSec;
         this.rng = new Random();
     }
 
+    // ── Candidate representation ──
+
+    /** A candidate action: spell + optional target, or pass, or attack pattern. */
+    private static class Candidate {
+        final SpellAbility spell;      // null = pass
+        final GameEntity target;       // null = no targeting needed
+        final String label;
+        int visits = 0;
+        int wins = 0;
+
+        // For attack patterns
+        final List<Integer> attackIndices; // null for non-attack
+
+        Candidate(SpellAbility spell, GameEntity target, String label) {
+            this.spell = spell;
+            this.target = target;
+            this.label = label;
+            this.attackIndices = null;
+        }
+
+        Candidate(List<Integer> attackIndices, String label) {
+            this.spell = null;
+            this.target = null;
+            this.label = label;
+            this.attackIndices = attackIndices;
+        }
+
+        double winRate() {
+            return visits > 0 ? (double) wins / visits : 0;
+        }
+
+        double ucb1(int totalVisits) {
+            if (visits == 0) return Double.MAX_VALUE; // unvisited = infinite priority
+            return winRate() + UCB_C * Math.sqrt(Math.log(totalVisits) / visits);
+        }
+    }
+
+    // ── Priority decisions ──
+
     /**
-     * Evaluate priority candidates via rollouts.
-     * @param game current game state (not modified)
-     * @param player the player making the decision
-     * @param candidates list of playable SpellAbilities
-     * @return index of best candidate, or candidates.size() for pass
+     * Evaluate priority candidates via UCB1-allocated rollouts.
+     * For targeted spells, each (spell, target) pair is a separate candidate.
+     *
+     * Returns MCTSResult with per-original-candidate win rates (best target
+     * per spell) and the visit-based policy distribution.
      */
-    public int decidePriority(Game game, Player player,
-                              List<SpellAbility> candidates) {
-        if (candidates.isEmpty()) return 0;
+    public MCTSResult decidePriority(Game game, Player player,
+                                     List<SpellAbility> candidates) {
+        if (candidates.isEmpty()) {
+            return new MCTSResult(0, new float[]{1f}, 1f);
+        }
 
-        int nCandidates = candidates.size() + 1; // +1 for pass
-        float[] winRates = new float[nCandidates];
+        chosenTargets.clear();
 
-        for (int c = 0; c < nCandidates; c++) {
-            SpellAbility sa = (c < candidates.size()) ? candidates.get(c) : null;
-            int wins = 0;
-            for (int r = 0; r < rolloutsPerCandidate; r++) {
-                if (rollout(game, player, sa)) {
-                    wins++;
+        // Build expanded candidate list: (spell, target) pairs
+        List<Candidate> expanded = new ArrayList<>();
+        // Track which original candidate index each expanded candidate maps to
+        List<Integer> origIndex = new ArrayList<>();
+
+        for (int c = 0; c < candidates.size(); c++) {
+            SpellAbility sa = candidates.get(c);
+
+            if (sa.usesTargeting() && sa.getTargetRestrictions() != null) {
+                List<GameEntity> legalTargets = sa.getTargetRestrictions()
+                        .getAllCandidates(sa, true);
+                if (legalTargets.isEmpty()) continue;
+
+                for (GameEntity target : legalTargets) {
+                    String targetName = target instanceof Card
+                            ? ((Card) target).getName()
+                            : target instanceof Player
+                            ? "Player:" + ((Player) target).getName()
+                            : target.toString();
+                    expanded.add(new Candidate(sa, target,
+                            cardName(sa) + " -> " + targetName));
+                    origIndex.add(c);
                 }
-                totalRollouts++;
+            } else {
+                expanded.add(new Candidate(sa, null, cardName(sa)));
+                origIndex.add(c);
             }
-            winRates[c] = (float) wins / rolloutsPerCandidate;
+        }
+
+        // Add pass
+        expanded.add(new Candidate((SpellAbility) null, null, "PASS"));
+        origIndex.add(candidates.size()); // pass index
+
+        // Run UCB1 rollouts
+        runUCB1(expanded, game, player);
+
+        // Aggregate results back to original candidate indices
+        int nOriginal = candidates.size() + 1;
+        float[] winRates = new float[nOriginal];
+        int[] bestVisits = new int[nOriginal];
+
+        for (int e = 0; e < expanded.size(); e++) {
+            Candidate cand = expanded.get(e);
+            int orig = origIndex.get(e);
+
+            // For targeted spells: keep the best target's rate
+            if (cand.visits > bestVisits[orig]
+                    || (cand.visits == bestVisits[orig]
+                        && cand.winRate() > winRates[orig])) {
+                winRates[orig] = (float) cand.winRate();
+                bestVisits[orig] = cand.visits;
+                if (cand.target != null) {
+                    chosenTargets.put(orig, cand.target);
+                }
+            }
         }
 
         int best = argmax(winRates);
         totalDecisions++;
 
-        if (totalDecisions % 20 == 0) {
-            logStats();
-        }
-
+        // Log
         String label = (best < candidates.size())
                 ? cardName(candidates.get(best))
                 : "PASS";
-        Logger.info("MCTS_PRIORITY: n={} best={} ({}) rates={}",
-                candidates.size(), best, label, formatRates(winRates));
+        StringBuilder sb = new StringBuilder();
+        sb.append("MCTS_PRIORITY: n=").append(candidates.size());
+        sb.append(" expanded=").append(expanded.size());
+        sb.append(" best=").append(best).append(" (").append(label).append(")");
+        sb.append(" rates=").append(formatRates(winRates));
+        sb.append(" | ");
+        for (Candidate c : expanded) {
+            sb.append(String.format("%s:%d/%d(%.0f%%) ",
+                    c.label, c.wins, c.visits, c.winRate() * 100));
+        }
+        System.out.println(sb);
+        System.out.flush();
 
-        return best;
+        return new MCTSResult(best, winRates, winRates[best]);
     }
 
     /**
-     * Evaluate attack candidates via rollouts.
-     * Tests: all-in attack, no attack, and each individual creature.
-     * @return set of indices of creatures that should attack
+     * Get the MCTS-chosen target for a targeted spell candidate.
      */
-    public List<Integer> decideAttackers(Game game, Player player,
-                                          List<Card> possibleAttackers) {
-        if (possibleAttackers.isEmpty()) return List.of();
+    public GameEntity getChosenTarget(int candidateIdx) {
+        return chosenTargets.get(candidateIdx);
+    }
 
-        // Candidate attack patterns:
-        // 0 = no attack, 1 = all-in, 2..N+1 = individual creatures
-        int nPatterns = 2 + possibleAttackers.size();
-        float[] winRates = new float[nPatterns];
+    // ── Attack decisions ──
 
-        // Pattern 0: no attack
-        winRates[0] = rolloutAttackPattern(game, player, possibleAttackers,
-                Collections.emptyList());
+    /**
+     * Evaluate attack candidates via UCB1-allocated rollouts.
+     * Candidates: no-attack, all-in, and each individual creature.
+     */
+    public MCTSResult decideAttackers(Game game, Player player,
+                                       List<Card> possibleAttackers) {
+        if (possibleAttackers.isEmpty()) {
+            return new MCTSResult(0, new float[0], 0.5f);
+        }
 
-        // Pattern 1: all-in
+        List<Candidate> expanded = new ArrayList<>();
+
+        // No attack
+        expanded.add(new Candidate(List.of(), "hold"));
+
+        // All-in
         List<Integer> allIn = new ArrayList<>();
         for (int i = 0; i < possibleAttackers.size(); i++) allIn.add(i);
-        winRates[1] = rolloutAttackPattern(game, player, possibleAttackers, allIn);
+        expanded.add(new Candidate(new ArrayList<>(allIn), "all-in"));
 
-        // Patterns 2+: individual creatures
+        // Individual creatures
         for (int i = 0; i < possibleAttackers.size(); i++) {
-            winRates[2 + i] = rolloutAttackPattern(game, player,
-                    possibleAttackers, List.of(i));
+            String name = possibleAttackers.get(i).getName();
+            expanded.add(new Candidate(List.of(i), name));
         }
 
-        int best = argmax(winRates);
+        // Run UCB1 rollouts for attack patterns
+        runAttackUCB1(expanded, game, player, possibleAttackers);
+
+        // Find best pattern
+        int bestIdx = 0;
+        double bestRate = -1;
+        for (int i = 0; i < expanded.size(); i++) {
+            if (expanded.get(i).winRate() > bestRate) {
+                bestRate = expanded.get(i).winRate();
+                bestIdx = i;
+            }
+        }
+
+        List<Integer> selected = expanded.get(bestIdx).attackIndices;
+        if (selected == null) selected = List.of();
+
+        // Per-creature win rates for training (sigmoid-style)
+        float[] creatureRates = new float[possibleAttackers.size()];
+        float allInRate = (float) expanded.get(1).winRate();
+        for (int i = 0; i < possibleAttackers.size(); i++) {
+            float indivRate = (float) expanded.get(2 + i).winRate();
+            creatureRates[i] = Math.max(indivRate, allInRate);
+        }
+
         totalDecisions++;
 
-        List<Integer> result;
-        if (best == 0) {
-            result = List.of();
-        } else if (best == 1) {
-            result = allIn;
-        } else {
-            result = List.of(best - 2);
+        // Log
+        StringBuilder sb = new StringBuilder("MCTS_ATTACK: ");
+        for (Candidate c : expanded) {
+            sb.append(String.format("%s:%d/%d(%.0f%%) ",
+                    c.label, c.wins, c.visits, c.winRate() * 100));
         }
+        System.out.println(sb);
+        System.out.flush();
 
-        Logger.info("MCTS_ATTACK: n={} best_pattern={} selected={} rates={}",
-                possibleAttackers.size(), best, result,
-                formatRates(winRates));
-
-        return result;
+        return new MCTSResult(bestIdx, creatureRates, (float) bestRate);
     }
 
-    /**
-     * Evaluate target candidates via rollouts.
-     * @return index of best target
-     */
-    public int decideTarget(Game game, Player player,
-                            List<GameEntity> targets,
-                            SpellAbility sourceSpell) {
-        if (targets.isEmpty()) return 0;
-        if (targets.size() == 1) return 0;
+    // ── Target decisions (standalone, for non-priority targeting) ──
+
+    public MCTSResult decideTarget(Game game, Player player,
+                                   List<GameEntity> targets,
+                                   SpellAbility sourceSpell) {
+        if (targets.size() <= 1) {
+            return new MCTSResult(0, new float[]{1f}, 1f);
+        }
+
+        List<Candidate> expanded = new ArrayList<>();
+        for (GameEntity t : targets) {
+            String name = t instanceof Card ? ((Card) t).getName() : "Player";
+            expanded.add(new Candidate(sourceSpell, t, name));
+        }
+
+        runUCB1(expanded, game, player);
 
         float[] winRates = new float[targets.size()];
-
-        for (int t = 0; t < targets.size(); t++) {
-            int wins = 0;
-            for (int r = 0; r < rolloutsPerCandidate; r++) {
-                if (rolloutWithTarget(game, player, sourceSpell,
-                        targets.get(t))) {
-                    wins++;
-                }
-                totalRollouts++;
-            }
-            winRates[t] = (float) wins / rolloutsPerCandidate;
+        for (int i = 0; i < expanded.size(); i++) {
+            winRates[i] = (float) expanded.get(i).winRate();
         }
 
         int best = argmax(winRates);
         totalDecisions++;
+        return new MCTSResult(best, winRates, winRates[best]);
+    }
 
-        Logger.info("MCTS_TARGET: n={} best={} rates={}",
-                targets.size(), best, formatRates(winRates));
+    // ── UCB1 rollout allocation ──
 
-        return best;
+    /**
+     * Run rollouts allocated by UCB1. Each candidate gets at least 1 rollout,
+     * then remaining budget goes to the candidate with highest UCB1 score.
+     */
+    private void runUCB1(List<Candidate> candidates,
+                         Game game, Player player) {
+        int n = candidates.size();
+        int budget = Math.max(rolloutBudget, n); // at least 1 per candidate
+        int spent = 0;
+
+        // Phase 1: one rollout per candidate
+        for (Candidate c : candidates) {
+            boolean won = (c.target != null)
+                    ? rolloutWithTarget(game, player, c.spell, c.target)
+                    : rollout(game, player, c.spell);
+            c.visits++;
+            if (won) c.wins++;
+            spent++;
+            totalRollouts++;
+        }
+
+        // Phase 2: UCB1 allocation for remaining budget
+        while (spent < budget) {
+            // Select candidate with highest UCB1
+            Candidate best = null;
+            double bestUcb = Double.NEGATIVE_INFINITY;
+            for (Candidate c : candidates) {
+                double ucb = c.ucb1(spent);
+                if (ucb > bestUcb) {
+                    bestUcb = ucb;
+                    best = c;
+                }
+            }
+            if (best == null) break;
+
+            boolean won = (best.target != null)
+                    ? rolloutWithTarget(game, player, best.spell, best.target)
+                    : rollout(game, player, best.spell);
+            best.visits++;
+            if (won) best.wins++;
+            spent++;
+            totalRollouts++;
+        }
     }
 
     /**
-     * Core rollout: copy game, optionally apply a spell, play to completion.
-     * @return true if player won
+     * UCB1 rollout allocation for attack patterns.
+     */
+    private void runAttackUCB1(List<Candidate> candidates,
+                                Game game, Player player,
+                                List<Card> possibleAttackers) {
+        int n = candidates.size();
+        int budget = Math.max(rolloutBudget, n);
+        int spent = 0;
+
+        // Phase 1: one per candidate
+        for (Candidate c : candidates) {
+            boolean won = rolloutAttackPattern(game, player,
+                    possibleAttackers, c.attackIndices);
+            c.visits++;
+            if (won) c.wins++;
+            spent++;
+            totalRollouts++;
+        }
+
+        // Phase 2: UCB1
+        while (spent < budget) {
+            Candidate best = null;
+            double bestUcb = Double.NEGATIVE_INFINITY;
+            for (Candidate c : candidates) {
+                double ucb = c.ucb1(spent);
+                if (ucb > bestUcb) {
+                    bestUcb = ucb;
+                    best = c;
+                }
+            }
+            if (best == null) break;
+
+            boolean won = rolloutAttackPattern(game, player,
+                    possibleAttackers, best.attackIndices);
+            best.visits++;
+            if (won) best.wins++;
+            spent++;
+            totalRollouts++;
+        }
+    }
+
+    // ── Rollout implementations ──
+
+    /**
+     * Rollout for a non-targeted spell (or pass).
+     * Uses GameSimulator to properly apply the action.
      */
     private boolean rollout(Game origGame, Player origPlayer,
                             SpellAbility origSa) {
@@ -174,38 +389,21 @@ public class MCTSDecisionMaker {
         try {
             Random origRandom = MyRandom.getRandom();
             MyRandom.setRandom(new Random(rng.nextLong()));
-
             try {
-                GameCopier copier = new GameCopier(origGame);
-                Game simGame = copier.makeCopy();
-                Player simPlayer = (Player) copier.find(origPlayer);
-
-                // Apply the action if not pass
+                SimulationController ctrl = new SimulationController(
+                        new GameStateEvaluator.Score(0));
+                GameSimulator simulator = new GameSimulator(
+                        ctrl, origGame, origPlayer, null);
                 if (origSa != null) {
-                    SpellAbility simSa = findSaInCopy(copier, origSa, simGame);
-                    if (simSa != null) {
-                        simSa.setActivatingPlayer(simPlayer);
-                        ComputerUtil.handlePlayingSpellAbility(simPlayer, simSa, null);
-                        GameSimulator.resolveStack(simGame,
-                                getOpponent(simGame, simPlayer));
-                    }
+                    simulator.simulateSpellAbility(origSa);
                 }
 
-                // Play to completion with timeout
-                if (!simGame.isGameOver()) {
-                    if (!runWithTimeout(() ->
-                            simGame.getPhaseHandler().mainGameLoop(),
-                            rolloutTimeoutSec)) {
-                        return false;
-                    }
-                }
+                Game simGame = simulator.getSimulatedGameState();
+                disableSimulation(simGame);
+                Player simPlayer = (Player) simulator.getGameCopier()
+                        .find(origPlayer);
 
-                if (simGame.getOutcome() == null || simGame.getOutcome().isDraw()) {
-                    return false;
-                }
-
-                return simGame.getOutcome().isWinner(
-                        simPlayer.getRegisteredPlayer());
+                return playToCompletion(simGame, simPlayer);
             } finally {
                 MyRandom.setRandom(origRandom);
             }
@@ -215,138 +413,140 @@ public class MCTSDecisionMaker {
     }
 
     /**
-     * Rollout with a specific attack pattern applied.
-     */
-    private float rolloutAttackPattern(Game origGame, Player origPlayer,
-                                        List<Card> possibleAttackers,
-                                        List<Integer> attackerIndices) {
-        int wins = 0;
-        for (int r = 0; r < rolloutsPerCandidate; r++) {
-            Random origRandom = MyRandom.getRandom();
-            MyRandom.setRandom(new Random(rng.nextLong()));
-            try {
-                GameCopier copier = new GameCopier(origGame);
-                Game simGame = copier.makeCopy();
-                Player simPlayer = (Player) copier.find(origPlayer);
-                GameEntity defender = simPlayer.getWeakestOpponent();
-
-                if (defender != null) {
-                    Combat combat = simGame.getCombat();
-                    if (combat == null) {
-                        combat = new Combat(simPlayer);
-                        simGame.getPhaseHandler().setCombat(combat);
-                    }
-                    for (int idx : attackerIndices) {
-                        if (idx >= 0 && idx < possibleAttackers.size()) {
-                            Card origCard = possibleAttackers.get(idx);
-                            Card simCard = (Card) copier.find(origCard);
-                            if (simCard != null
-                                    && CombatUtil.canAttack(simCard, defender)) {
-                                combat.addAttacker(simCard, defender);
-                            }
-                        }
-                    }
-                }
-
-                // Play to completion
-                if (!simGame.isGameOver()) {
-                    if (!runWithTimeout(() ->
-                            simGame.getPhaseHandler().mainGameLoop(),
-                            rolloutTimeoutSec)) {
-                        totalRollouts++;
-                        continue;
-                    }
-                }
-
-                if (simGame.getOutcome() != null
-                        && !simGame.getOutcome().isDraw()
-                        && simGame.getOutcome().isWinner(
-                            simPlayer.getRegisteredPlayer())) {
-                    wins++;
-                }
-            } finally {
-                MyRandom.setRandom(origRandom);
-            }
-            totalRollouts++;
-        }
-        return (float) wins / rolloutsPerCandidate;
-    }
-
-    /**
-     * Rollout with a specific target for the current spell.
+     * Rollout for a targeted spell with a specific target.
+     * Temporarily sets target on original SA for GameSimulator to copy.
      */
     private boolean rolloutWithTarget(Game origGame, Player origPlayer,
                                        SpellAbility origSa,
                                        GameEntity target) {
+        if (origSa == null) return rollout(origGame, origPlayer, null);
+
+        long t0 = System.currentTimeMillis();
         Random origRandom = MyRandom.getRandom();
         MyRandom.setRandom(new Random(rng.nextLong()));
+
+        // Save and replace targets
+        List<GameObject> savedTargets = new ArrayList<>();
+        for (Object t : origSa.getTargets()) {
+            if (t instanceof GameObject) savedTargets.add((GameObject) t);
+        }
+
+        try {
+            origSa.resetTargets();
+            origSa.getTargets().add(target);
+
+            SimulationController ctrl = new SimulationController(
+                    new GameStateEvaluator.Score(0));
+            GameSimulator simulator = new GameSimulator(
+                    ctrl, origGame, origPlayer, null);
+            simulator.simulateSpellAbility(origSa);
+
+            Game simGame = simulator.getSimulatedGameState();
+            disableSimulation(simGame);
+            Player simPlayer = (Player) simulator.getGameCopier()
+                    .find(origPlayer);
+
+            return playToCompletion(simGame, simPlayer);
+        } catch (Exception e) {
+            return false;
+        } finally {
+            // Restore original targets
+            origSa.resetTargets();
+            for (GameObject t : savedTargets) {
+                if (t instanceof GameEntity) {
+                    origSa.getTargets().add((GameEntity) t);
+                }
+            }
+            MyRandom.setRandom(origRandom);
+            totalRolloutTimeMs += System.currentTimeMillis() - t0;
+        }
+    }
+
+    /**
+     * Rollout for an attack pattern.
+     */
+    private boolean rolloutAttackPattern(Game origGame, Player origPlayer,
+                                          List<Card> possibleAttackers,
+                                          List<Integer> attackerIndices) {
         long t0 = System.currentTimeMillis();
+        Random origRandom = MyRandom.getRandom();
+        MyRandom.setRandom(new Random(rng.nextLong()));
         try {
             GameCopier copier = new GameCopier(origGame);
             Game simGame = copier.makeCopy();
+            disableSimulation(simGame);
             Player simPlayer = (Player) copier.find(origPlayer);
+            GameEntity defender = simPlayer.getWeakestOpponent();
 
-            if (origSa != null) {
-                SpellAbility simSa = findSaInCopy(copier, origSa, simGame);
-                if (simSa != null) {
-                    simSa.setActivatingPlayer(simPlayer);
-                    // Set the target
-                    simSa.resetTargets();
-                    GameObject simTarget = copier.find(target);
-                    if (simTarget instanceof GameEntity) {
-                        simSa.getTargets().add((GameEntity) simTarget);
+            if (defender != null && attackerIndices != null) {
+                Combat combat = simGame.getCombat();
+                if (combat == null) {
+                    combat = new Combat(simPlayer);
+                    simGame.getPhaseHandler().setCombat(combat);
+                }
+                for (int idx : attackerIndices) {
+                    if (idx >= 0 && idx < possibleAttackers.size()) {
+                        Card simCard = (Card) copier.find(
+                                possibleAttackers.get(idx));
+                        if (simCard != null
+                                && CombatUtil.canAttack(simCard, defender)) {
+                            combat.addAttacker(simCard, defender);
+                        }
                     }
-                    ComputerUtil.handlePlayingSpellAbility(simPlayer, simSa, null);
-                    GameSimulator.resolveStack(simGame,
-                            getOpponent(simGame, simPlayer));
                 }
             }
 
-            if (!simGame.isGameOver()) {
-                if (!runWithTimeout(() ->
-                        simGame.getPhaseHandler().mainGameLoop(),
-                        rolloutTimeoutSec)) {
-                    return false;
-                }
-            }
-
-            if (simGame.getOutcome() == null || simGame.getOutcome().isDraw()) {
-                return false;
-            }
-            return simGame.getOutcome().isWinner(
-                    simPlayer.getRegisteredPlayer());
+            return playToCompletion(simGame, simPlayer);
         } finally {
             MyRandom.setRandom(origRandom);
             totalRolloutTimeMs += System.currentTimeMillis() - t0;
         }
     }
 
-    // ── Helpers ──
-
-    private SpellAbility findSaInCopy(GameCopier copier, SpellAbility origSa,
-                                       Game simGame) {
-        Card origCard = origSa.getHostCard();
-        if (origCard == null) return null;
-        Card simCard = (Card) copier.find(origCard);
-        if (simCard == null) return null;
-
-        // Try to find matching SA on the copied card
-        SpellAbility fallback = null;
-        for (SpellAbility sa : simCard.getAllSpellAbilities()) {
-            if (fallback == null) fallback = sa;
-            if (sa.getApi() == origSa.getApi()
-                    && Objects.equals(sa.getDescription(), origSa.getDescription())) {
-                return sa;
+    /**
+     * Play a copied game to completion and return whether our player won.
+     */
+    private boolean playToCompletion(Game simGame, Player simPlayer) {
+        if (!simGame.isGameOver()) {
+            if (!runWithTimeout(() ->
+                    simGame.getPhaseHandler().mainGameLoop(),
+                    rolloutTimeoutSec)) {
+                return false;
             }
         }
-        return fallback;
+        if (simGame.getOutcome() == null || simGame.getOutcome().isDraw()) {
+            return false;
+        }
+        return simGame.getOutcome().isWinner(
+                simPlayer.getRegisteredPlayer());
     }
 
-    private Player getOpponent(Game game, Player player) {
+    // ── Helpers ──
+
+    private static void disableSimulation(Game game) {
         for (Player p : game.getPlayers()) {
-            if (p != player) return p;
+            if (p.getController() instanceof PlayerControllerAi) {
+                ((PlayerControllerAi) p.getController())
+                        .setUseSimulation(false);
+            }
         }
-        return null;
+        game.AI_TIMEOUT = 2;
+    }
+
+    private static boolean runWithTimeout(Runnable task, int timeoutSec) {
+        ExecutorService exec = Executors.newSingleThreadExecutor();
+        Future<?> future = exec.submit(task);
+        try {
+            future.get(timeoutSec, TimeUnit.SECONDS);
+            return true;
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            return false;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            exec.shutdownNow();
+        }
     }
 
     private static int argmax(float[] arr) {
@@ -371,32 +571,6 @@ public class MCTSDecisionMaker {
         }
         sb.append("]");
         return sb.toString();
-    }
-
-    private void logStats() {
-        double avgMs = totalRollouts > 0
-                ? (double) totalRolloutTimeMs / totalRollouts : 0;
-        Logger.info("MCTS_STATS: decisions={} rollouts={} avg={:.0f}ms/rollout",
-                totalDecisions, totalRollouts, avgMs);
-    }
-
-    /**
-     * Run a task with a timeout. Returns true if completed, false if timed out.
-     */
-    private static boolean runWithTimeout(Runnable task, int timeoutSec) {
-        ExecutorService exec = Executors.newSingleThreadExecutor();
-        Future<?> future = exec.submit(task);
-        try {
-            future.get(timeoutSec, TimeUnit.SECONDS);
-            return true;
-        } catch (TimeoutException e) {
-            future.cancel(true);
-            return false;
-        } catch (Exception e) {
-            return false;
-        } finally {
-            exec.shutdownNow();
-        }
     }
 
     public int getTotalDecisions() { return totalDecisions; }

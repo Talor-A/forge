@@ -36,7 +36,7 @@ public class RLConfig {
     private double gamma = 0.999;
 
     // MCTS settings (ExIt)
-    private int mctsRollouts = 5;
+    private int mctsRollouts = 30; // total rollout budget per decision (UCB1-allocated)
 
     public String getGrpcHost() { return grpcHost; }
     public void setGrpcHost(String grpcHost) { this.grpcHost = grpcHost; }
