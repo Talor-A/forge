@@ -136,6 +136,19 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                 }
 
                 if (!chosen.isTargetNumberValid()) return null;
+
+                // Record MCTS target decision with per-target win rates
+                List<GameEntity> targetCands = mcts.getLastTargetCandidates();
+                float[] targetWR = mcts.getLastTargetWinRates();
+                float[] targetVP = mcts.getLastTargetVisitProps();
+                if (targetCands != null && targetWR != null) {
+                    GameEntity chosenTarget = mcts.getChosenTarget(idx);
+                    int chosenTargetIdx = targetCands.indexOf(chosenTarget);
+                    rl.recordMCTSTarget(chosen, targetCands,
+                            chosenTargetIdx >= 0 ? chosenTargetIdx : 0,
+                            targetWR, targetVP,
+                            mctsResult.getValueEstimate());
+                }
             }
 
             List<SpellAbility> result = new ArrayList<>();

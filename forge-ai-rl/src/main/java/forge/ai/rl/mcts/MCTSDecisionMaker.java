@@ -38,6 +38,10 @@ public class MCTSDecisionMaker {
     private final int rolloutTimeoutSec; // timeout per individual rollout
     private final Random rng;
     private final Map<Integer, GameEntity> chosenTargets = new HashMap<>();
+    // Per-target MCTS results for the chosen spell (for recording)
+    private List<GameEntity> lastTargetCandidates = null;
+    private float[] lastTargetWinRates = null;
+    private float[] lastTargetVisitProps = null;
 
     // Stats
     private int totalDecisions = 0;
@@ -107,6 +111,9 @@ public class MCTSDecisionMaker {
         }
 
         chosenTargets.clear();
+        lastTargetCandidates = null;
+        lastTargetWinRates = null;
+        lastTargetVisitProps = null;
 
         // Build expanded candidate list: (spell, target) pairs
         List<Candidate> expanded = new ArrayList<>();
@@ -184,6 +191,39 @@ public class MCTSDecisionMaker {
         int best = argmax(winRates);
         totalDecisions++;
 
+        // Extract per-target results for the chosen spell (if targeted)
+        if (best < candidates.size()) {
+            SpellAbility bestSa = candidates.get(best);
+            if (bestSa.usesTargeting() && bestSa.getTargetRestrictions() != null) {
+                List<GameEntity> targets = bestSa.getTargetRestrictions()
+                        .getAllCandidates(bestSa, true);
+                if (targets.size() > 1) {
+                    lastTargetCandidates = targets;
+                    lastTargetWinRates = new float[targets.size()];
+                    lastTargetVisitProps = new float[targets.size()];
+                    int targetTotalVisits = 0;
+                    // Find expanded candidates for this spell and map to targets
+                    for (int e = 0; e < expanded.size(); e++) {
+                        if (origIndex.get(e) == best) {
+                            Candidate c = expanded.get(e);
+                            int tIdx = targets.indexOf(c.target);
+                            if (tIdx >= 0) {
+                                lastTargetWinRates[tIdx] = (float) c.winRate();
+                                lastTargetVisitProps[tIdx] = c.visits;
+                                targetTotalVisits += c.visits;
+                            }
+                        }
+                    }
+                    // Normalize visit props
+                    if (targetTotalVisits > 0) {
+                        for (int t = 0; t < lastTargetVisitProps.length; t++) {
+                            lastTargetVisitProps[t] /= targetTotalVisits;
+                        }
+                    }
+                }
+            }
+        }
+
         // Log
         String label = (best < candidates.size())
                 ? cardName(candidates.get(best))
@@ -211,6 +251,19 @@ public class MCTSDecisionMaker {
      */
     public GameEntity getChosenTarget(int candidateIdx) {
         return chosenTargets.get(candidateIdx);
+    }
+
+    /** Per-target candidates for the last targeted spell evaluated. */
+    public List<GameEntity> getLastTargetCandidates() {
+        return lastTargetCandidates;
+    }
+    /** Per-target win rates from MCTS for recording. */
+    public float[] getLastTargetWinRates() {
+        return lastTargetWinRates;
+    }
+    /** Per-target visit proportions from MCTS for recording. */
+    public float[] getLastTargetVisitProps() {
+        return lastTargetVisitProps;
     }
 
     // ── Attack decisions ──

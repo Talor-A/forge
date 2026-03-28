@@ -678,6 +678,47 @@ public class RLController {
         cachedCandidateFeatures = null;
     }
 
+    /**
+     * Record a target decision made by MCTS with per-target win rates.
+     */
+    public void recordMCTSTarget(SpellAbility spell, List<GameEntity> targets,
+                                  int selectedTargetIdx,
+                                  float[] targetWinRates, float[] targetVisitProps,
+                                  float valueEstimate) {
+        if (trajectoryRecorder == null) return;
+        try {
+            GameStateFeatures gameState = stateEncoder.encode(game, player);
+            List<float[]> candidateFeats = new ArrayList<>();
+            for (GameEntity entity : targets) {
+                if (entity instanceof forge.game.card.Card) {
+                    candidateFeats.add(forge.ai.rl.features.CardFeatures.encode(
+                            (forge.game.card.Card) entity, player));
+                } else {
+                    float[] playerFeats = ActionEncoder.encodeTarget(entity);
+                    float[] padded = new float[256];
+                    System.arraycopy(playerFeats, 0, padded, 0,
+                            Math.min(playerFeats.length, 256));
+                    candidateFeats.add(padded);
+                }
+            }
+
+            String spellName = spell.getHostCard() != null
+                    ? spell.getHostCard().getName() : "?";
+            DecisionContext context = new DecisionContext(
+                    DecisionType.TARGET_SELECTION, gameState, candidateFeats,
+                    1, 1, "mcts_target_" + spellName,
+                    ActionEncoder.encode(spell));
+
+            DecisionResult result = new DecisionResult(
+                    List.of(selectedTargetIdx), targetWinRates,
+                    targetVisitProps, valueEstimate, false);
+
+            recordDecision(context, result);
+        } catch (Exception e) {
+            // Never crash
+        }
+    }
+
     // --- Internal helpers ---
 
     private DecisionResult requestDecision(DecisionContext context) {
