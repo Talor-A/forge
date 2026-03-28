@@ -904,9 +904,11 @@ def _load_fonts():
     return font_sm, font_md, font_lg
 
 
-def draw_card_image(info, highlight=None, win_rate=None):
+def draw_card_image(info, highlight=None, win_rate=None,
+                    visit_prop=None):
     """Draw a card as PIL image in MTG card style.
-    win_rate: MCTS rollout win rate (0-1) or None."""
+    win_rate: MCTS rollout win rate (0-1) or None.
+    visit_prop: MCTS visit proportion (0-1) or None."""
     if not HAS_PIL:
         return None
 
@@ -1118,15 +1120,25 @@ def draw_card_image(info, highlight=None, win_rate=None):
         draw.text((7, CARD_H-17), str(cmc),
                   fill="#ffffff", font=font_lg)
 
-    # MCTS win rate overlay
-    if win_rate is not None:
-        wr_color = _wr_color(win_rate)
-        draw.rectangle([CARD_W-42, CARD_H-18,
+    # MCTS overlay
+    if win_rate is not None or visit_prop is not None:
+        oy = CARD_H - 18
+        if visit_prop is not None and win_rate is not None:
+            oy = CARD_H - 28
+        draw.rectangle([CARD_W-52, oy,
                         CARD_W-4, CARD_H-4],
                        fill="#000000")
-        draw.text((CARD_W-40, CARD_H-17),
-                  f"{win_rate*100:.0f}%",
-                  fill=wr_color, font=font_lg)
+        ty = oy + 1
+        if win_rate is not None:
+            wr_color = _wr_color(win_rate)
+            draw.text((CARD_W-50, ty),
+                      f"Q:{win_rate*100:.0f}%",
+                      fill=wr_color, font=font_sm)
+            ty += 10
+        if visit_prop is not None:
+            draw.text((CARD_W-50, ty),
+                      f"V:{visit_prop*100:.0f}%",
+                      fill="#89b4fa", font=font_sm)
 
     return img
 
@@ -1150,9 +1162,11 @@ def _wr_color(wr):
 
 
 def draw_action_card_image(info, is_chosen=False,
-                           is_pass=False, win_rate=None):
+                           is_pass=False, win_rate=None,
+                           visit_prop=None):
     """Draw a priority action candidate as a card.
-    win_rate: MCTS rollout win rate (0-1) or None."""
+    win_rate: MCTS rollout win rate (0-1) or None.
+    visit_prop: MCTS visit proportion (0-1) or None."""
     if not HAS_PIL:
         return None
 
@@ -1171,17 +1185,24 @@ def draw_action_card_image(info, is_chosen=False,
                 "DejaVuSansMono-Bold.ttf", 14)
         except (IOError, OSError):
             font = ImageFont.load_default()
-        d.text((ACTION_W//2, ACTION_H//2 - 14), "PASS",
+        d.text((ACTION_W//2, ACTION_H//2 - 18), "PASS",
                fill="#f9e2af" if is_chosen else "#6c7086",
                font=font, anchor='mt')
+        y_off = -2
         if win_rate is not None:
             wr_color = (_wr_color(win_rate)
                         if win_rate > 0 else "#6c7086")
-            d.text((ACTION_W//2, ACTION_H//2 + 2),
-                   f"{win_rate*100:.0f}%",
+            d.text((ACTION_W//2, ACTION_H//2 + y_off),
+                   f"Q:{win_rate*100:.0f}%",
                    fill=wr_color, font=font, anchor='mt')
+            y_off += 14
+        if visit_prop is not None:
+            d.text((ACTION_W//2, ACTION_H//2 + y_off),
+                   f"V:{visit_prop*100:.0f}%",
+                   fill="#89b4fa", font=font, anchor='mt')
+            y_off += 14
         if is_chosen:
-            d.text((ACTION_W//2, ACTION_H//2 + 18),
+            d.text((ACTION_W//2, ACTION_H//2 + y_off),
                    "CHOSEN",
                    fill="#a6e3a1", font=font, anchor='mt')
         return img
@@ -1283,12 +1304,19 @@ def draw_action_card_image(info, is_chosen=False,
         d.text((bx+3, by+1), pt,
                fill="#ffffff", font=font_lg)
 
-    # Win rate from MCTS rollouts
+    # MCTS stats
+    stat_y = ACTION_H - 14
+    if visit_prop is not None:
+        d.text((4, stat_y - 10),
+               f"V:{visit_prop*100:.0f}%",
+               fill="#89b4fa", font=font_sm)
+        stat_y -= 10
     if win_rate is not None:
         wr_color = _wr_color(win_rate)
-        d.text((4, ACTION_H - 28),
-               f"WR: {win_rate*100:.0f}%",
-               fill=wr_color, font=font_lg)
+        d.text((4, stat_y - 10),
+               f"Q:{win_rate*100:.0f}%",
+               fill=wr_color, font=font_sm)
+        stat_y -= 10
 
     # "CHOSEN" marker
     if is_chosen:
@@ -1352,6 +1380,8 @@ def load_samples(data_dir, max_samples=500,
                         "selectedIndices", []),
                     "action_probs": rec.get(
                         "actionProbabilities", []),
+                    "visit_props": rec.get(
+                        "visitProportions", []),
                     "value_estimate": rec.get(
                         "valueEstimate", 0.0),
                     "won": won,
@@ -1990,19 +2020,23 @@ class GameStateViewer:
         for i in selected:
             cand_highlights[i] = "attack"
 
-        # Per-creature MCTS win rates for attack decisions
+        # Per-creature MCTS win rates and visit props for attack decisions
         creature_wr = None
+        creature_vp = None
         dt = s.get("type", "")
         if dt == "DECLARE_ATTACKERS":
             action_probs = s.get("action_probs", [])
+            visit_props = s.get("visit_props", [])
             if action_probs:
                 creature_wr = action_probs
+            if visit_props:
+                creature_vp = visit_props
 
         opp_creature_imgs = self._pre_render_cards(opp_creatures)
         opp_land_imgs = self._pre_render_cards(opp_lands)
         my_creature_imgs = self._pre_render_cards(
             my_creatures, candidate_highlights=cand_highlights,
-            win_rates=creature_wr)
+            win_rates=creature_wr, visit_props=creature_vp)
         my_land_imgs = self._pre_render_cards(my_lands)
         hand_imgs = self._pre_render_cards(hand)
         stack_imgs = self._pre_render_cards(
@@ -2026,7 +2060,7 @@ class GameStateViewer:
         self._predict(s)
 
     def _pre_render_cards(self, cards, candidate_highlights=None,
-                          win_rates=None):
+                          win_rates=None, visit_props=None):
         """Render card images off-screen, return list of PIL images."""
         if not HAS_PIL or not cards:
             return []
@@ -2038,8 +2072,12 @@ class GameStateViewer:
             wr = None
             if win_rates and i < len(win_rates):
                 wr = win_rates[i]
+            vp = None
+            if visit_props and i < len(visit_props):
+                vp = visit_props[i]
             images.append(draw_card_image(info, highlight=hl,
-                                          win_rate=wr))
+                                          win_rate=wr,
+                                          visit_prop=vp))
         return images
 
     def _pre_render_priority(self, s):
@@ -2052,6 +2090,7 @@ class GameStateViewer:
             candidates = s.get("candidates", [])
             selected = set(s.get("selected", []))
             action_probs = s.get("action_probs", [])
+            visit_props = s.get("visit_props", [])
             images = []
             for i, cf in enumerate(candidates):
                 if _is_player_target(cf):
@@ -2064,14 +2103,18 @@ class GameStateViewer:
                 hl = "attack" if i in selected else None
                 wr = (action_probs[i]
                       if i < len(action_probs) else None)
+                vp = (visit_props[i]
+                      if i < len(visit_props) else None)
                 images.append(draw_card_image(
-                    info, highlight=hl, win_rate=wr))
+                    info, highlight=hl, win_rate=wr,
+                    visit_prop=vp))
             return images if images else None
         if dt != "PRIORITY_ACTION":
             return None
         candidates = s.get("candidates", [])
         selected = s.get("selected", [])
         action_probs = s.get("action_probs", [])
+        visit_props = s.get("visit_props", [])
         sel_idx = selected[0] if selected else -1
         images = []
         for i, cf in enumerate(candidates):
@@ -2081,11 +2124,13 @@ class GameStateViewer:
                 continue
             is_chosen = (i == sel_idx)
             is_pass = info.get("is_pass", False)
-            win_rate = (action_probs[i]
-                        if i < len(action_probs) else None)
+            wr = (action_probs[i]
+                  if i < len(action_probs) else None)
+            vp = (visit_props[i]
+                  if i < len(visit_props) else None)
             images.append(draw_action_card_image(
                 info, is_chosen=is_chosen, is_pass=is_pass,
-                win_rate=win_rate))
+                win_rate=wr, visit_prop=vp))
         return images
 
     def _apply_cards(self, frame, images, cards, photos_out,
@@ -2244,17 +2289,39 @@ class GameStateViewer:
 
             # MCTS rollout info (ExIt trajectories)
             action_probs = s.get("action_probs", [])
+            visit_props = s.get("visit_props", [])
             mcts_value = s.get("value_estimate", 0.0)
-            if action_probs and any(
-                    p > 0 for p in action_probs):
-                lines.append("=== MCTS Rollout ===")
+            has_mcts = (action_probs and any(
+                p > 0 for p in action_probs)) or (
+                visit_props and any(
+                    p > 0 for p in visit_props))
+            if has_mcts:
+                lines.append("=== MCTS Search ===")
                 lines.append(
                     f"Value: {mcts_value:.1%} win rate")
-                for i, p in enumerate(action_probs):
+                lines.append("")
+                # Header
+                has_vp = bool(visit_props)
+                hdr = f"  {'':>4} {'WinRate':>8}"
+                if has_vp:
+                    hdr += f" {'Visits':>8}"
+                lines.append(hdr)
+                lines.append(f"  {'':>4} {'-------':>8}"
+                    + (f" {'-------':>8}" if has_vp
+                       else ""))
+                n = max(len(action_probs),
+                        len(visit_props))
+                for i in range(n):
                     marker = " <<" if i in s.get(
                         "selected", []) else ""
+                    wr = (f"{action_probs[i]*100:5.1f}%"
+                          if i < len(action_probs)
+                          else "    -")
+                    vp = ""
+                    if has_vp and i < len(visit_props):
+                        vp = f" {visit_props[i]*100:5.1f}%"
                     lines.append(
-                        f"  [{i}] {p*100:5.1f}%{marker}")
+                        f"  [{i}] {wr}{vp}{marker}")
                 lines.append("")
 
             lines.append(f"Win probability: {(value+1)/2:.0%}")
