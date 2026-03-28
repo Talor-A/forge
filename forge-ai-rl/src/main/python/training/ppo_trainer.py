@@ -66,22 +66,20 @@ GAE_GAMMA = 0.99  # must match value network training gamma
 GAE_LAMBDA = 0.95  # lower = trust per-step value deltas more, less terminal outcome influence
 
 
-def _compute_gae_returns(records, won):
+def _compute_gae_returns(records, won, shaping_coeff=0.0):
     """Compute per-decision discounted returns using GAE.
-    Uses intermediate rewards + terminal reward."""
+    Uses intermediate rewards (scaled by shaping_coeff) + terminal reward."""
     n = len(records)
     if n == 0:
         return []
 
     # Extract rewards and value estimates
-    # Intermediate shaping rewards (life/card/board deltas) are zeroed out —
-    # the value network already captures these from the full game state.
-    # Only terminal reward is used; GAE credit assignment relies on
-    # per-step value function deltas: delta_t = gamma * V(t+1) - V(t)
     rewards = np.zeros(n, dtype=np.float32)
     values = np.zeros(n, dtype=np.float32)
     for i, rec in enumerate(records):
         values[i] = rec.get('valueEstimate', 0.0)
+        if shaping_coeff > 0:
+            rewards[i] = shaping_coeff * rec.get('intermediateReward', 0.0)
 
     # Terminal reward on last step
     terminal = 1.0 if won else -1.0
@@ -105,7 +103,7 @@ def _compute_gae_returns(records, won):
     return list(zip(advantages, returns))
 
 
-def load_ppo_data(traj_dir):
+def load_ppo_data(traj_dir, shaping_coeff=0.0):
     """Load trajectory data for PPO training.
     Computes per-decision GAE advantages from intermediate rewards."""
     path = Path(traj_dir)
@@ -129,7 +127,7 @@ def load_ppo_data(traj_dir):
 
             # Parse all records first to compute GAE
             all_records = [json.loads(line) for line in lines[1:]]
-            gae_data = _compute_gae_returns(all_records, won)
+            gae_data = _compute_gae_returns(all_records, won, shaping_coeff=shaping_coeff)
 
             for rec_idx, rec in enumerate(all_records):
                 dt = rec.get('decisionType', '')
@@ -1019,14 +1017,94 @@ def run_games(n_games, traj_dir, mode='evaluate',
         progress_callback, log_callback, threads)
 
 
+def run_league_games(n_games, traj_dir, current_ports,
+                     opponent_ports, threads=16,
+                     progress_callback=None,
+                     log_callback=None,
+                     clean_traj=False):
+    """Run league play games: current model vs opponent model.
+    current_ports: list of ports serving current model
+    opponent_ports: list of ports serving opponent model
+    Returns (win_rate, stdout_lines)."""
+    os.makedirs(traj_dir, exist_ok=True)
+    if clean_traj:
+        for f in Path(traj_dir).glob('traj_*.jsonl'):
+            f.unlink()
+
+    if isinstance(current_ports, (list, tuple)):
+        port_str = ','.join(str(p) for p in current_ports)
+    else:
+        port_str = str(current_ports)
+    if isinstance(opponent_ports, (list, tuple)):
+        port2_str = ','.join(str(p) for p in opponent_ports)
+    else:
+        port2_str = str(opponent_ports)
+
+    cmd = _build_java_cmd(n_games, traj_dir, 'leagueplay',
+                          port_str, threads, heap='12g',
+                          port2_str=port2_str)
+    cwd = os.path.join(PROJECT_ROOT, 'forge-gui-desktop')
+
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+
+    stdout_lines = []
+    try:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            if log_callback:
+                log_callback(line.rstrip())
+            if progress_callback and 'Game ' in line:
+                try:
+                    parts = line.split('Game ')[1].split('/')
+                    done = int(parts[0])
+                    progress_callback(done, n_games)
+                except (IndexError, ValueError):
+                    pass
+    except Exception:
+        pass
+
+    proc.wait()
+
+    # Parse win rate from output
+    win_rate = None
+    for line in reversed(stdout_lines):
+        if 'current win rate:' in line.lower():
+            try:
+                pct = line.split('win rate:')[1].split('%')[0]
+                win_rate = float(pct.strip()) / 100.0
+            except (IndexError, ValueError):
+                pass
+            break
+
+    if win_rate is None:
+        # Count from trajectory files
+        wins = losses = 0
+        for f in Path(traj_dir).glob('traj_*.jsonl'):
+            try:
+                with open(f) as fh:
+                    header = json.loads(fh.readline())
+                if header.get('won', False):
+                    wins += 1
+                else:
+                    losses += 1
+            except Exception:
+                pass
+        total = wins + losses
+        win_rate = wins / total if total > 0 else 0.0
+
+    return win_rate, stdout_lines
+
+
 def _build_java_cmd(n_games, traj_dir, mode, port_str,
-                    threads, heap='3g'):
+                    threads, heap='3g', port2_str=None):
     """Build the Java command for a single process."""
     deck_args = []
     for d in DECKS:
         deck_args.extend(['-d', d])
 
-    return [
+    cmd = [
         'java', f'-Xmx{heap}',
         '-XX:+UseG1GC',
         '-XX:MaxGCPauseMillis=50',
@@ -1047,6 +1125,9 @@ def _build_java_cmd(n_games, traj_dir, mode, port_str,
         '-host', 'localhost',
         '-port', port_str,
     ]
+    if port2_str:
+        cmd.extend(['-port2', port2_str])
+    return cmd
 
 
 def _run_games_single(n_games, traj_dir, mode, port,
@@ -1302,6 +1383,10 @@ def main():
         help='Evaluation games per round')
     parser.add_argument('--port', type=int, default=0,
         help='Model server port (0=auto)')
+    parser.add_argument('--reward-shaping-coeff', type=float, default=0.0,
+        help='Initial coefficient for intermediate reward shaping (0=disabled)')
+    parser.add_argument('--reward-shaping-decay', type=float, default=0.95,
+        help='Per-round multiplicative decay for shaping coefficient')
     args = parser.parse_args()
 
     profile = auto_detect_profile()
@@ -1363,6 +1448,8 @@ def main():
           '──────────┼─────────────┼────────────┼'
           '─────────┼─────────┼───────', flush=True)
 
+    shaping_coeff = args.reward_shaping_coeff
+
     for rnd in range(1, args.rounds + 1):
         t0 = time.time()
 
@@ -1381,7 +1468,8 @@ def main():
 
         # ── Step 2: Load trajectories ──
         attack_data, block_data, priority_data, \
-            value_data = load_ppo_data(args.traj_dir)
+            value_data = load_ppo_data(args.traj_dir,
+                shaping_coeff=shaping_coeff)
 
         if not attack_data and not block_data \
                 and not priority_data:
@@ -1550,6 +1638,12 @@ def main():
             f' {eval_wr:>6.1%} │ {status}'
             f'  ({elapsed:.0f}s)',
             flush=True)
+
+        # Decay reward shaping
+        if shaping_coeff > 0:
+            shaping_coeff *= args.reward_shaping_decay
+            print(f'  Reward shaping coeff: {shaping_coeff:.4f}',
+                  flush=True)
 
     # Final summary
     print(flush=True)
