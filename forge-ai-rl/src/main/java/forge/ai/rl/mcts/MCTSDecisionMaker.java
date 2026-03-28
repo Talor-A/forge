@@ -103,7 +103,7 @@ public class MCTSDecisionMaker {
     public MCTSResult decidePriority(Game game, Player player,
                                      List<SpellAbility> candidates) {
         if (candidates.isEmpty()) {
-            return new MCTSResult(0, new float[]{1f}, 1f);
+            return new MCTSResult(0, new float[]{1f}, new float[]{1f}, 1f);
         }
 
         chosenTargets.clear();
@@ -147,11 +147,19 @@ public class MCTSDecisionMaker {
         // Aggregate results back to original candidate indices
         int nOriginal = candidates.size() + 1;
         float[] winRates = new float[nOriginal];
+        int[] totalVisitsPerOrig = new int[nOriginal];
         int[] bestVisits = new int[nOriginal];
+
+        // Total visits across all expanded candidates
+        int totalAllVisits = 0;
+        for (Candidate c : expanded) totalAllVisits += c.visits;
 
         for (int e = 0; e < expanded.size(); e++) {
             Candidate cand = expanded.get(e);
             int orig = origIndex.get(e);
+
+            // Sum visits for this original candidate (across all targets)
+            totalVisitsPerOrig[orig] += cand.visits;
 
             // For targeted spells: keep the best target's rate
             if (cand.visits > bestVisits[orig]
@@ -165,6 +173,14 @@ public class MCTSDecisionMaker {
             }
         }
 
+        // Visit proportions (AlphaZero-style search policy)
+        float[] visitProps = new float[nOriginal];
+        if (totalAllVisits > 0) {
+            for (int i = 0; i < nOriginal; i++) {
+                visitProps[i] = (float) totalVisitsPerOrig[i] / totalAllVisits;
+            }
+        }
+
         int best = argmax(winRates);
         totalDecisions++;
 
@@ -175,8 +191,10 @@ public class MCTSDecisionMaker {
         StringBuilder sb = new StringBuilder();
         sb.append("MCTS_PRIORITY: n=").append(candidates.size());
         sb.append(" expanded=").append(expanded.size());
+        sb.append(" budget=").append(totalAllVisits);
         sb.append(" best=").append(best).append(" (").append(label).append(")");
         sb.append(" rates=").append(formatRates(winRates));
+        sb.append(" visits=").append(formatRates(visitProps));
         sb.append(" | ");
         for (Candidate c : expanded) {
             sb.append(String.format("%s:%d/%d(%.0f%%) ",
@@ -185,7 +203,7 @@ public class MCTSDecisionMaker {
         System.out.println(sb);
         System.out.flush();
 
-        return new MCTSResult(best, winRates, winRates[best]);
+        return new MCTSResult(best, winRates, visitProps, winRates[best]);
     }
 
     /**
@@ -204,7 +222,7 @@ public class MCTSDecisionMaker {
     public MCTSResult decideAttackers(Game game, Player player,
                                        List<Card> possibleAttackers) {
         if (possibleAttackers.isEmpty()) {
-            return new MCTSResult(0, new float[0], 0.5f);
+            return new MCTSResult(0, new float[0], new float[0], 0.5f);
         }
 
         List<Candidate> expanded = new ArrayList<>();
@@ -239,12 +257,20 @@ public class MCTSDecisionMaker {
         List<Integer> selected = expanded.get(bestIdx).attackIndices;
         if (selected == null) selected = List.of();
 
-        // Per-creature win rates for training (sigmoid-style)
+        // Per-creature win rates and visit proportions
         float[] creatureRates = new float[possibleAttackers.size()];
+        float[] creatureVisits = new float[possibleAttackers.size()];
         float allInRate = (float) expanded.get(1).winRate();
+        int totalVisits = 0;
+        for (Candidate c : expanded) totalVisits += c.visits;
         for (int i = 0; i < possibleAttackers.size(); i++) {
             float indivRate = (float) expanded.get(2 + i).winRate();
             creatureRates[i] = Math.max(indivRate, allInRate);
+            // Visit proportion: sum of all-in visits + individual visits
+            int creatureVisitCount = expanded.get(2 + i).visits
+                    + expanded.get(1).visits; // all-in includes this creature
+            creatureVisits[i] = totalVisits > 0
+                    ? (float) creatureVisitCount / totalVisits : 0;
         }
 
         totalDecisions++;
@@ -258,7 +284,8 @@ public class MCTSDecisionMaker {
         System.out.println(sb);
         System.out.flush();
 
-        return new MCTSResult(bestIdx, creatureRates, (float) bestRate);
+        return new MCTSResult(bestIdx, creatureRates, creatureVisits,
+                (float) bestRate);
     }
 
     // ── Target decisions (standalone, for non-priority targeting) ──
@@ -267,7 +294,7 @@ public class MCTSDecisionMaker {
                                    List<GameEntity> targets,
                                    SpellAbility sourceSpell) {
         if (targets.size() <= 1) {
-            return new MCTSResult(0, new float[]{1f}, 1f);
+            return new MCTSResult(0, new float[]{1f}, new float[]{1f}, 1f);
         }
 
         List<Candidate> expanded = new ArrayList<>();
@@ -285,7 +312,15 @@ public class MCTSDecisionMaker {
 
         int best = argmax(winRates);
         totalDecisions++;
-        return new MCTSResult(best, winRates, winRates[best]);
+        // Visit proportions for targets
+        float[] targetVisitProps = new float[targets.size()];
+        int totalVis = 0;
+        for (Candidate c : expanded) totalVis += c.visits;
+        for (int i = 0; i < expanded.size(); i++) {
+            targetVisitProps[i] = totalVis > 0
+                    ? (float) expanded.get(i).visits / totalVis : 0;
+        }
+        return new MCTSResult(best, winRates, targetVisitProps, winRates[best]);
     }
 
     // ── UCB1 rollout allocation ──

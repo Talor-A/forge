@@ -74,6 +74,7 @@ public class TrajectoryRecorder {
         record.candidateCount = context.getCandidateFeatures().size();
         record.selectedIndices = result.getSelectedIndices();
         record.actionProbabilities = result.getActionProbabilities();
+        record.visitProportions = result.getVisitProportions();
         record.valueEstimate = result.getValueEstimate();
         record.usedFallback = result.isUsedFallback();
 
@@ -175,7 +176,8 @@ public class TrajectoryRecorder {
         float[][] candidateFeatures;
         int candidateCount;
         List<Integer> selectedIndices;
-        float[] actionProbabilities;
+        float[] actionProbabilities;   // win rates (Q-values) per candidate
+        float[] visitProportions;      // visit fractions per candidate (search policy)
         float valueEstimate;
         boolean usedFallback;
         double intermediateReward;

@@ -904,8 +904,9 @@ def _load_fonts():
     return font_sm, font_md, font_lg
 
 
-def draw_card_image(info, highlight=None):
-    """Draw a card as PIL image in MTG card style."""
+def draw_card_image(info, highlight=None, win_rate=None):
+    """Draw a card as PIL image in MTG card style.
+    win_rate: MCTS rollout win rate (0-1) or None."""
     if not HAS_PIL:
         return None
 
@@ -1117,6 +1118,16 @@ def draw_card_image(info, highlight=None):
         draw.text((7, CARD_H-17), str(cmc),
                   fill="#ffffff", font=font_lg)
 
+    # MCTS win rate overlay
+    if win_rate is not None:
+        wr_color = _wr_color(win_rate)
+        draw.rectangle([CARD_W-42, CARD_H-18,
+                        CARD_W-4, CARD_H-4],
+                       fill="#000000")
+        draw.text((CARD_W-40, CARD_H-17),
+                  f"{win_rate*100:.0f}%",
+                  fill=wr_color, font=font_lg)
+
     return img
 
 
@@ -1294,9 +1305,9 @@ def load_samples(data_dir, max_samples=500,
     path = Path(data_dir)
     files = sorted(path.glob("traj_*.jsonl"))
     if rl_only:
-        # Only load RL player trajectories
+        # Only load RL/MCTS player trajectories
         files = [f for f in files
-                 if '_RL_' in f.name]
+                 if '_RL_' in f.name or '_MCTS_' in f.name]
     random.shuffle(files)
 
     samples = []
@@ -1359,6 +1370,7 @@ class GameStateViewer:
     # Viewing modes
     MODE_RL_REPLAY = "rl_replay"        # PPO trajectories — RL decisions at collection time
     MODE_HEURISTIC = "heuristic"        # Base trajectories — heuristic decisions
+    MODE_EXIT = "exit"                  # ExIt trajectories — MCTS search-improved decisions
 
     def __init__(self, root, samples, model, device,
                  model_path=None, data_dir=None):
@@ -1374,9 +1386,11 @@ class GameStateViewer:
         self._pending_show = None  # for buffered updates
 
         # Determine initial mode from data
+        has_exit = any(s.get("source") == "exit" for s in samples)
         has_rl = any(s.get("source") == "ppo" for s in samples)
-        has_heur = any(s.get("source") == "heuristic" for s in samples)
-        self.mode = self.MODE_RL_REPLAY if has_rl else self.MODE_HEURISTIC
+        self.mode = (self.MODE_EXIT if has_exit
+                     else self.MODE_RL_REPLAY if has_rl
+                     else self.MODE_HEURISTIC)
 
         root.title("MTG RL — Game State Visualizer")
         root.geometry("1500x950")
@@ -1558,20 +1572,28 @@ class GameStateViewer:
                  anchor="w").pack(fill=tk.X, padx=5)
 
     def _toggle_mode(self):
-        """Switch between RL Replay and Heuristic Analysis modes."""
-        if self.mode == self.MODE_RL_REPLAY:
-            self.mode = self.MODE_HEURISTIC
-        else:
-            self.mode = self.MODE_RL_REPLAY
+        """Cycle through viewing modes."""
+        modes = [self.MODE_EXIT, self.MODE_RL_REPLAY,
+                 self.MODE_HEURISTIC]
+        try:
+            idx = modes.index(self.mode)
+            self.mode = modes[(idx + 1) % len(modes)]
+        except ValueError:
+            self.mode = modes[0]
         self._apply_mode_filter()
         if self.samples:
             self._show()
 
     def _apply_mode_filter(self):
         """Filter samples to current mode and update mode indicator."""
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
             filtered = [s for s in self.all_samples
-                        if s.get("source") in ("ppo", "exit")]
+                        if s.get("source") == "exit"]
+            self.mode_v.set("ExIt MCTS")
+            self.mode_lbl.configure(fg="#cba6f7", bg="#2a2040")
+        elif self.mode == self.MODE_RL_REPLAY:
+            filtered = [s for s in self.all_samples
+                        if s.get("source") == "ppo"]
             self.mode_v.set("RL REPLAY")
             self.mode_lbl.configure(fg="#a6e3a1", bg="#2a3a2a")
         else:
@@ -1590,21 +1612,30 @@ class GameStateViewer:
 
     def _get_choice_label(self):
         """Label for the recorded choice based on mode."""
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
+            return "MCTS chose"
+        elif self.mode == self.MODE_RL_REPLAY:
             return "RL chose"
         else:
             return "Heuristic"
 
     def _get_compare_label(self):
         """Label for the model comparison based on mode."""
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
+            return "Current model"
+        elif self.mode == self.MODE_RL_REPLAY:
             return "Current model"
         else:
             return "Model would"
 
     def _mode_samples(self):
         """Get samples for the current mode."""
-        tag = "ppo" if self.mode == self.MODE_RL_REPLAY else "heuristic"
+        tag_map = {
+            self.MODE_EXIT: "exit",
+            self.MODE_RL_REPLAY: "ppo",
+            self.MODE_HEURISTIC: "heuristic",
+        }
+        tag = tag_map.get(self.mode, "heuristic")
         filtered = [s for s in self.all_samples
                     if s.get("source") == tag]
         return filtered if filtered else self.all_samples
@@ -1882,7 +1913,9 @@ class GameStateViewer:
             "BINARY_CHOICE": "BINARY",
         }
         self.type_v.set(type_labels.get(dt, dt))
-        self.info_v.set(s["info"])
+        source = s.get("source", "")
+        source_tag = f" [{source.upper()}]" if source else ""
+        self.info_v.set(s["info"] + source_tag)
         won = s["won"]
         self.outcome_v.set("WON" if won else "LOST")
         self.outcome_lbl.configure(fg="#a6e3a1" if won else "#f38ba8")
@@ -1957,10 +1990,19 @@ class GameStateViewer:
         for i in selected:
             cand_highlights[i] = "attack"
 
+        # Per-creature MCTS win rates for attack decisions
+        creature_wr = None
+        dt = s.get("type", "")
+        if dt == "DECLARE_ATTACKERS":
+            action_probs = s.get("action_probs", [])
+            if action_probs:
+                creature_wr = action_probs
+
         opp_creature_imgs = self._pre_render_cards(opp_creatures)
         opp_land_imgs = self._pre_render_cards(opp_lands)
         my_creature_imgs = self._pre_render_cards(
-            my_creatures, candidate_highlights=cand_highlights)
+            my_creatures, candidate_highlights=cand_highlights,
+            win_rates=creature_wr)
         my_land_imgs = self._pre_render_cards(my_lands)
         hand_imgs = self._pre_render_cards(hand)
         stack_imgs = self._pre_render_cards(
@@ -1983,7 +2025,8 @@ class GameStateViewer:
         # Model prediction
         self._predict(s)
 
-    def _pre_render_cards(self, cards, candidate_highlights=None):
+    def _pre_render_cards(self, cards, candidate_highlights=None,
+                          win_rates=None):
         """Render card images off-screen, return list of PIL images."""
         if not HAS_PIL or not cards:
             return []
@@ -1992,7 +2035,11 @@ class GameStateViewer:
             hl = None
             if candidate_highlights and i in candidate_highlights:
                 hl = candidate_highlights[i]
-            images.append(draw_card_image(info, highlight=hl))
+            wr = None
+            if win_rates and i < len(win_rates):
+                wr = win_rates[i]
+            images.append(draw_card_image(info, highlight=hl,
+                                          win_rate=wr))
         return images
 
     def _pre_render_priority(self, s):
@@ -2017,16 +2064,8 @@ class GameStateViewer:
                 hl = "attack" if i in selected else None
                 wr = (action_probs[i]
                       if i < len(action_probs) else None)
-                img = draw_card_image(info, highlight=hl)
-                # Overlay win rate if available
-                if img and wr is not None and HAS_PIL:
-                    d = ImageDraw.Draw(img)
-                    _, _, font_lg = _load_fonts()
-                    wr_color = _wr_color(wr)
-                    d.text((4, img.height - 16),
-                           f"WR:{wr*100:.0f}%",
-                           fill=wr_color, font=font_lg)
-                images.append(img)
+                images.append(draw_card_image(
+                    info, highlight=hl, win_rate=wr))
             return images if images else None
         if dt != "PRIORITY_ACTION":
             return None
@@ -2158,7 +2197,9 @@ class GameStateViewer:
                                     fg="#a6e3a1")
 
     def _predict(self, s):
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
+            self.pred_title_v.set("MCTS Search vs Model")
+        elif self.mode == self.MODE_RL_REPLAY:
             self.pred_title_v.set("Current Model vs RL Policy")
         else:
             self.pred_title_v.set("Model vs Heuristic")

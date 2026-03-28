@@ -28,5 +28,5 @@ java -Xmx12g \
     -d "Green Stompy.dck" -d "White Weenie.dck" \
     -d "Blue Tempo.dck" -d "Red Aggro.dck" \
     -n "$GAMES" -t 4 -r "$ROLLOUTS" \
-    -c 600 \
+    -c 1800 \
     -o "$OUTPUT"

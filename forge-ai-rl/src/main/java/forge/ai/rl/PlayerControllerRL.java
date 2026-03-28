@@ -107,6 +107,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             rl.recordMCTSPriority(candidates,
                     idx < candidates.size() ? candidates.get(idx) : null,
                     mctsResult.getWinRates(),
+                    mctsResult.getVisitProportions(),
                     mctsResult.getValueEstimate());
 
             if (idx >= candidates.size()) {
@@ -297,7 +298,9 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             // Record with MCTS per-creature win rates
             rl.capturePreDecisionState(possibleAttackers);
             rl.recordMCTSAttack(possibleAttackers, attackerIndices,
-                    mctsResult.getWinRates(), mctsResult.getValueEstimate());
+                    mctsResult.getWinRates(),
+                    mctsResult.getVisitProportions(),
+                    mctsResult.getValueEstimate());
             return;
         }
 

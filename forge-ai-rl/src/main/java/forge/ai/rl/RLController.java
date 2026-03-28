@@ -596,7 +596,8 @@ public class RLController {
      * Record a priority decision made by MCTS with rollout win rates as soft targets.
      */
     public void recordMCTSPriority(List<SpellAbility> availableActions, SpellAbility chosenSa,
-                                    float[] winRates, float valueEstimate) {
+                                    float[] winRates, float[] visitProportions,
+                                    float valueEstimate) {
         if (trajectoryRecorder == null) return;
         if (availableActions.isEmpty()) return;
 
@@ -635,9 +636,10 @@ public class RLController {
                 DecisionType.PRIORITY_ACTION, gameState, candidates,
                 "mcts_priority_" + availableActions.size() + "_options");
 
-        // Store MCTS win rates as actionProbabilities and value estimate
+        // Store MCTS win rates and visit proportions
         DecisionResult result = new DecisionResult(
-                List.of(selectedIdx), winRates, valueEstimate, false);
+                List.of(selectedIdx), winRates, visitProportions,
+                valueEstimate, false);
 
         recordDecision(context, result);
     }
@@ -646,7 +648,8 @@ public class RLController {
      * Record an attack decision made by MCTS with per-creature win rates.
      */
     public void recordMCTSAttack(List<Card> possibleAttackers, List<Integer> selectedIndices,
-                                  float[] creatureWinRates, float valueEstimate) {
+                                  float[] creatureWinRates, float[] creatureVisitProps,
+                                  float valueEstimate) {
         if (trajectoryRecorder == null) return;
 
         GameStateFeatures gameState = cachedPreDecisionState;
@@ -667,7 +670,8 @@ public class RLController {
                 0, possibleAttackers.size(), "mcts_attack");
 
         DecisionResult result = new DecisionResult(
-                selectedIndices, creatureWinRates, valueEstimate, false);
+                selectedIndices, creatureWinRates, creatureVisitProps,
+                valueEstimate, false);
 
         recordDecision(context, result);
         cachedPreDecisionState = null;

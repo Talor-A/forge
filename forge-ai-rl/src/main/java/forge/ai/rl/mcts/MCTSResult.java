@@ -1,24 +1,28 @@
 package forge.ai.rl.mcts;
 
-import java.util.List;
-
 /**
  * Result from MCTS rollout evaluation.
- * Contains the selected action, win rates for all candidates (soft targets),
- * and the value estimate (win rate of best candidate).
+ * Stores two representations of the search policy:
+ * - winRates: per-candidate win rates (Q-values)
+ * - visitProportions: per-candidate visit fractions (search policy, AlphaZero-style)
+ * Both are recorded in trajectories for the training pipeline to choose from.
  */
 public class MCTSResult {
     private final int selectedIndex;
-    private final float[] winRates;     // per-candidate win rates from rollouts
-    private final float valueEstimate;  // win rate of selected candidate
+    private final float[] winRates;          // per-candidate Q-values from rollouts
+    private final float[] visitProportions;  // per-candidate visit counts / total visits
+    private final float valueEstimate;       // win rate of selected candidate
 
-    public MCTSResult(int selectedIndex, float[] winRates, float valueEstimate) {
+    public MCTSResult(int selectedIndex, float[] winRates,
+                      float[] visitProportions, float valueEstimate) {
         this.selectedIndex = selectedIndex;
         this.winRates = winRates;
+        this.visitProportions = visitProportions;
         this.valueEstimate = valueEstimate;
     }
 
     public int getSelectedIndex() { return selectedIndex; }
     public float[] getWinRates() { return winRates; }
+    public float[] getVisitProportions() { return visitProportions; }
     public float getValueEstimate() { return valueEstimate; }
 }

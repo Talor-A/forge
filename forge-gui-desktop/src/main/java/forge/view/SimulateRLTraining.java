@@ -611,7 +611,7 @@ public class SimulateRLTraining {
                                                String outputDir, boolean quiet,
                                                int threads, int rollouts) {
         // Cap threads for MCTS — each game is CPU-intensive due to rollouts
-        int mctsThreads = Math.min(threads, 4);
+        int mctsThreads = threads;
         System.out.println("=== MCTS Collection Mode (" + mctsThreads + " threads, "
                 + rollouts + " rollouts/candidate) ===");
 
@@ -849,13 +849,16 @@ public class SimulateRLTraining {
         }
 
         // Finalize RLController trajectory recorders
+        boolean isTimeout = game.getOutcome() == null
+                || game.getOutcome().isDraw();
         for (Player p : lobbyToPlayer.values()) {
             if (p.getController() instanceof PlayerControllerRL) {
-                RegisteredPlayer rp = p.getRegisteredPlayer();
-                boolean won = game.getOutcome() != null
-                        && !game.getOutcome().isDraw()
-                        && rp != null
-                        && game.getOutcome().isWinner(rp);
+                boolean won = false;
+                if (!isTimeout) {
+                    RegisteredPlayer rp = p.getRegisteredPlayer();
+                    won = rp != null
+                            && game.getOutcome().isWinner(rp);
+                }
                 ((PlayerControllerRL) p.getController())
                     .getRLController()
                     .onGameEnd(won);
