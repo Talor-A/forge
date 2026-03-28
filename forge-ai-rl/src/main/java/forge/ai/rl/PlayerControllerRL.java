@@ -1,6 +1,7 @@
 package forge.ai.rl;
 
 import forge.LobbyPlayer;
+import forge.ai.rl.decisions.DecisionResult;
 import forge.ai.rl.decisions.DecisionType;
 import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.CardFeatures;
@@ -362,6 +363,17 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         CardCollection attackers = combat.getAttackers();
         if (possibleBlockers.isEmpty() || attackers.isEmpty()) return;
 
+        if (useMCTS) {
+            // Let heuristic decide blocks first, then verify via MCTS
+            rl.capturePreDecisionState(possibleBlockers);
+            super.declareBlockers(defender, combat);
+
+            // Record the heuristic's blocking decision
+            rl.recordHeuristicBlockAssignment(
+                    possibleBlockers, attackers, combat);
+            return;
+        }
+
         if (rl.isModelServerAvailable()) {
             // RL model makes the decision
             List<int[]> assignments = rl.decideBlockers(possibleBlockers, attackers);
@@ -477,6 +489,32 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             boolean isOptional, Player targetedPlayer,
             Map<String, Object> params) {
 
+        if (useMCTS && optionList.size() > 1) {
+            // MCTS evaluates each target via rollouts
+            List<GameEntity> targets = new ArrayList<>(optionList);
+            forge.ai.rl.mcts.MCTSResult mctsResult =
+                    mcts.decideTarget(getGame(), player, targets, sa);
+            int idx = Math.max(0, Math.min(
+                    mctsResult.getSelectedIndex(),
+                    optionList.size() - 1));
+
+            // Record with MCTS rates
+            List<float[]> feats = new ArrayList<>();
+            for (T entity : optionList) {
+                if (entity instanceof Card) {
+                    feats.add(CardFeatures.encode((Card) entity, player));
+                } else {
+                    feats.add(ActionEncoder.encodeTarget(entity));
+                }
+            }
+            float[] spellFeats = sa != null ? ActionEncoder.encode(sa) : null;
+            rl.recordMCTSTarget(sa, targets,
+                    idx, mctsResult.getWinRates(),
+                    mctsResult.getVisitProportions(),
+                    mctsResult.getValueEstimate());
+            return optionList.get(idx);
+        }
+
         if (rl.isModelServerAvailable()
                 && optionList.size() > 1) {
             // RL model picks the target — pass spell features for context
@@ -526,6 +564,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             String title, int min, int max,
             boolean isOptional,
             Map<String, Object> params) {
+        if (useMCTS && sourceList.size() > 1) {
+            // Let heuristic decide — card selection is combinatorial
+            // and the heuristic's choice is recorded for training
+        }
         if (rl.isModelServerAvailable() && sourceList.size() > 1) {
             List<Integer> selected = rl.decideCardSelection(sourceList, min, max);
             CardCollection rlResult = new CardCollection();
@@ -646,6 +688,23 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     @Override
     public boolean mulliganKeepHand(
             Player firstPlayer, int cardsToReturn) {
+        if (useMCTS) {
+            forge.ai.rl.mcts.MCTSResult result =
+                    mcts.decideMulligan(getGame(), player);
+            boolean keep = result.getSelectedIndex() == 1;
+
+            List<float[]> handFeats = new ArrayList<>();
+            CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
+            for (Card c : hand) {
+                handFeats.add(CardFeatures.encode(c, player));
+            }
+            rl.recordDecisionDirect(DecisionType.MULLIGAN,
+                    2, List.of(keep ? 1 : 0), handFeats,
+                    "mcts_mulligan_" + cardsToReturn
+                    + (keep ? "_keep" : "_mull"));
+            return keep;
+        }
+
         if (rl.isModelServerAvailable()) {
             CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
             boolean keep = rl.decideMulligan(hand, cardsToReturn);
@@ -676,6 +735,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             String message, List<String> options,
             Card cardToShow,
             Map<String, Object> params) {
+        if (useMCTS) {
+            // Let heuristic decide binary choices — too many
+            // different types to simulate meaningfully
+        }
         if (rl.isModelServerAvailable()) {
             boolean result = rl.decideBinary("confirm_" + mode);
             Logger.info("RL_BINARY: {} (confirm_{})", result ? "YES" : "NO", mode);

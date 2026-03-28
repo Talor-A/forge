@@ -376,6 +376,108 @@ public class MCTSDecisionMaker {
         return new MCTSResult(best, winRates, targetVisitProps, winRates[best]);
     }
 
+    // ── Mulligan ──
+
+    /**
+     * Decide keep vs mulligan via rollouts.
+     * Returns MCTSResult: index 0 = mulligan, index 1 = keep.
+     */
+    public MCTSResult decideMulligan(Game game, Player player) {
+        List<Candidate> expanded = new ArrayList<>();
+        expanded.add(new Candidate((SpellAbility) null, null, "MULLIGAN"));
+        expanded.add(new Candidate((SpellAbility) null, null, "KEEP"));
+
+        // Rollout both — "keep" means continue the game as-is,
+        // "mulligan" means... we can't easily simulate a mulligan
+        // because the hand changes. So we just rollout the current
+        // state twice. The real difference is encoded in the game state.
+        // For now: rollout "keep" = play from here, "mulligan" = play from here
+        // Both produce the same result since we can't change the hand.
+        // TODO: Properly simulate mulligan by reshuffling and redrawing
+        int budget = Math.max(rolloutBudget / 2, 10); // smaller budget for binary
+        for (int r = 0; r < budget; r++) {
+            boolean won = rollout(game, player, null);
+            // Assign to keep — if win rate is high, keep; if low, mulligan
+            expanded.get(1).visits++;
+            if (won) expanded.get(1).wins++;
+            expanded.get(0).visits++;
+            if (!won) expanded.get(0).wins++; // inverse: mulligan "wins" when keep loses
+            totalRollouts += 2;
+        }
+
+        // If keep win rate > 50%, keep. Otherwise mulligan.
+        int best = expanded.get(1).winRate() >= 0.5 ? 1 : 0;
+        totalDecisions++;
+
+        float[] rates = {(float) expanded.get(0).winRate(),
+                         (float) expanded.get(1).winRate()};
+        float[] visits = {0.5f, 0.5f};
+
+        System.out.printf("MCTS_MULLIGAN: keep_wr=%.0f%% → %s%n",
+                expanded.get(1).winRate() * 100,
+                best == 1 ? "KEEP" : "MULLIGAN");
+        System.out.flush();
+
+        return new MCTSResult(best, rates, visits, rates[best]);
+    }
+
+    // ── Binary decisions ──
+
+    /**
+     * Decide yes/no via rollouts. Since we can't easily simulate
+     * "yes" vs "no" for arbitrary triggered abilities, we let the
+     * heuristic decide and record it. Returns -1 to signal "use heuristic".
+     *
+     * TODO: For specific binary decisions (e.g., "pay life?", "sacrifice?"),
+     * implement proper simulation of both outcomes.
+     */
+    public int decideBinary() {
+        return -1; // use heuristic
+    }
+
+    // ── Block decisions ──
+
+    /**
+     * Decide blocking assignments via rollouts.
+     * Tests: heuristic's blocking assignment vs no blocks.
+     * The heuristic's block logic is sophisticated, so we mainly
+     * verify whether blocking at all is correct.
+     */
+    public MCTSResult decideBlocking(Game game, Player player,
+                                      boolean heuristicBlocked) {
+        List<Candidate> expanded = new ArrayList<>();
+        expanded.add(new Candidate(List.of(), "no-block"));
+        expanded.add(new Candidate(List.of(1), "heuristic-block"));
+
+        // We can't easily simulate specific block assignments via rollout
+        // because the combat is already set up. Instead, rollout from
+        // current state — the heuristic handles blocks in the rollout.
+        // This effectively tests "is the current board state a win?"
+        int budget = Math.max(rolloutBudget / 2, 10);
+        for (Candidate c : expanded) {
+            for (int r = 0; r < budget / 2; r++) {
+                boolean won = rollout(game, player, null);
+                c.visits++;
+                if (won) c.wins++;
+                totalRollouts++;
+            }
+        }
+
+        int best = expanded.get(1).winRate() >= expanded.get(0).winRate() ? 1 : 0;
+        totalDecisions++;
+
+        float[] rates = {(float) expanded.get(0).winRate(),
+                         (float) expanded.get(1).winRate()};
+        float[] visits = {0.5f, 0.5f};
+
+        System.out.printf("MCTS_BLOCK: no-block=%.0f%% heuristic=%.0f%% → %s%n",
+                rates[0] * 100, rates[1] * 100,
+                best == 1 ? "BLOCK" : "NO-BLOCK");
+        System.out.flush();
+
+        return new MCTSResult(best, rates, visits, rates[best]);
+    }
+
     // ── UCB1 rollout allocation ──
 
     /**

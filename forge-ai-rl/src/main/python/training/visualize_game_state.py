@@ -1120,13 +1120,15 @@ def draw_card_image(info, highlight=None, win_rate=None,
         draw.text((7, CARD_H-17), str(cmc),
                   fill="#ffffff", font=font_lg)
 
-    # MCTS overlay
+    # MCTS overlay (above P/T box)
     if win_rate is not None or visit_prop is not None:
-        oy = CARD_H - 18
-        if visit_prop is not None and win_rate is not None:
-            oy = CARD_H - 28
+        has_pt = info.get("power") is not None
+        base_y = (CARD_H - 22) if has_pt else (CARD_H - 4)
+        n_lines = (1 if win_rate is not None else 0) \
+                + (1 if visit_prop is not None else 0)
+        oy = base_y - n_lines * 11
         draw.rectangle([CARD_W-52, oy,
-                        CARD_W-4, CARD_H-4],
+                        CARD_W-4, base_y],
                        fill="#000000")
         ty = oy + 1
         if win_rate is not None:
