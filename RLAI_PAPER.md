@@ -714,7 +714,49 @@ Reward shaping (Section 5.4.3) is enabled with coefficient 1.0 decaying at 0.95/
 
 Eval remains strictly vs heuristic to maintain a consistent comparison metric. The gameplay metrics dashboard tracks attack rate, spells per turn, idle turn percentage, and heuristic fallback count per eval round, providing visibility into whether PPO is addressing the specific behavioral deficits identified in Section 5.4.6.
 
-Training with league play is in progress (2026-03-28).
+Training with league play showed the model beating old snapshots ~50% (as expected) but not improving vs the heuristic — eval win rate stayed at 20-26% after 13 rounds despite improving gameplay metrics (attack rate 55%→75%, idle turns 27%→20%).
+
+#### 5.4.8 Expert Iteration via Monte Carlo Rollouts
+
+The failure of PPO — across multiple configurations including self-play, league play, reward shaping, and hyperparameter tuning — motivated a fundamental shift from policy gradient methods to **Expert Iteration** (ExIt). The core insight: instead of learning from stochastically-degraded play (PPO sampling) or sparse terminal rewards, use **tree search** to find better moves than the current policy at each decision point, then train supervised on the search-improved decisions.
+
+**Algorithm.** At each decision point during data collection:
+
+1. **Expand candidates.** For priority decisions, all playable spells are expanded into (spell, target) pairs for targeted spells — e.g., if Path to Exile can target three creatures, that's three separate candidates plus a pass option.
+
+2. **Allocate rollouts via UCB1.** A fixed rollout budget (default 30) is allocated dynamically using Upper Confidence Bound: $\text{UCB1}(a) = Q(a) + C\sqrt{\frac{\ln N}{n(a)}}$ where $Q(a)$ is the action's win rate, $N$ is total visits, $n(a)$ is visits to action $a$, and $C = \sqrt{2}$. Each candidate gets at least one rollout; the remaining budget goes to the most promising candidates. This naturally prunes bad options — a candidate that loses its first rollout may only get 2-3 total visits while a strong one accumulates 15-20.
+
+3. **Rollout to completion.** Each rollout copies the full game state via `GameCopier`, applies the candidate action via `GameSimulator.simulateSpellAbility()` (which handles targeting, cost payment, and stack resolution correctly), then plays the rest of the game with heuristic AIs. Simulation lookahead is disabled on rollout AIs for speed (~0.5s per rollout vs ~5s with simulation).
+
+4. **Record search policy.** The visit-count distribution across candidates forms the search policy — analogous to AlphaZero's MCTS visit counts. Both the visit proportions (soft policy targets for training) and win rates (Q-values) are recorded in the trajectory JSONL alongside the standard game state features.
+
+**Decision coverage:**
+
+| Decision Type | MCTS Approach | Candidates |
+|--------------|---------------|------------|
+| Priority | UCB1 over all (spell, target) pairs + pass | 2-10+ expanded |
+| Attack | UCB1 over no-attack, all-in, individual creatures | 2+N patterns |
+| Target (standalone) | UCB1 over legal targets | 2-5 typically |
+| Mulligan | Compare keep-rollouts vs shuffle-and-redraw rollouts | 2 (keep/mull) |
+| Block | Heuristic (recorded for training) | — |
+| Card selection | Heuristic (recorded for training) | — |
+| Binary | Heuristic (recorded for training) | — |
+
+Mulligan MCTS required a fix to the game engine's `PhaseHandler.devModeSet()` to allow `GameCopier` to operate during pre-game state (null phase/player guard). "Keep" rollouts copy the actual game state preserving the hand; "mulligan" rollouts copy then shuffle the hand into the library and draw N-1 cards, testing whether a random smaller hand performs better.
+
+**Why ExIt should succeed where PPO failed:**
+
+1. **Per-decision credit assignment.** Each decision is evaluated by its direct impact on game outcome through rollout — no noisy backward propagation through 50+ decisions via GAE.
+
+2. **No exploration degradation.** PPO requires stochastic sampling which reduces play quality (the model plays worse during training to explore). MCTS explores by trying alternatives in simulation — the actual game always plays the search-best action.
+
+3. **Correct targeting guaranteed.** MCTS evaluates each target separately via rollout. Playing Rancor on your own creature vs the opponent's creature produces directly observable win rate differences — no need for the model to learn polarity from features.
+
+4. **Compound improvement.** Better model → better value estimates → can replace full rollouts with V(s') queries for faster search → more search budget → better training data → better model. This is the AlphaZero virtuous cycle.
+
+**Implementation.** `MCTSDecisionMaker.java` (forge-ai-rl) implements the rollout engine using the existing Forge simulation infrastructure (`GameCopier`, `GameSimulator`, `GameStateEvaluator`). Data collection runs via `scripts/09_exit_collect.sh` using the `mcts-collect` mode in `SimulateRLTraining`. Performance is ~5-15 minutes per game with 30 rollout budget, 4 parallel threads.
+
+Data collection and initial training are in progress (2026-03-29).
 
 ---
 
@@ -766,7 +808,7 @@ Key data quality improvements include game-level train/val splitting (preventing
 
 The key architectural insights are: (1) decomposing the MTG decision space into specialized heads — each with appropriate loss functions (softmax CE for single-select priority, BCE for multi-select combat, per-blocker CE for assignment) — is more tractable than a monolithic policy; (2) the transformer's set-attention mechanism naturally handles variable-size card collections; and (3) recording the full mechanically-legal candidate set (not just the heuristic's choice) gives the RL model visibility into creative plays the heuristic would never consider.
 
-Key findings from PPO training include: (1) the value network is the critical bottleneck — it must accurately assess game states at turns 1-5 for PPO to improve early-game play, but currently reaches useful accuracy only around turn 7; (2) playing against a fixed strong opponent (the heuristic) provides heavily skewed signal that makes improvement difficult — league-based training with Elo-matched opponents addresses this by ensuring ~50% win rate in collection games; (3) gameplay metrics (attack rate, idle turns, spells per turn) provide more actionable diagnostics than aggregate win rate alone.
+Key findings include: (1) PPO with sparse terminal rewards cannot provide sufficient per-decision credit assignment for MTG's long games at our compute scale — multiple configurations (vs heuristic, self-play, league play, reward shaping) all plateaued at 27-36% win rate; (2) the value network reaches useful accuracy only around turn 7, leaving early-game decisions (where curving out matters most) under-guided; (3) Expert Iteration via Monte Carlo rollouts with UCB1 allocation provides per-decision evaluation through direct simulation, eliminating the credit assignment problem entirely; (4) the existing Forge simulation infrastructure (`GameCopier`, `GameSimulator`) can be leveraged for MCTS rollouts with targeted fixes (PhaseHandler null guard for mulligan state copying, simulation disable for rollout speed).
 
 MTG represents a frontier challenge for game AI — a domain where the rules themselves are as complex as the strategies that emerge from them. Our system provides a foundation for exploring this frontier through learned, self-improving play.
 
