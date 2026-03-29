@@ -599,7 +599,7 @@ def main():
         model = MTGModel.load(args.model, device=args.device)
     else:
         logger.info("Creating fresh model with random weights")
-        model = MTGModel()
+        model = MTGModel.from_size("xl")
         model.to(args.device)
 
     # Print parameter counts

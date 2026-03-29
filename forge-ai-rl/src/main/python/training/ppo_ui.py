@@ -410,7 +410,7 @@ def ppo_thread(state, args):
             model = MTGModel.load(
                 args.checkpoint, device=device)
         else:
-            model = MTGModel().to(device)
+            model = MTGModel.from_size('xl').to(device)
         log(state, "Model loaded.")
 
         # Unfreeze encoder with very low LR for adaptation

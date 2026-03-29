@@ -445,7 +445,7 @@ def main():
           flush=True)
 
     # Model
-    model = MTGModel().to(device)
+    model = MTGModel.from_size("xl").to(device)
     params = model.count_parameters()
     print(f'  Model: {params["total"]:,} parameters',
           flush=True)
