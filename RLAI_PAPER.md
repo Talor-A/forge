@@ -716,7 +716,28 @@ Eval remains strictly vs heuristic to maintain a consistent comparison metric. T
 
 Training with league play showed the model beating old snapshots ~50% (as expected) but not improving vs the heuristic — eval win rate stayed at 20-26% after 13 rounds despite improving gameplay metrics (attack rate 55%→75%, idle turns 27%→20%).
 
-#### 5.4.8 Expert Iteration via Monte Carlo Rollouts
+#### 5.4.8 Model Capacity Scaling
+
+A separate investigation examined whether the 512-dimensional state embedding was a bottleneck limiting imitation quality. The shared encoder compresses 37,216 input floats (96 global + 145×256 card features) to 512 dimensions — a 72:1 ratio. Encoder reconstruction analysis after joint training showed only 47% R² for basic globals and 54% for combat features, meaning roughly half the input information is discarded.
+
+This information loss disproportionately affects the hardest decisions. Block accuracy (64.2%) requires precise pairwise combat math between every attacker-blocker pair — information that may not survive aggressive compression. Attack accuracy (82.8%) depends on knowing exact power/toughness matchups, not just "creatures exist." Even priority accuracy (93.9%) may lose nuance in the 6% error cases where subtle board interactions determine the correct play.
+
+We implemented configurable model sizes as presets:
+
+| Size | State Dim | Hidden | Heads | Layers | Zone Embed | Params | VRAM (fp32) |
+|------|-----------|--------|-------|--------|------------|--------|-------------|
+| Small | 512 | 256 | 4 | 2 | 128 | 23M | 0.3 GB |
+| Medium | 768 | 384 | 8 | 3 | 128 | 45M | 0.6 GB |
+| Large | 1024 | 512 | 8 | 3 | 128 | 73M | 0.9 GB |
+| XL | 1024 | 512 | 8 | 4 | 256 | 107M | 1.3 GB |
+
+All sizes fit on the RTX 3080 (10GB) with mixed precision. The XL model — with 4.7× the parameters of the small model, double the state embedding dimension, and 4 transformer layers instead of 2 — retains substantially more information through the bottleneck. The 256-dimensional zone embeddings (up from 128) give each card set encoder more capacity to represent within-zone relationships before pooling.
+
+We default to XL for all new training runs. Existing checkpoints (512-dim) continue to load correctly via the saved config in checkpoint files. The hypothesis: if the small model's 47% reconstruction R² is the ceiling limiting imitation accuracy, the XL model's larger capacity should achieve substantially higher R² and correspondingly better decision accuracy — particularly for block and attack decisions where precise combat math matters most.
+
+Retraining on 2,000 heuristic games with the XL model is in progress (2026-03-29).
+
+#### 5.4.9 Expert Iteration via Monte Carlo Rollouts
 
 The failure of PPO — across multiple configurations including self-play, league play, reward shaping, and hyperparameter tuning — motivated a fundamental shift from policy gradient methods to **Expert Iteration** (ExIt). The core insight: instead of learning from stochastically-degraded play (PPO sampling) or sparse terminal rewards, use **tree search** to find better moves than the current policy at each decision point, then train supervised on the search-improved decisions.
 
