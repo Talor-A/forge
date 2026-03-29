@@ -395,7 +395,7 @@ public class MCTSDecisionMaker {
      * Returns MCTSResult: index 0 = mulligan, index 1 = keep.
      */
     public MCTSResult decideMulligan(Game game, Player player) {
-        int budget = Math.max(rolloutBudget / 2, 10);
+        int budget = Math.max(rolloutBudget / 3, 6);
         int keepWins = 0, keepTrials = 0;
         int mullWins = 0, mullTrials = 0;
 
@@ -507,7 +507,7 @@ public class MCTSDecisionMaker {
         // because the combat is already set up. Instead, rollout from
         // current state — the heuristic handles blocks in the rollout.
         // This effectively tests "is the current board state a win?"
-        int budget = Math.max(rolloutBudget / 2, 10);
+        int budget = Math.max(rolloutBudget / 3, 6);
         for (Candidate c : expanded) {
             for (int r = 0; r < budget / 2; r++) {
                 boolean won = rollout(game, player, null);
