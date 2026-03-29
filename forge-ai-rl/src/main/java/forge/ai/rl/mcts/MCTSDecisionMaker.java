@@ -5,11 +5,13 @@ import forge.ai.simulation.GameCopier;
 import forge.ai.simulation.GameSimulator;
 import forge.ai.simulation.GameStateEvaluator;
 import forge.ai.simulation.SimulationController;
+import forge.ai.LobbyPlayerAi;
 import forge.game.*;
 import forge.game.card.Card;
 import forge.game.combat.Combat;
 import forge.game.combat.CombatUtil;
 import forge.game.player.Player;
+import forge.game.player.RegisteredPlayer;
 import forge.game.spellability.SpellAbility;
 import forge.util.MyRandom;
 
@@ -379,42 +381,94 @@ public class MCTSDecisionMaker {
     // ── Mulligan ──
 
     /**
-     * Decide keep vs mulligan via rollouts.
+     * Decide keep vs mulligan via game-copy rollouts.
+     *
+     * "Keep" rollouts: copy the game as-is (preserving hand + library),
+     * play to completion with heuristic AIs. Tests THIS hand.
+     *
+     * "Mulligan" rollouts: copy the game, shuffle the copy's hand back
+     * into library, draw N-1 cards, play to completion. Tests a random
+     * smaller hand.
+     *
+     * Compare win rates: if keep > mulligan, keep.
+     *
      * Returns MCTSResult: index 0 = mulligan, index 1 = keep.
      */
     public MCTSResult decideMulligan(Game game, Player player) {
-        List<Candidate> expanded = new ArrayList<>();
-        expanded.add(new Candidate((SpellAbility) null, null, "MULLIGAN"));
-        expanded.add(new Candidate((SpellAbility) null, null, "KEEP"));
+        int budget = Math.max(rolloutBudget / 2, 10);
+        int keepWins = 0, keepTrials = 0;
+        int mullWins = 0, mullTrials = 0;
 
-        // Rollout both — "keep" means continue the game as-is,
-        // "mulligan" means... we can't easily simulate a mulligan
-        // because the hand changes. So we just rollout the current
-        // state twice. The real difference is encoded in the game state.
-        // For now: rollout "keep" = play from here, "mulligan" = play from here
-        // Both produce the same result since we can't change the hand.
-        // TODO: Properly simulate mulligan by reshuffling and redrawing
-        int budget = Math.max(rolloutBudget / 2, 10); // smaller budget for binary
+        int handSize = player.getCardsIn(forge.game.zone.ZoneType.Hand).size();
+
         for (int r = 0; r < budget; r++) {
-            boolean won = rollout(game, player, null);
-            // Assign to keep — if win rate is high, keep; if low, mulligan
-            expanded.get(1).visits++;
-            if (won) expanded.get(1).wins++;
-            expanded.get(0).visits++;
-            if (!won) expanded.get(0).wins++; // inverse: mulligan "wins" when keep loses
-            totalRollouts += 2;
+            // Alternate keep and mulligan rollouts
+            boolean testKeep = (r % 2 == 0);
+
+            Random origRandom = MyRandom.getRandom();
+            MyRandom.setRandom(new Random(rng.nextLong()));
+            try {
+                GameCopier copier = new GameCopier(game);
+                Game simGame = copier.makeCopy();
+                disableSimulation(simGame);
+                Player simPlayer = (Player) copier.find(player);
+
+                if (!testKeep) {
+                    // Simulate mulligan: shuffle hand into library,
+                    // draw (handSize - 1) cards
+                    forge.game.zone.PlayerZone simHand =
+                            simPlayer.getZone(forge.game.zone.ZoneType.Hand);
+                    forge.game.zone.PlayerZone simLib =
+                            simPlayer.getZone(forge.game.zone.ZoneType.Library);
+
+                    // Move hand cards to library
+                    List<Card> handCards = new ArrayList<>(
+                            simPlayer.getCardsIn(forge.game.zone.ZoneType.Hand));
+                    for (Card c : handCards) {
+                        simGame.getAction().moveToLibrary(c, -1, null);
+                    }
+                    // Shuffle library
+                    simPlayer.shuffle(null);
+                    // Draw N-1 cards
+                    int newHandSize = Math.max(handSize - 1, 1);
+                    for (int d = 0; d < newHandSize; d++) {
+                        simPlayer.drawCard();
+                    }
+                }
+
+                // Play to completion
+                boolean won = playToCompletion(simGame, simPlayer);
+
+                if (testKeep) {
+                    keepTrials++;
+                    if (won) keepWins++;
+                } else {
+                    mullTrials++;
+                    if (won) mullWins++;
+                }
+                totalRollouts++;
+            } catch (Exception e) {
+                totalRollouts++;
+            } finally {
+                MyRandom.setRandom(origRandom);
+            }
         }
 
-        // If keep win rate > 50%, keep. Otherwise mulligan.
-        int best = expanded.get(1).winRate() >= 0.5 ? 1 : 0;
+        float keepRate = keepTrials > 0
+                ? (float) keepWins / keepTrials : 0.5f;
+        float mullRate = mullTrials > 0
+                ? (float) mullWins / mullTrials : 0.5f;
+
+        // Keep if keep rate >= mulligan rate (bias toward keeping)
+        int best = keepRate >= mullRate ? 1 : 0;
         totalDecisions++;
 
-        float[] rates = {(float) expanded.get(0).winRate(),
-                         (float) expanded.get(1).winRate()};
+        float[] rates = {mullRate, keepRate};
         float[] visits = {0.5f, 0.5f};
 
-        System.out.printf("MCTS_MULLIGAN: keep_wr=%.0f%% → %s%n",
-                expanded.get(1).winRate() * 100,
+        System.out.printf("MCTS_MULLIGAN: keep=%d/%d(%.0f%%) mull=%d/%d(%.0f%%) → %s%n",
+                keepWins, keepTrials, keepRate * 100,
+                mullWins, mullTrials, mullRate * 100,
                 best == 1 ? "KEEP" : "MULLIGAN");
         System.out.flush();
 
