@@ -190,14 +190,15 @@ for i in $(seq 0 $((JVMS - 1))); do
     [ -d "$sub" ] || continue
     for f in "$sub"/traj_*.jsonl; do
         [ -e "$f" ] || break
-        base=$(basename "$f")
-        mv "$f" "$OUTPUT_DIR/jvm${i}_${base}"
+        base=$(basename "$f")          # traj_<rest>.jsonl
+        rest="${base#traj_}"           # <rest>.jsonl
+        mv "$f" "$OUTPUT_DIR/traj_jvm${i}_${rest}"
     done
     rmdir "$sub" 2>/dev/null || warn "  $sub not empty, leaving in place"
 done
 
 # ─── Summary ─────────────────────────────────────────────────────────
-PRODUCED=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'traj_*.jsonl' -o -name 'jvm*_traj_*.jsonl' | wc -l | tr -d ' ')
+PRODUCED=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'traj_*.jsonl' | wc -l | tr -d ' ')
 TOTAL_KB=$(du -sk "$OUTPUT_DIR" | awk '{print $1}')
 RATE="n/a"
 [ "$ELAPSED" -gt 0 ] && RATE=$(awk -v p="$PRODUCED" -v e="$ELAPSED" 'BEGIN{printf "%.2f", p/e}')
