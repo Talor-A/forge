@@ -56,9 +56,22 @@ if [ ! -d /workspace ]; then
 fi
 df -h /workspace | tail -1
 
-# ─── 3. Repo clone / update ──────────────────────────────────────────
+# ─── 3. Repo: restore from cache, or clone ───────────────────────────
 log "Step 3/6  Repo at $REPO_DIR"
 CLONE_DEPTH="${CLONE_DEPTH:-1}"
+CACHE_DIR="${CACHE_DIR:-/workspace/cache}"
+CACHE_TAR="${CACHE_TAR:-$CACHE_DIR/forge-latest.tar.zst}"
+
+if [ ! -d "$REPO_DIR/.git" ] && [ -e "$CACHE_TAR" ]; then
+    log "  restoring from cache: $CACHE_TAR"
+    command -v zstd >/dev/null || { log "  installing zstd"; apt-get install -y -qq zstd; }
+    mkdir -p "$REPO_DIR"
+    # Tarball stores top-level dir 'forge-ai-investigation'; extract its parent.
+    PARENT_DIR=$(dirname "$REPO_DIR")
+    zstd -dc "$CACHE_TAR" | tar -C "$PARENT_DIR" -xf -
+    [ -d "$REPO_DIR/.git" ] || die "cache restore did not produce $REPO_DIR/.git"
+fi
+
 if [ ! -d "$REPO_DIR/.git" ]; then
     log "  shallow clone (depth=$CLONE_DEPTH) of $REPO_URL"
     if [ -n "$FORGE_BRANCH" ]; then
@@ -69,8 +82,8 @@ if [ ! -d "$REPO_DIR/.git" ]; then
             "$REPO_URL" "$REPO_DIR"
     fi
 else
-    log "  already cloned, fetching"
-    git -C "$REPO_DIR" fetch --depth "$CLONE_DEPTH" --quiet
+    log "  repo present, fetching"
+    git -C "$REPO_DIR" fetch --depth "$CLONE_DEPTH" --quiet || warn "fetch failed (offline?)"
 fi
 if [ -n "$FORGE_BRANCH" ]; then
     git -C "$REPO_DIR" checkout "$FORGE_BRANCH"
@@ -118,6 +131,21 @@ else
     cd - >/dev/null
     EXISTING_JAR=$(ls $JAR_GLOB | head -1)
     log "  built: $EXISTING_JAR"
+
+    # Refresh cache tarball so next resume skips clone+build.
+    if [ "${SKIP_CACHE_REFRESH:-0}" != "1" ]; then
+        mkdir -p "$CACHE_DIR"
+        command -v zstd >/dev/null || apt-get install -y -qq zstd
+        COMMIT=$(git -C "$REPO_DIR" rev-parse --short HEAD)
+        NEW_TAR="$CACHE_DIR/forge-${COMMIT}.tar.zst"
+        log "  refreshing cache -> $NEW_TAR"
+        tar -C "$(dirname "$REPO_DIR")" -cf - "$(basename "$REPO_DIR")" \
+            | zstd -T0 -3 -q -o "$NEW_TAR.tmp"
+        mv "$NEW_TAR.tmp" "$NEW_TAR"
+        ln -sfn "$(basename "$NEW_TAR")" "$CACHE_TAR"
+        # Keep only the 2 most recent tarballs.
+        ls -1t "$CACHE_DIR"/forge-*.tar.zst 2>/dev/null | tail -n +3 | xargs -r rm -f
+    fi
 fi
 
 # ─── 6. Decks ────────────────────────────────────────────────────────
@@ -171,6 +199,33 @@ if python3.10 -c "import numpy" 2>/dev/null; then
 else
     python3.10 -m pip install --break-system-packages -q numpy
     log "  installed numpy for python3.10 ($(python3.10 -c 'import numpy; print(numpy.__version__)'))"
+fi
+
+# ─── 8. Training deps (opt-in, GPU pod) ──────────────────────────────
+if [ "${INSTALL_TRAIN_DEPS:-0}" = "1" ]; then
+    log "Step 8  Training deps (PyTorch + requirements)"
+    VENV_DIR="$REPO_DIR/forge-ai-rl/venv"
+    REQS="$REPO_DIR/forge-ai-rl/src/main/python/requirements.txt"
+    [ -f "$REQS" ] || die "requirements.txt missing at $REQS"
+
+    if [ ! -d "$VENV_DIR" ]; then
+        log "  creating venv at $VENV_DIR"
+        python3.10 -m venv "$VENV_DIR"
+    fi
+    # shellcheck disable=SC1091
+    "$VENV_DIR/bin/pip" install --upgrade -q pip
+    log "  installing requirements (this can take several minutes on first run)"
+    "$VENV_DIR/bin/pip" install -q -r "$REQS"
+
+    log "  CUDA check:"
+    "$VENV_DIR/bin/python" - <<'PY' || warn "torch import failed"
+import torch
+print(f"  torch {torch.__version__}  cuda={torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"  GPU: {torch.cuda.get_device_name(0)}  CUDA {torch.version.cuda}")
+PY
+else
+    log "Step 8  Training deps  (skipped; pass INSTALL_TRAIN_DEPS=1 to install)"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────
