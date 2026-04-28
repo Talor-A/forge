@@ -205,6 +205,7 @@ class MonitorUI:
                 linewidth=1.5, linestyle='--', label='Entropy')
             self.ax_loss2.set_ylabel('Entropy', color='#a6e3a1', fontsize=8)
         self.ax_loss.set_xlim(1, n_rounds + 10)
+        self.ax_loss2.set_xlim(1, n_rounds + 10)
         self.ax_loss.autoscale(axis='y')
         self.ax_loss.legend(fontsize=8, facecolor='#313244',
             edgecolor='#45475a', labelcolor='#cdd6f4')
