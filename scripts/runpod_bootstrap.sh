@@ -16,7 +16,11 @@
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/Talor-A/forge.git}"
-REPO_DIR="${REPO_DIR:-/workspace/forge-ai-investigation}"
+# /workspace is MooseFS — small-file ops are ~800× slower than container disk.
+# Clone to /root (container disk) and symlink into /workspace for stable paths.
+# Container disk is wiped on pod stop (volumeInGb=0), so this re-runs on resume.
+REPO_DIR="${REPO_DIR:-/root/forge-ai-investigation}"
+WORKSPACE_LINK="${WORKSPACE_LINK:-/workspace/forge-ai-investigation}"
 FORGE_BRANCH="${FORGE_BRANCH:-ai_investigation}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 
@@ -72,6 +76,21 @@ if [ -n "$FORGE_BRANCH" ]; then
     git -C "$REPO_DIR" checkout "$FORGE_BRANCH"
 fi
 git -C "$REPO_DIR" log -1 --oneline
+
+# Maintain stable /workspace path via symlink (REPO_DIR is on container disk).
+if [ -L "$WORKSPACE_LINK" ]; then
+    target=$(readlink "$WORKSPACE_LINK")
+    if [ "$target" != "$REPO_DIR" ]; then
+        log "  fixing $WORKSPACE_LINK -> $REPO_DIR (was $target)"
+        rm "$WORKSPACE_LINK"
+        ln -s "$REPO_DIR" "$WORKSPACE_LINK"
+    fi
+elif [ -e "$WORKSPACE_LINK" ]; then
+    warn "$WORKSPACE_LINK exists and is not a symlink — leaving alone"
+else
+    ln -s "$REPO_DIR" "$WORKSPACE_LINK"
+    log "  created $WORKSPACE_LINK -> $REPO_DIR"
+fi
 
 # ─── 4. res symlink (per CLAUDE.md gotcha) ───────────────────────────
 log "Step 4/6  res symlink"
