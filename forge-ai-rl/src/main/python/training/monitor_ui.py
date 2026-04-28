@@ -166,6 +166,14 @@ class MonitorUI:
                      range(1, len(atk_rates) + 1)] if atk_rates \
                     else eval_rounds
 
+        # Shared x-axis: span all data with ~7% right padding
+        max_x = max(
+            n_rounds,
+            eval_rounds[-1] if eval_rounds else 0,
+            gp_rounds[-1] if gp_rounds else 0,
+        )
+        xlim = (1, max(2, max_x * 1.07))
+
         self.ax_wr.clear()
         self.ax_wr.set_facecolor('#313244')
         self.ax_wr.set_title('Win Rate vs Heuristic',
@@ -177,7 +185,7 @@ class MonitorUI:
             label=f'best {best_wr:.1%}', zorder=2)
         self.ax_wr.plot(eval_rounds, win_rates, color='#a6e3a1',
             linewidth=2, marker='o', markersize=4, zorder=3)
-        self.ax_wr.set_xlim(1, n_rounds + 10)
+        self.ax_wr.set_xlim(*xlim)
         self.ax_wr.set_ylim(0, 0.6)
         self.ax_wr.set_ylabel('Win Rate',
             color='#a6adc8', fontsize=9)
@@ -204,8 +212,8 @@ class MonitorUI:
             self.ax_loss2.plot(all_rounds, entropies, color='#a6e3a1',
                 linewidth=1.5, linestyle='--', label='Entropy')
             self.ax_loss2.set_ylabel('Entropy', color='#a6e3a1', fontsize=8)
-        self.ax_loss.set_xlim(1, n_rounds + 10)
-        self.ax_loss2.set_xlim(1, n_rounds + 10)
+        self.ax_loss.set_xlim(*xlim)
+        self.ax_loss2.set_xlim(*xlim)
         self.ax_loss.autoscale(axis='y')
         self.ax_loss.legend(fontsize=8, facecolor='#313244',
             edgecolor='#45475a', labelcolor='#cdd6f4')
@@ -233,7 +241,7 @@ class MonitorUI:
             self.ax_gp2.plot(gp_rounds[:len(spells)], spells,
                 color='#a6e3a1', linewidth=1.5,
                 label='Spells/Turn', marker='^', markersize=3)
-        self.ax_gp.set_xlim(1, n_rounds + 10)
+        self.ax_gp.set_xlim(*xlim)
         self.ax_gp.autoscale(axis='y')
         self.ax_gp2.autoscale(axis='y')
         self.ax_gp.set_ylabel('Percent',
