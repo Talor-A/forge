@@ -96,6 +96,9 @@ class MonitorUI:
         self.ax_gp2 = self.ax_gp.twinx()
         self.ax_gp2.tick_params(colors='#6c7086', labelsize=7)
         self.ax_gp2.spines['right'].set_color('#45475a')
+        self.ax_loss2 = self.ax_loss.twinx()
+        self.ax_loss2.tick_params(colors='#6c7086', labelsize=7)
+        self.ax_loss2.spines['right'].set_color('#45475a')
         self.fig.tight_layout(pad=2)
         self.canvas = FigureCanvasTkAgg(self.fig, master=cf)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -187,6 +190,7 @@ class MonitorUI:
             sp.set_color('#45475a')
 
         self.ax_loss.clear()
+        self.ax_loss2.clear()
         self.ax_loss.set_facecolor('#313244')
         self.ax_loss.set_title('Training Losses',
             color='#cdd6f4', fontsize=10)
@@ -197,12 +201,9 @@ class MonitorUI:
             self.ax_loss.plot(all_rounds, value_losses,
                 color='#f38ba8', linewidth=1.5, label='Value')
         if entropies:
-            ax2 = self.ax_loss.twinx()
-            ax2.plot(all_rounds, entropies, color='#a6e3a1',
+            self.ax_loss2.plot(all_rounds, entropies, color='#a6e3a1',
                 linewidth=1.5, linestyle='--', label='Entropy')
-            ax2.set_ylabel('Entropy', color='#a6e3a1', fontsize=8)
-            ax2.tick_params(colors='#6c7086', labelsize=7)
-            ax2.spines['right'].set_color('#45475a')
+            self.ax_loss2.set_ylabel('Entropy', color='#a6e3a1', fontsize=8)
         self.ax_loss.set_xlim(1, n_rounds + 10)
         self.ax_loss.autoscale(axis='y')
         self.ax_loss.legend(fontsize=8, facecolor='#313244',
