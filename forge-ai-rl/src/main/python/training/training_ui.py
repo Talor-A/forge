@@ -289,16 +289,19 @@ def trainer_thread(state: TrainingState, args):
         state.files_total = meta.get('n_files', 0)
         state.files_loaded = state.files_total
 
+        nw = args.num_workers
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=batch_size, shuffle=True,
-            num_workers=0,
+            num_workers=nw,
+            persistent_workers=nw > 0,
             pin_memory=device.startswith('cuda'),
             drop_last=True)
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
             batch_size=batch_size, shuffle=False,
-            num_workers=0,
+            num_workers=nw,
+            persistent_workers=nw > 0,
             pin_memory=device.startswith('cuda'))
 
         # Model
@@ -739,6 +742,11 @@ def main():
         choices=['small', 'medium', 'large', 'xl'],
         help='Model size: small (512/23M), medium '
              '(768/45M), large (1024/73M), xl (1024/107M)')
+    parser.add_argument('--num-workers', type=int, default=0,
+        help='DataLoader worker processes. 0 = main-process '
+             'loading (safe with legacy in-RAM datasets). '
+             'mmap-backed datasets are fork-safe; try 4-8 to '
+             'parallelize JSON parsing / collation.')
     args = parser.parse_args()
 
     # Shared state

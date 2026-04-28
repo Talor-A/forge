@@ -49,6 +49,15 @@ from model.gpu_config import auto_detect_profile
 from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
 
 
+def _identity_collate(batch):
+    """Pass-through collate (batch = list of dicts).
+
+    Module-level (not a lambda) so it can be pickled when
+    DataLoader uses num_workers > 0.
+    """
+    return batch
+
+
 # ── Shared state ─────────────────────────────────────
 
 @dataclass
@@ -1490,14 +1499,17 @@ def train_head_mmap(model, head, head_name,
     scaler = torch.amp.GradScaler('cuda') if use_amp \
         else None
 
+    nw = args.num_workers
     train_loader = tud.DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=0,
-        collate_fn=lambda x: x)
+        shuffle=True, num_workers=nw,
+        persistent_workers=nw > 0,
+        collate_fn=_identity_collate)
     val_loader = tud.DataLoader(
         val_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=0,
-        collate_fn=lambda x: x)
+        shuffle=False, num_workers=nw,
+        persistent_workers=nw > 0,
+        collate_fn=_identity_collate)
 
     best_acc = 0
     save_path = os.path.join(
@@ -1649,14 +1661,17 @@ def train_priority_head_mmap(model, head,
         else None
 
     # DataLoaders with list collation (batch = list of dicts)
+    nw = args.num_workers
     train_loader = tud.DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=0,
-        collate_fn=lambda x: x)
+        shuffle=True, num_workers=nw,
+        persistent_workers=nw > 0,
+        collate_fn=_identity_collate)
     val_loader = tud.DataLoader(
         val_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=0,
-        collate_fn=lambda x: x)
+        shuffle=False, num_workers=nw,
+        persistent_workers=nw > 0,
+        collate_fn=_identity_collate)
 
     best_acc = 0
     save_path = os.path.join(
@@ -1826,14 +1841,17 @@ def train_joint_mmap(model, head_configs, args, state,
         head_schedulers[name] = \
             optim.lr_scheduler.CosineAnnealingLR(
                 head_optimizers[name], T_max=args.epochs)
+        nw = args.num_workers
         head_loaders[name] = tud.DataLoader(
             train_ds, batch_size=args.batch_size,
-            shuffle=True, num_workers=0,
-            collate_fn=lambda x: x)
+            shuffle=True, num_workers=nw,
+            persistent_workers=nw > 0,
+            collate_fn=_identity_collate)
         head_val_loaders[name] = tud.DataLoader(
             val_ds, batch_size=args.batch_size,
-            shuffle=False, num_workers=0,
-            collate_fn=lambda x: x)
+            shuffle=False, num_workers=nw,
+            persistent_workers=nw > 0,
+            collate_fn=_identity_collate)
         head_best_acc[name] = 0.0
         n_params = sum(p.numel() for p in head.parameters())
         log(state, f"  {name}: {len(train_ds)} train, "
@@ -2686,6 +2704,11 @@ def main():
     parser.add_argument('--joint', action='store_true',
         help='Train all heads jointly with unfrozen '
              'encoder')
+    parser.add_argument('--num-workers', type=int, default=0,
+        help='DataLoader worker processes. 0 = main-process '
+             'loading (safe with legacy in-RAM datasets). '
+             'mmap-backed datasets are fork-safe; try 4-8 to '
+             'parallelize JSON parsing / collation.')
     parser.add_argument('--model-size', default='xl',
         choices=['small', 'medium', 'large', 'xl'],
         help='Model size: small (512/23M), medium '
