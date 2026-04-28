@@ -180,8 +180,24 @@ done
 END_S=$(date +%s)
 ELAPSED=$((END_S - START_S))
 
+# ─── Recombine per-JVM subdirs into flat OUTPUT_DIR ─────────────────
+# preprocess_trajectories.py uses a non-recursive glob (traj_*.jsonl),
+# so flatten now. Prefix filenames with jvm<i>_ to avoid collisions
+# (gameId counter is per-JVM, timestamps can repeat).
+log "Flattening jvm_*/ into $OUTPUT_DIR"
+for i in $(seq 0 $((JVMS - 1))); do
+    sub="$OUTPUT_DIR/jvm_$i"
+    [ -d "$sub" ] || continue
+    for f in "$sub"/traj_*.jsonl; do
+        [ -e "$f" ] || break
+        base=$(basename "$f")
+        mv "$f" "$OUTPUT_DIR/jvm${i}_${base}"
+    done
+    rmdir "$sub" 2>/dev/null || warn "  $sub not empty, leaving in place"
+done
+
 # ─── Summary ─────────────────────────────────────────────────────────
-PRODUCED=$(find "$OUTPUT_DIR" -name 'traj_*.jsonl' | wc -l | tr -d ' ')
+PRODUCED=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'traj_*.jsonl' -o -name 'jvm*_traj_*.jsonl' | wc -l | tr -d ' ')
 TOTAL_KB=$(du -sk "$OUTPUT_DIR" | awk '{print $1}')
 RATE="n/a"
 [ "$ELAPSED" -gt 0 ] && RATE=$(awk -v p="$PRODUCED" -v e="$ELAPSED" 'BEGIN{printf "%.2f", p/e}')
