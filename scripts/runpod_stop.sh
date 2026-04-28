@@ -68,16 +68,16 @@ else
     warn "could not reach pod over ssh; skipping busy-check"
 fi
 
-# Confirm
-if [ "$YES" != "1" ]; then
-    read -r -p $'\n\033[1;33mStop the pod now? [y/N] \033[0m' ans
-    [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { log "aborted"; exit 0; }
-fi
-
 if [ "$DRY_RUN" = "1" ]; then
     log "DRY RUN — would stop $POD_ID"
     echo "  rerun without --dry-run to actually stop"
     exit 0
+fi
+
+# Confirm
+if [ "$YES" != "1" ]; then
+    read -r -p $'\n\033[1;33mStop the pod now? [y/N] \033[0m' ans
+    [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { log "aborted"; exit 0; }
 fi
 
 log "Stopping $POD_ID"
