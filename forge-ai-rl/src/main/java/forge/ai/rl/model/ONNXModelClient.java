@@ -55,6 +55,7 @@ public class ONNXModelClient {
             System.getProperty("user.home") + "/.forge/res/rl/models",
             "rl_data/models",
             "forge-ai-rl/models",
+            "../forge-ai-rl/models",  // when CWD is forge-gui-desktop/
         };
 
         String modelDir = null;

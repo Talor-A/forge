@@ -890,6 +890,7 @@ class CardTooltip:
 
 CARD_W, CARD_H = 100, 140
 ACTION_W, ACTION_H = 100, 140
+_BASE_CARD_W, _BASE_CARD_H = 100, 140
 
 
 def _load_fonts():
@@ -1416,6 +1417,7 @@ class GameStateViewer:
         self.idx = 0
         self.card_photos = []  # keep references
         self._pending_show = None  # for buffered updates
+        self._zoom_factor = 1.0
 
         # Determine initial mode from data
         has_exit = any(s.get("source") == "exit" for s in samples)
@@ -1453,6 +1455,13 @@ class GameStateViewer:
         ttk.Button(nav, text="< Prev", command=self._prev).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="Next >", command=self._next).pack(side=tk.LEFT, padx=3)
         ttk.Button(nav, text="Random", command=self._rand).pack(side=tk.LEFT, padx=3)
+
+        tk.Frame(nav, bg="#45475a", width=2).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Button(nav, text="−", width=2, command=self._zoom_out).pack(side=tk.LEFT, padx=1)
+        self.zoom_lbl = tk.Label(nav, text="100%", bg="#1e1e2e",
+                                  fg="#a6adc8", font=("Consolas", 10), width=5)
+        self.zoom_lbl.pack(side=tk.LEFT)
+        ttk.Button(nav, text="+", width=2, command=self._zoom_in).pack(side=tk.LEFT, padx=1)
 
         tk.Frame(nav, bg="#45475a", width=2).pack(side=tk.LEFT, fill=tk.Y, padx=8)
         ttk.Button(nav, text="Attacks", command=self._filter_attacks).pack(side=tk.LEFT, padx=3)
@@ -1538,8 +1547,38 @@ class GameStateViewer:
         self.eval_label_btm.pack(side=tk.BOTTOM, pady=(2, 2))
 
         # Board areas
-        board_col = tk.Frame(main, bg="#1e1e2e")
-        board_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Scrollable board column
+        board_outer = tk.Frame(main, bg="#1e1e2e")
+        board_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        board_vsb = tk.Scrollbar(board_outer, orient=tk.VERTICAL)
+        board_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        board_canvas = tk.Canvas(board_outer, bg="#1e1e2e",
+                                  yscrollcommand=board_vsb.set,
+                                  highlightthickness=0)
+        board_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        board_vsb.config(command=board_canvas.yview)
+
+        board_col = tk.Frame(board_canvas, bg="#1e1e2e")
+        board_canvas.create_window((0, 0), window=board_col,
+                                    anchor="nw")
+
+        def _on_board_configure(event):
+            board_canvas.configure(
+                scrollregion=board_canvas.bbox("all"))
+        board_col.bind("<Configure>", _on_board_configure)
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            board_canvas.yview_scroll(
+                int(-1 * (event.delta / 120)), "units")
+        board_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        # macOS trackpad two-finger scroll
+        board_canvas.bind_all("<Button-4>", lambda e:
+            board_canvas.yview_scroll(-1, "units"))
+        board_canvas.bind_all("<Button-5>", lambda e:
+            board_canvas.yview_scroll(1, "units"))
 
         # Opponent board
         self._make_section(board_col, "Opponent's Board", "#f38ba8")
@@ -1906,6 +1945,22 @@ class GameStateViewer:
         self.samples = self._mode_samples()
         self.idx = 0
         self._show()
+
+    def _zoom_in(self):
+        self._zoom(min(self._zoom_factor * 1.25, 3.0))
+
+    def _zoom_out(self):
+        self._zoom(max(self._zoom_factor / 1.25, 0.4))
+
+    def _zoom(self, factor):
+        global CARD_W, CARD_H, ACTION_W, ACTION_H
+        self._zoom_factor = factor
+        CARD_W = max(40, int(_BASE_CARD_W * factor))
+        CARD_H = max(56, int(_BASE_CARD_H * factor))
+        ACTION_W = CARD_W
+        ACTION_H = CARD_H
+        self.zoom_lbl.config(text=f"{int(factor*100)}%")
+        self._schedule_show()
 
     def _prev(self):
         self.idx = max(0, self.idx - 1)

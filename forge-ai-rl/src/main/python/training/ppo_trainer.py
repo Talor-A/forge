@@ -52,12 +52,21 @@ import threading
 # ── Config ───────────────────────────────────────────
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[5])
+# Resolve Java binary: prefer JAVA_HOME, then Homebrew openjdk@21, then PATH
+_JAVA_HOME = os.environ.get('JAVA_HOME') or \
+    '/opt/homebrew/opt/openjdk@21'
+JAVA_BIN = os.path.join(_JAVA_HOME, 'bin', 'java') \
+    if os.path.exists(os.path.join(_JAVA_HOME, 'bin', 'java')) \
+    else 'java'
 FORGE_JAR = os.path.join(
     PROJECT_ROOT,
     'forge-gui-desktop/target/'
     'forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar')
-DECKS = ['Green Stompy.dck', 'White Weenie.dck',
-         'Blue Tempo.dck', 'Red Aggro.dck']
+_DECK_DIR = os.path.expanduser('~/.forge/decks/constructed/')
+DECKS = [_DECK_DIR + 'Green Stompy.dck',
+         _DECK_DIR + 'White Weenie.dck',
+         _DECK_DIR + 'Red Aggro.dck']
+# Blue Tempo removed: 5-15% WR adds noise, reintroduce after model breaks 45%
 
 
 # ── Data loading for PPO ─────────────────────────────
@@ -637,7 +646,7 @@ def compute_ppo_block_batch(model, samples, device,
         value_loss = F.mse_loss(value, outcomes)
         entropy = total_entropy.mean()
 
-        total_loss = policy_loss + 0.5 * value_loss - 0.01 * entropy  # block: moderate
+        total_loss = policy_loss + 0.5 * value_loss - 0.03 * entropy  # block: increased for exploration
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -769,7 +778,7 @@ def compute_ppo_priority_batch(model, head, samples,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.01 * entropy)  # priority: mild exploration
+            0.03 * entropy)  # priority: increased for exploration
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -872,7 +881,7 @@ def compute_ppo_target_batch(model, samples, device,
         policy_loss = -torch.min(surr1, surr2).mean()
         value_loss = F.mse_loss(value, outcomes)
         entropy = dist.entropy().mean()
-        total_loss = policy_loss + 0.5 * value_loss - 0.005 * entropy
+        total_loss = policy_loss + 0.5 * value_loss - 0.03 * entropy  # target: increased for exploration
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -973,7 +982,7 @@ def compute_ppo_mulligan_batch(model, samples, device,
         entropy = -(keep_prob * torch.log(keep_prob.clamp(min=1e-8))
                      + (1-keep_prob) * torch.log(
                          (1-keep_prob).clamp(min=1e-8))).mean()
-        total_loss = policy_loss + 0.5 * value_loss - 0.005 * entropy
+        total_loss = policy_loss + 0.5 * value_loss - 0.03 * entropy  # mulligan: increased for exploration
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -1105,7 +1114,7 @@ def _build_java_cmd(n_games, traj_dir, mode, port_str,
         deck_args.extend(['-d', d])
 
     cmd = [
-        'java', f'-Xmx{heap}',
+        JAVA_BIN, f'-Xmx{heap}',
         '-XX:+UseG1GC',
         '-XX:MaxGCPauseMillis=50',
         '-XX:ParallelGCThreads=2',
