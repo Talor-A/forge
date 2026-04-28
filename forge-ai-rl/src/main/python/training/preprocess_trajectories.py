@@ -31,12 +31,12 @@ Structure:
 
 Game state is stored ONCE in shared/. Each decision type stores
 only an index into shared/ plus its type-specific candidate data.
-Disk usage: ~13GB instead of ~25GB.
 
 Usage:
     python training/preprocess_trajectories.py \
         --data-dir /path/to/trajectories \
-        --output-dir /path/to/preprocessed
+        --output-dir /path/to/preprocessed \
+        --workers 16
 """
 
 import argparse
@@ -46,108 +46,133 @@ import sys
 import time
 import numpy as np
 from pathlib import Path
+from multiprocessing import Pool
+
+try:
+    import orjson
+    def _loads(s):
+        return orjson.loads(s)
+except ImportError:
+    def _loads(s):
+        return json.loads(s)
 
 # Canonical dimension constants
 GLOBAL_DIM = 96
 CARD_DIM = 256
 GAME_STATE_DIM = 37216  # 96 + 145*256
 
+DECISION_KEYS = ('priority', 'attack', 'block', 'target',
+                 'card_select', 'mulligan', 'binary')
 
-def scan_files(files, progress_cb=None):
-    """Pass 1: Count samples, find max candidate sizes.
 
-    Args:
-        progress_cb: optional callback(files_done, files_total)
-    """
-    counts = {'total': 0, 'priority': 0,
-              'attack': 0, 'block': 0,
-              'target': 0, 'card_select': 0,
-              'mulligan': 0, 'binary': 0}
-    max_cand = {'priority': 0, 'attack': 0, 'block': 0,
-                'target': 0, 'card_select': 0,
-                'mulligan': 0}
+def _scan_one(filepath):
+    """Scan a single file. Returns (per_file_counts, max_cand).
+    per_file_counts has 'total' + each decision type."""
+    counts = {'total': 0}
+    for k in DECISION_KEYS:
+        counts[k] = 0
+    max_cand = {k: 0 for k in DECISION_KEYS if k != 'binary'}
+    try:
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        if len(lines) < 2:
+            return filepath, counts, max_cand
+        for line in lines[1:]:
+            counts['total'] += 1
+            rec = _loads(line)
+            dt = rec.get('decisionType', '')
+            cand = rec.get('candidateFeatures', [])
+            nc = len(cand)
+            if dt == 'PRIORITY_ACTION':
+                counts['priority'] += 1
+                if nc > max_cand['priority']:
+                    max_cand['priority'] = nc
+            elif dt == 'DECLARE_ATTACKERS':
+                counts['attack'] += 1
+                if nc > max_cand['attack']:
+                    max_cand['attack'] = nc
+            elif dt == 'DECLARE_BLOCKERS':
+                if cand and len(cand[0]) > CARD_DIM + 10:
+                    counts['block'] += 1
+                    if nc > max_cand['block']:
+                        max_cand['block'] = nc
+            elif dt == 'TARGET_SELECTION':
+                if nc > 1:
+                    counts['target'] += 1
+                    if nc > max_cand['target']:
+                        max_cand['target'] = nc
+            elif dt == 'CARD_SELECTION':
+                if nc >= 1:
+                    counts['card_select'] += 1
+                    if nc > max_cand['card_select']:
+                        max_cand['card_select'] = nc
+            elif dt == 'MULLIGAN':
+                counts['mulligan'] += 1
+                if nc > max_cand['mulligan']:
+                    max_cand['mulligan'] = nc
+            elif dt == 'BINARY_CHOICE':
+                counts['binary'] += 1
+    except Exception as e:
+        print(f"    Warning: {filepath}: {e}", flush=True)
+    return filepath, counts, max_cand
 
-    print(f"  Pass 1: Scanning {len(files)} files...",
-          flush=True)
 
-    for fi, filepath in enumerate(files):
-        if (fi + 1) % 200 == 0:
-            print(f"    {fi+1}/{len(files)}", flush=True)
-        if progress_cb and fi % 20 == 0:
-            progress_cb(fi, len(files))
-        try:
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-            if len(lines) < 2:
-                continue
-            for line in lines[1:]:
-                counts['total'] += 1
-                rec = json.loads(line)
-                dt = rec.get('decisionType', '')
-                cand = rec.get('candidateFeatures', [])
-                nc = len(cand)
+def scan_files(files, workers=1, progress_cb=None):
+    """Pass 1 (parallel): per-file counts + global max_cand."""
+    print(f"  Pass 1: Scanning {len(files)} files "
+          f"({workers} workers)...", flush=True)
 
-                if dt == 'PRIORITY_ACTION':
-                    counts['priority'] += 1
-                    max_cand['priority'] = max(
-                        max_cand['priority'], nc)
-                elif dt == 'DECLARE_ATTACKERS':
-                    counts['attack'] += 1
-                    max_cand['attack'] = max(
-                        max_cand['attack'], nc)
-                elif dt == 'DECLARE_BLOCKERS':
-                    if cand and len(cand[0]) > CARD_DIM + 10:
-                        counts['block'] += 1
-                        max_cand['block'] = max(
-                            max_cand['block'], nc)
-                elif dt == 'TARGET_SELECTION':
-                    if nc > 1:  # skip trivial choices
-                        counts['target'] += 1
-                        max_cand['target'] = max(
-                            max_cand['target'], nc)
-                elif dt == 'CARD_SELECTION':
-                    if nc >= 1:  # scry 1 has 1 candidate (top or bottom)
-                        counts['card_select'] += 1
-                        max_cand['card_select'] = max(
-                            max_cand['card_select'], nc)
-                elif dt == 'MULLIGAN':
-                    counts['mulligan'] += 1
-                    max_cand['mulligan'] = max(
-                        max_cand['mulligan'], nc)
-                elif dt == 'BINARY_CHOICE':
-                    counts['binary'] += 1
-        except Exception as e:
-            print(f"    Warning: {filepath}: {e}",
-                  flush=True)
+    per_file = [None] * len(files)
+    totals = {'total': 0}
+    for k in DECISION_KEYS:
+        totals[k] = 0
+    g_max = {k: 0 for k in DECISION_KEYS if k != 'binary'}
+
+    def _accumulate(i, c, m):
+        per_file[i] = c
+        for k, v in c.items():
+            totals[k] += v
+        for k, v in m.items():
+            if v > g_max[k]:
+                g_max[k] = v
+
+    if workers <= 1:
+        for fi, fp in enumerate(files):
+            _, c, m = _scan_one(fp)
+            _accumulate(fi, c, m)
+            if (fi + 1) % 200 == 0:
+                print(f"    {fi+1}/{len(files)}", flush=True)
+            if progress_cb and fi % 20 == 0:
+                progress_cb(fi, len(files))
+    else:
+        with Pool(workers) as pool:
+            for fi, (_, c, m) in enumerate(
+                    pool.imap(_scan_one, files, chunksize=8)):
+                _accumulate(fi, c, m)
+                if (fi + 1) % 500 == 0:
+                    print(f"    {fi+1}/{len(files)}", flush=True)
+                if progress_cb and fi % 50 == 0:
+                    progress_cb(fi, len(files))
 
     if progress_cb:
         progress_cb(len(files), len(files))
-    print(f"  Counts: {counts}", flush=True)
-    print(f"  Max candidates: {max_cand}", flush=True)
-    return counts, max_cand
+    print(f"  Counts: {totals}", flush=True)
+    print(f"  Max candidates: {g_max}", flush=True)
+    return totals, g_max, per_file
 
 
 GAMMA = 0.99  # discount factor for value returns
 
 
 def _extract_game_id(filepath):
-    """Extract game ID from trajectory filename.
-    Both files from the same game share a timestamp suffix.
-    e.g. traj_P1_473_vs_P2_473_P1_473_W_1773863635351.jsonl
-         traj_P1_473_vs_P2_473_P2_473_L_1773863635351.jsonl
-    Both have game_id = 1773863635351
-    """
     name = os.path.basename(str(filepath)).replace('.jsonl', '')
-    # Timestamp is the last underscore-separated field
     parts = name.split('_')
     if len(parts) >= 2:
-        return parts[-1]  # the timestamp
+        return parts[-1]
     return name
 
 
 def _build_game_id_map(files):
-    """Build mapping from file index to game_id (integer).
-    Files from the same game get the same game_id."""
     ts_to_game = {}
     game_ids = []
     next_id = 0
@@ -159,442 +184,412 @@ def _build_game_id_map(files):
         game_ids.append(ts_to_game[ts])
     return game_ids
 
+
 def sanitize(arr):
-    """Clip and replace NaN — matches training code."""
     np.clip(arr, -10, 10, out=arr)
     np.nan_to_num(arr, copy=False)
     return arr
 
 
-def preprocess(files, output_dir, counts, max_cand,
-               progress_cb=None):
-    """Pass 2: Create and fill memory-mapped arrays.
+# Worker globals (initialized once per process)
+_W = {}
 
-    Args:
-        progress_cb: optional callback(files_done, files_total)
-    """
+
+def _init_worker(output_dir, shapes, has_keys):
+    """Open all mmaps in r+ mode in this worker."""
+    sh = os.path.join(output_dir, 'shared')
+    _W['gs'] = np.load(os.path.join(sh, 'game_state.npy'),
+                       mmap_mode='r+')
+    _W['gf'] = np.load(os.path.join(sh, 'global_features.npy'),
+                       mmap_mode='r+')
+    _W['outcome'] = np.load(os.path.join(sh, 'outcome.npy'),
+                            mmap_mode='r+')
+    _W['file_id'] = np.load(os.path.join(sh, 'file_id.npy'),
+                            mmap_mode='r+')
+
+    pd = os.path.join(output_dir, 'priority')
+    _W['p_gs_idx'] = np.load(os.path.join(pd, 'gs_index.npy'), mmap_mode='r+')
+    _W['p_cand'] = np.load(os.path.join(pd, 'candidates.npy'), mmap_mode='r+')
+    _W['p_cmask'] = np.load(os.path.join(pd, 'candidate_mask.npy'), mmap_mode='r+')
+    _W['p_sel'] = np.load(os.path.join(pd, 'selected_idx.npy'), mmap_mode='r+')
+    _W['p_aprobs'] = np.load(os.path.join(pd, 'action_probs.npy'), mmap_mode='r+')
+
+    ad = os.path.join(output_dir, 'attack')
+    _W['a_gs_idx'] = np.load(os.path.join(ad, 'gs_index.npy'), mmap_mode='r+')
+    _W['a_crt'] = np.load(os.path.join(ad, 'creatures.npy'), mmap_mode='r+')
+    _W['a_cmask'] = np.load(os.path.join(ad, 'creature_mask.npy'), mmap_mode='r+')
+    _W['a_amask'] = np.load(os.path.join(ad, 'action_mask.npy'), mmap_mode='r+')
+    _W['a_aprobs'] = np.load(os.path.join(ad, 'action_probs.npy'), mmap_mode='r+')
+
+    bd = os.path.join(output_dir, 'block')
+    _W['b_gs_idx'] = np.load(os.path.join(bd, 'gs_index.npy'), mmap_mode='r+')
+    _W['b_pairs'] = np.load(os.path.join(bd, 'pairs.npy'), mmap_mode='r+')
+    _W['b_pmask'] = np.load(os.path.join(bd, 'pair_mask.npy'), mmap_mode='r+')
+    _W['b_amask'] = np.load(os.path.join(bd, 'action_mask.npy'), mmap_mode='r+')
+    _W['b_aprobs'] = np.load(os.path.join(bd, 'action_probs.npy'), mmap_mode='r+')
+
+    if has_keys['target']:
+        td = os.path.join(output_dir, 'target')
+        _W['t_gs_idx'] = np.load(os.path.join(td, 'gs_index.npy'), mmap_mode='r+')
+        _W['t_cand'] = np.load(os.path.join(td, 'candidates.npy'), mmap_mode='r+')
+        _W['t_cmask'] = np.load(os.path.join(td, 'candidate_mask.npy'), mmap_mode='r+')
+        _W['t_sel'] = np.load(os.path.join(td, 'selected_idx.npy'), mmap_mode='r+')
+        _W['t_spell'] = np.load(os.path.join(td, 'spell_features.npy'), mmap_mode='r+')
+
+    if has_keys['card_select']:
+        csd = os.path.join(output_dir, 'card_select')
+        _W['cs_gs_idx'] = np.load(os.path.join(csd, 'gs_index.npy'), mmap_mode='r+')
+        _W['cs_cand'] = np.load(os.path.join(csd, 'candidates.npy'), mmap_mode='r+')
+        _W['cs_cmask'] = np.load(os.path.join(csd, 'candidate_mask.npy'), mmap_mode='r+')
+        _W['cs_amask'] = np.load(os.path.join(csd, 'action_mask.npy'), mmap_mode='r+')
+
+    if has_keys['mulligan']:
+        muld = os.path.join(output_dir, 'mulligan')
+        _W['mul_gs_idx'] = np.load(os.path.join(muld, 'gs_index.npy'), mmap_mode='r+')
+        _W['mul_hand'] = np.load(os.path.join(muld, 'hand_features.npy'), mmap_mode='r+')
+        _W['mul_hmask'] = np.load(os.path.join(muld, 'hand_mask.npy'), mmap_mode='r+')
+        _W['mul_keep'] = np.load(os.path.join(muld, 'keep_decision.npy'), mmap_mode='r+')
+
+    if has_keys['binary']:
+        bind = os.path.join(output_dir, 'binary')
+        _W['bin_gs_idx'] = np.load(os.path.join(bind, 'gs_index.npy'), mmap_mode='r+')
+        _W['bin_decision'] = np.load(os.path.join(bind, 'decision.npy'), mmap_mode='r+')
+
+    _W['shapes'] = shapes
+
+
+def _process_file(task):
+    """Write one file's records to its assigned mmap offsets."""
+    (filepath, game_id, offsets) = task
+    shapes = _W['shapes']
+    mp = shapes['mp']; ma = shapes['ma']; mb = shapes['mb']
+    mt = shapes['mt']; mcs = shapes['mcs']; mmul = shapes['mmul']
+    n_tgt = shapes['n_tgt']; n_cs = shapes['n_cs']
+    n_mul = shapes['n_mul']; n_bin = shapes['n_bin']
+
+    si = offsets['total']
+    pi = offsets['priority']
+    ai = offsets['attack']
+    bi = offsets['block']
+    ti = offsets['target']
+    ci = offsets['card_select']
+    mi = offsets['mulligan']
+    bni = offsets['binary']
+
+    try:
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        if len(lines) < 2:
+            return 0
+        records = [_loads(l) for l in lines[1:]]
+
+        n_recs = len(records)
+        returns = np.zeros(n_recs, dtype=np.float32)
+        G = 0.0
+        for t in range(n_recs - 1, -1, -1):
+            r = records[t].get('intermediateReward', 0.0)
+            tr = records[t].get('terminalReward', 0.0)
+            G = r + tr + GAMMA * G
+            returns[t] = G
+
+        gs = _W['gs']; gf = _W['gf']
+        outcome = _W['outcome']; file_id = _W['file_id']
+
+        for rec_idx, rec in enumerate(records):
+            dt = rec.get('decisionType', '')
+            cand = rec.get('candidateFeatures', [])
+            sel = rec.get('selectedIndices', [])
+            aprobs = rec.get('actionProbabilities', [])
+
+            flat_raw = np.asarray(rec.get('gameStateFlat', []),
+                                  dtype=np.float32)
+            if len(flat_raw) == 0:
+                continue
+            flat = np.zeros(GAME_STATE_DIM, dtype=np.float32)
+            fl = min(len(flat_raw), GAME_STATE_DIM)
+            flat[:fl] = flat_raw[:fl]
+            sanitize(flat)
+
+            gf_raw = np.asarray(rec.get('globalFeatures', []),
+                                dtype=np.float32)
+            g = np.zeros(GLOBAL_DIM, dtype=np.float32)
+            gl = min(len(gf_raw), GLOBAL_DIM)
+            if gl > 0:
+                g[:gl] = gf_raw[:gl]
+            sanitize(g)
+
+            gs[si] = flat
+            gf[si] = g
+            outcome[si] = returns[rec_idx]
+            file_id[si] = game_id
+            shared_row = si
+            si += 1
+
+            nc = len(cand)
+
+            if dt == 'PRIORITY_ACTION':
+                _W['p_gs_idx'][pi] = shared_row
+                for j in range(min(nc, mp)):
+                    cf = cand[j]
+                    cl = min(len(cf), 64)
+                    arr = np.asarray(cf[:cl], dtype=np.float32)
+                    sanitize(arr)
+                    _W['p_cand'][pi, j, :cl] = arr
+                    _W['p_cmask'][pi, j] = True
+                si_val = sel[0] if sel else nc - 1
+                if si_val >= mp:
+                    si_val = mp - 1
+                _W['p_sel'][pi] = si_val
+                for j in range(min(len(aprobs), mp)):
+                    _W['p_aprobs'][pi, j] = aprobs[j]
+                pi += 1
+
+            elif dt == 'DECLARE_ATTACKERS':
+                _W['a_gs_idx'][ai] = shared_row
+                for j in range(min(nc, ma)):
+                    cf = cand[j]
+                    cl = min(len(cf), CARD_DIM)
+                    arr = np.asarray(cf[:cl], dtype=np.float32)
+                    sanitize(arr)
+                    _W['a_crt'][ai, j, :cl] = arr
+                    _W['a_cmask'][ai, j] = True
+                for s in sel:
+                    if 0 <= s < ma:
+                        _W['a_amask'][ai, s] = 1.0
+                for j in range(min(len(aprobs), ma)):
+                    _W['a_aprobs'][ai, j] = aprobs[j]
+                ai += 1
+
+            elif dt == 'DECLARE_BLOCKERS':
+                if not cand or len(cand[0]) <= CARD_DIM + 10:
+                    continue
+                _W['b_gs_idx'][bi] = shared_row
+                for j in range(min(nc, mb)):
+                    cf = cand[j]
+                    cl = min(len(cf), CARD_DIM * 2)
+                    arr = np.asarray(cf[:cl], dtype=np.float32)
+                    sanitize(arr)
+                    _W['b_pairs'][bi, j, :cl] = arr
+                    _W['b_pmask'][bi, j] = True
+                for s in sel:
+                    if 0 <= s < mb:
+                        _W['b_amask'][bi, s] = 1.0
+                for j in range(min(len(aprobs), mb)):
+                    _W['b_aprobs'][bi, j] = aprobs[j]
+                bi += 1
+
+            elif dt == 'TARGET_SELECTION' and n_tgt > 0:
+                if nc <= 1:
+                    continue
+                _W['t_gs_idx'][ti] = shared_row
+                for j in range(min(nc, mt)):
+                    cf = cand[j]
+                    cl = min(len(cf), CARD_DIM)
+                    arr = np.asarray(cf[:cl], dtype=np.float32)
+                    sanitize(arr)
+                    _W['t_cand'][ti, j, :cl] = arr
+                    _W['t_cmask'][ti, j] = True
+                si_val = sel[0] if sel else 0
+                if si_val >= mt:
+                    si_val = mt - 1
+                _W['t_sel'][ti] = si_val
+                sf = rec.get('spellFeatures')
+                if sf is not None:
+                    sl = min(len(sf), 64)
+                    arr = np.asarray(sf[:sl], dtype=np.float32)
+                    sanitize(arr)
+                    _W['t_spell'][ti, :sl] = arr
+                ti += 1
+
+            elif dt == 'CARD_SELECTION' and n_cs > 0:
+                if nc < 1:
+                    continue
+                _W['cs_gs_idx'][ci] = shared_row
+                for j in range(min(nc, mcs)):
+                    cf = cand[j]
+                    cl = min(len(cf), CARD_DIM)
+                    arr = np.asarray(cf[:cl], dtype=np.float32)
+                    sanitize(arr)
+                    _W['cs_cand'][ci, j, :cl] = arr
+                    _W['cs_cmask'][ci, j] = True
+                for s in sel:
+                    if 0 <= s < mcs:
+                        _W['cs_amask'][ci, s] = 1.0
+                ci += 1
+
+            elif dt == 'MULLIGAN' and n_mul > 0:
+                _W['mul_gs_idx'][mi] = shared_row
+                for j in range(min(nc, mmul)):
+                    cf = cand[j]
+                    cl = min(len(cf), CARD_DIM)
+                    arr = np.asarray(cf[:cl], dtype=np.float32)
+                    sanitize(arr)
+                    _W['mul_hand'][mi, j, :cl] = arr
+                    _W['mul_hmask'][mi, j] = True
+                _W['mul_keep'][mi] = 1.0 if (sel and sel[0] == 1) else 0.0
+                mi += 1
+
+            elif dt == 'BINARY_CHOICE' and n_bin > 0:
+                _W['bin_gs_idx'][bni] = shared_row
+                _W['bin_decision'][bni] = 1.0 if (sel and sel[0] == 1) else 0.0
+                bni += 1
+
+        return si - offsets['total']
+    except Exception as e:
+        print(f"    Warning: {filepath}: {e}", flush=True)
+        return 0
+
+
+def _create_arrays(output_dir, counts, max_cand):
+    """Create all mmap files (zero-filled) up front."""
     nt = counts['total']
-    np_ = counts['priority']
-    na = counts['attack']
-    nb = counts['block']
-    n_tgt = counts['target']
-    n_cs = counts['card_select']
-    n_mul = counts['mulligan']
-    n_bin = counts['binary']
+    np_ = counts['priority']; na = counts['attack']; nb = counts['block']
+    n_tgt = counts['target']; n_cs = counts['card_select']
+    n_mul = counts['mulligan']; n_bin = counts['binary']
 
-    # Create directories
     for d in ['shared', 'priority', 'attack', 'block',
               'target', 'card_select', 'mulligan', 'binary']:
-        os.makedirs(os.path.join(output_dir, d),
-                    exist_ok=True)
+        os.makedirs(os.path.join(output_dir, d), exist_ok=True)
 
-    # Shared arrays (one row per decision record)
-    print(f"  Creating shared arrays ({nt} records)...",
-          flush=True)
+    def _mk(path, dtype, shape):
+        a = np.lib.format.open_memmap(path, mode='w+',
+                                      dtype=dtype, shape=shape)
+        a.flush()
+        del a
+
     sh = os.path.join(output_dir, 'shared')
-    gs = np.lib.format.open_memmap(
-        os.path.join(sh, 'game_state.npy'),
-        mode='w+', dtype=np.float32,
-        shape=(nt, GAME_STATE_DIM))
-    gf = np.lib.format.open_memmap(
-        os.path.join(sh, 'global_features.npy'),
-        mode='w+', dtype=np.float32,
-        shape=(nt, GLOBAL_DIM))
-    outcome = np.lib.format.open_memmap(
-        os.path.join(sh, 'outcome.npy'),
-        mode='w+', dtype=np.float32, shape=(nt,))
-    file_id = np.lib.format.open_memmap(
-        os.path.join(sh, 'file_id.npy'),
-        mode='w+', dtype=np.int32, shape=(nt,))
+    _mk(os.path.join(sh, 'game_state.npy'), np.float32, (nt, GAME_STATE_DIM))
+    _mk(os.path.join(sh, 'global_features.npy'), np.float32, (nt, GLOBAL_DIM))
+    _mk(os.path.join(sh, 'outcome.npy'), np.float32, (nt,))
+    _mk(os.path.join(sh, 'file_id.npy'), np.int32, (nt,))
 
-    # Priority arrays
-    print(f"  Creating priority arrays ({np_} records, "
-          f"max_cand={max_cand['priority']})...",
-          flush=True)
     pd = os.path.join(output_dir, 'priority')
-    mp = max_cand['priority']
-    p_gs_idx = np.lib.format.open_memmap(
-        os.path.join(pd, 'gs_index.npy'),
-        mode='w+', dtype=np.int64, shape=(np_,))
-    p_cand = np.lib.format.open_memmap(
-        os.path.join(pd, 'candidates.npy'),
-        mode='w+', dtype=np.float32,
-        shape=(np_, mp, 64))
-    p_cmask = np.lib.format.open_memmap(
-        os.path.join(pd, 'candidate_mask.npy'),
-        mode='w+', dtype=np.bool_, shape=(np_, mp))
-    p_sel = np.lib.format.open_memmap(
-        os.path.join(pd, 'selected_idx.npy'),
-        mode='w+', dtype=np.int32, shape=(np_,))
-    p_aprobs = np.lib.format.open_memmap(
-        os.path.join(pd, 'action_probs.npy'),
-        mode='w+', dtype=np.float32, shape=(np_, mp))
+    mp = max(max_cand['priority'], 1)
+    _mk(os.path.join(pd, 'gs_index.npy'), np.int64, (np_,))
+    _mk(os.path.join(pd, 'candidates.npy'), np.float32, (np_, mp, 64))
+    _mk(os.path.join(pd, 'candidate_mask.npy'), np.bool_, (np_, mp))
+    _mk(os.path.join(pd, 'selected_idx.npy'), np.int32, (np_,))
+    _mk(os.path.join(pd, 'action_probs.npy'), np.float32, (np_, mp))
 
-    # Attack arrays
-    print(f"  Creating attack arrays ({na} records, "
-          f"max_cand={max_cand['attack']})...",
-          flush=True)
     ad = os.path.join(output_dir, 'attack')
-    ma = max_cand['attack']
-    a_gs_idx = np.lib.format.open_memmap(
-        os.path.join(ad, 'gs_index.npy'),
-        mode='w+', dtype=np.int64, shape=(na,))
-    a_crt = np.lib.format.open_memmap(
-        os.path.join(ad, 'creatures.npy'),
-        mode='w+', dtype=np.float32,
-        shape=(na, ma, CARD_DIM))
-    a_cmask = np.lib.format.open_memmap(
-        os.path.join(ad, 'creature_mask.npy'),
-        mode='w+', dtype=np.bool_, shape=(na, ma))
-    a_amask = np.lib.format.open_memmap(
-        os.path.join(ad, 'action_mask.npy'),
-        mode='w+', dtype=np.float32, shape=(na, ma))
-    a_aprobs = np.lib.format.open_memmap(
-        os.path.join(ad, 'action_probs.npy'),
-        mode='w+', dtype=np.float32, shape=(na, ma))
+    ma = max(max_cand['attack'], 1)
+    _mk(os.path.join(ad, 'gs_index.npy'), np.int64, (na,))
+    _mk(os.path.join(ad, 'creatures.npy'), np.float32, (na, ma, CARD_DIM))
+    _mk(os.path.join(ad, 'creature_mask.npy'), np.bool_, (na, ma))
+    _mk(os.path.join(ad, 'action_mask.npy'), np.float32, (na, ma))
+    _mk(os.path.join(ad, 'action_probs.npy'), np.float32, (na, ma))
 
-    # Block arrays
-    print(f"  Creating block arrays ({nb} records, "
-          f"max_cand={max_cand['block']})...",
-          flush=True)
     bd = os.path.join(output_dir, 'block')
-    mb = max_cand['block']
-    b_gs_idx = np.lib.format.open_memmap(
-        os.path.join(bd, 'gs_index.npy'),
-        mode='w+', dtype=np.int64, shape=(nb,))
-    b_pairs = np.lib.format.open_memmap(
-        os.path.join(bd, 'pairs.npy'),
-        mode='w+', dtype=np.float32,
-        shape=(nb, mb, CARD_DIM * 2))
-    b_pmask = np.lib.format.open_memmap(
-        os.path.join(bd, 'pair_mask.npy'),
-        mode='w+', dtype=np.bool_, shape=(nb, mb))
-    b_amask = np.lib.format.open_memmap(
-        os.path.join(bd, 'action_mask.npy'),
-        mode='w+', dtype=np.float32, shape=(nb, mb))
-    b_aprobs = np.lib.format.open_memmap(
-        os.path.join(bd, 'action_probs.npy'),
-        mode='w+', dtype=np.float32, shape=(nb, mb))
+    mb = max(max_cand['block'], 1)
+    _mk(os.path.join(bd, 'gs_index.npy'), np.int64, (nb,))
+    _mk(os.path.join(bd, 'pairs.npy'), np.float32, (nb, mb, CARD_DIM * 2))
+    _mk(os.path.join(bd, 'pair_mask.npy'), np.bool_, (nb, mb))
+    _mk(os.path.join(bd, 'action_mask.npy'), np.float32, (nb, mb))
+    _mk(os.path.join(bd, 'action_probs.npy'), np.float32, (nb, mb))
 
-    # Target arrays (single-select from candidates, 256-dim features)
+    mt = 0
     if n_tgt > 0:
-        mt = max_cand['target']
-        print(f"  Creating target arrays ({n_tgt} records, "
-              f"max_cand={mt})...", flush=True)
+        mt = max(max_cand['target'], 1)
         td = os.path.join(output_dir, 'target')
-        t_gs_idx = np.lib.format.open_memmap(
-            os.path.join(td, 'gs_index.npy'),
-            mode='w+', dtype=np.int64, shape=(n_tgt,))
-        t_cand = np.lib.format.open_memmap(
-            os.path.join(td, 'candidates.npy'),
-            mode='w+', dtype=np.float32,
-            shape=(n_tgt, mt, CARD_DIM))
-        t_cmask = np.lib.format.open_memmap(
-            os.path.join(td, 'candidate_mask.npy'),
-            mode='w+', dtype=np.bool_, shape=(n_tgt, mt))
-        t_sel = np.lib.format.open_memmap(
-            os.path.join(td, 'selected_idx.npy'),
-            mode='w+', dtype=np.int32, shape=(n_tgt,))
-        t_spell = np.lib.format.open_memmap(
-            os.path.join(td, 'spell_features.npy'),
-            mode='w+', dtype=np.float32, shape=(n_tgt, 64))
-    else:
-        mt = 0
+        _mk(os.path.join(td, 'gs_index.npy'), np.int64, (n_tgt,))
+        _mk(os.path.join(td, 'candidates.npy'), np.float32, (n_tgt, mt, CARD_DIM))
+        _mk(os.path.join(td, 'candidate_mask.npy'), np.bool_, (n_tgt, mt))
+        _mk(os.path.join(td, 'selected_idx.npy'), np.int32, (n_tgt,))
+        _mk(os.path.join(td, 'spell_features.npy'), np.float32, (n_tgt, 64))
 
-    # Card select arrays (multi-select, 256-dim features)
+    mcs = 0
     if n_cs > 0:
-        mcs = max_cand['card_select']
-        print(f"  Creating card_select arrays ({n_cs} records, "
-              f"max_cand={mcs})...", flush=True)
+        mcs = max(max_cand['card_select'], 1)
         csd = os.path.join(output_dir, 'card_select')
-        cs_gs_idx = np.lib.format.open_memmap(
-            os.path.join(csd, 'gs_index.npy'),
-            mode='w+', dtype=np.int64, shape=(n_cs,))
-        cs_cand = np.lib.format.open_memmap(
-            os.path.join(csd, 'candidates.npy'),
-            mode='w+', dtype=np.float32,
-            shape=(n_cs, mcs, CARD_DIM))
-        cs_cmask = np.lib.format.open_memmap(
-            os.path.join(csd, 'candidate_mask.npy'),
-            mode='w+', dtype=np.bool_, shape=(n_cs, mcs))
-        cs_amask = np.lib.format.open_memmap(
-            os.path.join(csd, 'action_mask.npy'),
-            mode='w+', dtype=np.float32, shape=(n_cs, mcs))
-    else:
-        mcs = 0
+        _mk(os.path.join(csd, 'gs_index.npy'), np.int64, (n_cs,))
+        _mk(os.path.join(csd, 'candidates.npy'), np.float32, (n_cs, mcs, CARD_DIM))
+        _mk(os.path.join(csd, 'candidate_mask.npy'), np.bool_, (n_cs, mcs))
+        _mk(os.path.join(csd, 'action_mask.npy'), np.float32, (n_cs, mcs))
 
-    # Mulligan arrays (hand features + keep/mull decision)
+    mmul = 7
     if n_mul > 0:
-        mmul = max_cand['mulligan']
-        if mmul == 0:
-            mmul = 7  # max hand size
-        print(f"  Creating mulligan arrays ({n_mul} records, "
-              f"max_hand={mmul})...", flush=True)
+        mmul = max(max_cand['mulligan'], 7)
         muld = os.path.join(output_dir, 'mulligan')
-        mul_gs_idx = np.lib.format.open_memmap(
-            os.path.join(muld, 'gs_index.npy'),
-            mode='w+', dtype=np.int64, shape=(n_mul,))
-        mul_hand = np.lib.format.open_memmap(
-            os.path.join(muld, 'hand_features.npy'),
-            mode='w+', dtype=np.float32,
-            shape=(n_mul, mmul, CARD_DIM))
-        mul_hmask = np.lib.format.open_memmap(
-            os.path.join(muld, 'hand_mask.npy'),
-            mode='w+', dtype=np.bool_, shape=(n_mul, mmul))
-        mul_keep = np.lib.format.open_memmap(
-            os.path.join(muld, 'keep_decision.npy'),
-            mode='w+', dtype=np.float32, shape=(n_mul,))
-    else:
-        mmul = 7
+        _mk(os.path.join(muld, 'gs_index.npy'), np.int64, (n_mul,))
+        _mk(os.path.join(muld, 'hand_features.npy'), np.float32, (n_mul, mmul, CARD_DIM))
+        _mk(os.path.join(muld, 'hand_mask.npy'), np.bool_, (n_mul, mmul))
+        _mk(os.path.join(muld, 'keep_decision.npy'), np.float32, (n_mul,))
 
-    # Binary arrays (just game state + decision)
     if n_bin > 0:
-        print(f"  Creating binary arrays ({n_bin} records)...",
-              flush=True)
         bind = os.path.join(output_dir, 'binary')
-        bin_gs_idx = np.lib.format.open_memmap(
-            os.path.join(bind, 'gs_index.npy'),
-            mode='w+', dtype=np.int64, shape=(n_bin,))
-        bin_decision = np.lib.format.open_memmap(
-            os.path.join(bind, 'decision.npy'),
-            mode='w+', dtype=np.float32, shape=(n_bin,))
+        _mk(os.path.join(bind, 'gs_index.npy'), np.int64, (n_bin,))
+        _mk(os.path.join(bind, 'decision.npy'), np.float32, (n_bin,))
 
-    # Build game-level file IDs (both perspectives of same game get same ID)
+    return {
+        'mp': mp, 'ma': ma, 'mb': mb, 'mt': mt,
+        'mcs': mcs, 'mmul': mmul,
+        'n_tgt': n_tgt, 'n_cs': n_cs,
+        'n_mul': n_mul, 'n_bin': n_bin,
+    }
+
+
+def preprocess(files, output_dir, counts, max_cand,
+               per_file_counts, workers=1, progress_cb=None):
+    """Pass 2 (parallel): write each file into preassigned mmap offsets."""
+    shapes = _create_arrays(output_dir, counts, max_cand)
+    has_keys = {
+        'target': counts['target'] > 0,
+        'card_select': counts['card_select'] > 0,
+        'mulligan': counts['mulligan'] > 0,
+        'binary': counts['binary'] > 0,
+    }
+
     game_ids = _build_game_id_map(files)
     n_games = len(set(game_ids))
-    print(f"  Game IDs: {n_games} unique games from {len(files)} files",
-          flush=True)
+    print(f"  Game IDs: {n_games} unique games from "
+          f"{len(files)} files", flush=True)
 
-    # Pass 2: Fill arrays
-    print(f"\n  Pass 2: Writing {len(files)} files...",
-          flush=True)
-    si = 0  # shared index
-    pi = 0  # priority index
-    ai = 0  # attack index
-    bi = 0  # block index
-    ti = 0  # target index
-    ci = 0  # card select index
-    mi = 0  # mulligan index
-    bni = 0  # binary index
+    # Build per-file offsets via prefix sum.
+    offsets_list = []
+    running = {'total': 0}
+    for k in DECISION_KEYS:
+        running[k] = 0
+    for fc in per_file_counts:
+        offsets_list.append(dict(running))
+        for k in running:
+            running[k] += fc[k]
 
-    for fi, filepath in enumerate(files):
-        if (fi + 1) % 200 == 0:
-            print(f"    {fi+1}/{len(files)} "
-                  f"(s={si} p={pi} a={ai} b={bi})",
-                  flush=True)
-        if progress_cb and fi % 20 == 0:
-            progress_cb(fi, len(files))
-        try:
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-            if len(lines) < 2:
-                continue
-            header = json.loads(lines[0])
-            won = header.get('won', False)
+    tasks = [(files[i], game_ids[i], offsets_list[i])
+             for i in range(len(files))]
 
-            # Parse all records first to compute
-            # discounted returns backward
-            records = []
-            for line in lines[1:]:
-                records.append(json.loads(line))
+    print(f"\n  Pass 2: Writing {len(files)} files "
+          f"({workers} workers)...", flush=True)
 
-            # Compute discounted returns:
-            # G_t = r_t + γ*G_{t+1}
-            # where r_t = intermediateReward (shaping)
-            # and terminal reward on last step
-            n_recs = len(records)
-            returns = np.zeros(n_recs, dtype=np.float32)
-            G = 0.0
-            for t in range(n_recs - 1, -1, -1):
-                r = records[t].get(
-                    'intermediateReward', 0.0)
-                tr = records[t].get(
-                    'terminalReward', 0.0)
-                G = r + tr + GAMMA * G
-                returns[t] = G
-
-            for rec_idx, rec in enumerate(records):
-                dt = rec.get('decisionType', '')
-                cand = rec.get('candidateFeatures', [])
-                sel = rec.get('selectedIndices', [])
-                aprobs = rec.get(
-                    'actionProbabilities', [])
-
-                # Parse game state
-                flat_raw = np.array(
-                    rec.get('gameStateFlat', []),
-                    dtype=np.float32)
-                if len(flat_raw) == 0:
-                    continue
-                flat = np.zeros(GAME_STATE_DIM,
-                                dtype=np.float32)
-                fl = min(len(flat_raw), GAME_STATE_DIM)
-                flat[:fl] = flat_raw[:fl]
-                sanitize(flat)
-
-                gf_raw = np.array(
-                    rec.get('globalFeatures', []),
-                    dtype=np.float32)
-                g = np.zeros(GLOBAL_DIM, dtype=np.float32)
-                gl = min(len(gf_raw), GLOBAL_DIM)
-                if gl > 0:
-                    g[:gl] = gf_raw[:gl]
-                sanitize(g)
-
-                # Write shared — discounted return, not
-                # binary outcome
-                gs[si] = flat
-                gf[si] = g
-                outcome[si] = returns[rec_idx]
-                file_id[si] = game_ids[fi]  # game-level ID, not file-level
-                shared_row = si
-                si += 1
-
-                nc = len(cand)
-
-                if dt == 'PRIORITY_ACTION':
-                    p_gs_idx[pi] = shared_row
-                    for j in range(min(nc, mp)):
-                        cf = cand[j]
-                        cl = min(len(cf), 64)
-                        p_cand[pi, j, :cl] = sanitize(
-                            np.array(cf[:cl],
-                                     dtype=np.float32))
-                        p_cmask[pi, j] = True
-                    si_val = sel[0] if sel else nc - 1
-                    if si_val >= mp:
-                        si_val = mp - 1
-                    p_sel[pi] = si_val
-                    for j in range(min(len(aprobs), mp)):
-                        p_aprobs[pi, j] = aprobs[j]
-                    pi += 1
-
-                elif dt == 'DECLARE_ATTACKERS':
-                    a_gs_idx[ai] = shared_row
-                    for j in range(min(nc, ma)):
-                        cf = cand[j]
-                        cl = min(len(cf), CARD_DIM)
-                        a_crt[ai, j, :cl] = sanitize(
-                            np.array(cf[:cl],
-                                     dtype=np.float32))
-                        a_cmask[ai, j] = True
-                    for s in sel:
-                        if 0 <= s < ma:
-                            a_amask[ai, s] = 1.0
-                    for j in range(min(len(aprobs), ma)):
-                        a_aprobs[ai, j] = aprobs[j]
-                    ai += 1
-
-                elif dt == 'DECLARE_BLOCKERS':
-                    if not cand or len(cand[0]) <= CARD_DIM + 10:
-                        continue
-                    b_gs_idx[bi] = shared_row
-                    for j in range(min(nc, mb)):
-                        cf = cand[j]
-                        cl = min(len(cf), CARD_DIM * 2)
-                        b_pairs[bi, j, :cl] = sanitize(
-                            np.array(cf[:cl],
-                                     dtype=np.float32))
-                        b_pmask[bi, j] = True
-                    for s in sel:
-                        if 0 <= s < mb:
-                            b_amask[bi, s] = 1.0
-                    for j in range(min(len(aprobs), mb)):
-                        b_aprobs[bi, j] = aprobs[j]
-                    bi += 1
-
-                elif dt == 'TARGET_SELECTION' and n_tgt > 0:
-                    if nc <= 1:
-                        continue  # trivial choice
-                    t_gs_idx[ti] = shared_row
-                    for j in range(min(nc, mt)):
-                        cf = cand[j]
-                        cl = min(len(cf), CARD_DIM)
-                        t_cand[ti, j, :cl] = sanitize(
-                            np.array(cf[:cl],
-                                     dtype=np.float32))
-                        t_cmask[ti, j] = True
-                    si_val = sel[0] if sel else 0
-                    if si_val >= mt:
-                        si_val = mt - 1
-                    t_sel[ti] = si_val
-                    # Store spell features if present
-                    sf = rec.get('spellFeatures')
-                    if sf is not None:
-                        sl = min(len(sf), 64)
-                        t_spell[ti, :sl] = sanitize(
-                            np.array(sf[:sl],
-                                     dtype=np.float32))
-                    ti += 1
-
-                elif dt == 'CARD_SELECTION' and n_cs > 0:
-                    if nc < 1:
-                        continue
-                    cs_gs_idx[ci] = shared_row
-                    for j in range(min(nc, mcs)):
-                        cf = cand[j]
-                        cl = min(len(cf), CARD_DIM)
-                        cs_cand[ci, j, :cl] = sanitize(
-                            np.array(cf[:cl],
-                                     dtype=np.float32))
-                        cs_cmask[ci, j] = True
-                    for s in sel:
-                        if 0 <= s < mcs:
-                            cs_amask[ci, s] = 1.0
-                    ci += 1
-
-                elif dt == 'MULLIGAN' and n_mul > 0:
-                    mul_gs_idx[mi] = shared_row
-                    for j in range(min(nc, mmul)):
-                        cf = cand[j]
-                        cl = min(len(cf), CARD_DIM)
-                        mul_hand[mi, j, :cl] = sanitize(
-                            np.array(cf[:cl],
-                                     dtype=np.float32))
-                        mul_hmask[mi, j] = True
-                    # sel[0]=1 means keep, sel[0]=0 means mull
-                    mul_keep[mi] = 1.0 if (sel and sel[0] == 1) else 0.0
-                    mi += 1
-
-                elif dt == 'BINARY_CHOICE' and n_bin > 0:
-                    bin_gs_idx[bni] = shared_row
-                    # sel[0]=1 means yes, sel[0]=0 means no
-                    bin_decision[bni] = 1.0 if (sel and sel[0] == 1) else 0.0
-                    bni += 1
-
-        except Exception as e:
-            print(f"    Warning: {filepath}: {e}",
-                  flush=True)
-
-    # Flush all arrays
-    for arr in [gs, gf, outcome, file_id,
-                p_gs_idx, p_cand, p_cmask, p_sel,
-                p_aprobs,
-                a_gs_idx, a_crt, a_cmask, a_amask,
-                a_aprobs,
-                b_gs_idx, b_pairs, b_pmask, b_amask,
-                b_aprobs]:
-        arr.flush()
-    if n_tgt > 0:
-        for arr in [t_gs_idx, t_cand, t_cmask, t_sel]:
-            arr.flush()
-    if n_cs > 0:
-        for arr in [cs_gs_idx, cs_cand, cs_cmask, cs_amask]:
-            arr.flush()
-    if n_mul > 0:
-        for arr in [mul_gs_idx, mul_hand, mul_hmask, mul_keep]:
-            arr.flush()
-    if n_bin > 0:
-        for arr in [bin_gs_idx, bin_decision]:
-            arr.flush()
+    if workers <= 1:
+        _init_worker(output_dir, shapes, has_keys)
+        for fi, t in enumerate(tasks):
+            _process_file(t)
+            if (fi + 1) % 200 == 0:
+                print(f"    {fi+1}/{len(files)}", flush=True)
+            if progress_cb and fi % 20 == 0:
+                progress_cb(fi, len(files))
+    else:
+        with Pool(workers, initializer=_init_worker,
+                  initargs=(output_dir, shapes, has_keys)) as pool:
+            for fi, _ in enumerate(
+                    pool.imap_unordered(_process_file, tasks,
+                                        chunksize=4)):
+                if (fi + 1) % 500 == 0:
+                    print(f"    {fi+1}/{len(files)}", flush=True)
+                if progress_cb and fi % 50 == 0:
+                    progress_cb(fi, len(files))
 
     if progress_cb:
         progress_cb(len(files), len(files))
 
-    return {'total': si, 'priority': pi,
-            'attack': ai, 'block': bi,
-            'target': ti, 'card_select': ci,
-            'mulligan': mi, 'binary': bni}
+    return {'total': running['total'],
+            'priority': running['priority'],
+            'attack': running['attack'],
+            'block': running['block'],
+            'target': running['target'],
+            'card_select': running['card_select'],
+            'mulligan': running['mulligan'],
+            'binary': running['binary']}
 
 
 def main():
@@ -604,30 +599,30 @@ def main():
         default='../../rl_data/trajectories')
     parser.add_argument('--output-dir',
         default='../../rl_data/preprocessed')
+    parser.add_argument('--workers', type=int, default=0,
+        help='Parallel workers (default: os.cpu_count())')
     args = parser.parse_args()
+
+    workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
 
     t0 = time.time()
     print("=== Trajectory Preprocessing ===", flush=True)
+    print(f"  Workers: {workers}", flush=True)
 
     path = Path(args.data_dir)
     files = sorted(path.glob('traj_*.jsonl'))
-    print(f"  Found {len(files)} trajectory files",
-          flush=True)
+    print(f"  Found {len(files)} trajectory files", flush=True)
     if not files:
         print("  ERROR: No files found", flush=True)
         sys.exit(1)
 
-    # Pass 1
-    counts, max_cand = scan_files(files)
+    counts, max_cand, per_file = scan_files(files, workers=workers)
 
-    # Create output
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Pass 2
-    final = preprocess(files, args.output_dir,
-                       counts, max_cand)
+    final = preprocess(files, args.output_dir, counts, max_cand,
+                       per_file, workers=workers)
 
-    # Metadata
     metadata = {
         'source_dir': str(args.data_dir),
         'n_files': len(files),
@@ -649,8 +644,7 @@ def main():
     elapsed = time.time() - t0
     print(f"\n=== Preprocessing Complete ===", flush=True)
     print(f"  Time: {elapsed:.1f}s", flush=True)
-    print(f"  Shared: {final['total']} records",
-          flush=True)
+    print(f"  Shared: {final['total']} records", flush=True)
     print(f"  Priority: {final['priority']}", flush=True)
     print(f"  Attack: {final['attack']}", flush=True)
     print(f"  Block: {final['block']}", flush=True)
@@ -659,14 +653,12 @@ def main():
     print(f"  Mulligan: {final['mulligan']}", flush=True)
     print(f"  Binary: {final['binary']}", flush=True)
 
-    # Disk usage
     total_bytes = 0
     for root, dirs, fnames in os.walk(args.output_dir):
         for fn in fnames:
             total_bytes += os.path.getsize(
                 os.path.join(root, fn))
-    print(f"  Disk: {total_bytes/1024**3:.1f} GB",
-          flush=True)
+    print(f"  Disk: {total_bytes/1024**3:.1f} GB", flush=True)
 
 
 if __name__ == '__main__':
