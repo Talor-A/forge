@@ -34,7 +34,7 @@ die()  { printf '\n\033[1;31m[bootstrap FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 # ─── 1. System packages ──────────────────────────────────────────────
 log "Step 1/6  System packages"
 NEED_PKGS=()
-for pkg in openjdk-21-jdk maven git python3-pip python3-venv htop tmux curl xvfb; do
+for pkg in openjdk-21-jdk maven git python3-pip python3-venv python3.10 python3.10-venv htop tmux curl xvfb; do
     dpkg -s "$pkg" >/dev/null 2>&1 || NEED_PKGS+=("$pkg")
 done
 if [ ${#NEED_PKGS[@]} -gt 0 ]; then
@@ -162,6 +162,15 @@ if [ "$found_any" = "0" ]; then
     warn "  scp -i ~/.runpod/ssh/RunPod-Key-Go -P <port> \\"
     warn "      ~/.forge/decks/constructed/*.dck root@<ip>:/workspace/decks/"
     warn "Then rerun this bootstrap script."
+fi
+
+# ─── 7. Python deps for preprocess (python3.10 + numpy) ──────────────
+log "Step 7  Python deps"
+if python3.10 -c "import numpy" 2>/dev/null; then
+    log "  numpy already available for python3.10"
+else
+    python3.10 -m pip install --break-system-packages -q numpy
+    log "  installed numpy for python3.10 ($(python3.10 -c 'import numpy; print(numpy.__version__)'))"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────

@@ -92,8 +92,9 @@ case "$OUTPUT_DIR" in
     *) die "OUTPUT_DIR must be under /workspace (got $OUTPUT_DIR)" ;;
 esac
 
-# Disk free vs estimate (~150 KB/game heuristic from existing data)
-EST_KB=$(( GAMES * 150 ))
+# Disk free vs estimate (~20 MB/game observed: 100 games -> 1.9 GB).
+# Each decision serializes a 37k-float game state, so traces are dense.
+EST_KB=$(( GAMES * 20000 ))
 FREE_KB=$(df -k /workspace | awk 'NR==2 {print $4}')
 echo "  disk: free=${FREE_KB}KB  estimate=${EST_KB}KB"
 if [ "$EST_KB" -gt 0 ] && [ "$FREE_KB" -lt $((EST_KB * 2)) ]; then
