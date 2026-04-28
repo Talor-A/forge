@@ -15,9 +15,9 @@
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/austinio7116/forge.git}"
+REPO_URL="${REPO_URL:-https://github.com/Talor-A/forge.git}"
 REPO_DIR="${REPO_DIR:-/workspace/forge-ai-investigation}"
-FORGE_BRANCH="${FORGE_BRANCH:-}"
+FORGE_BRANCH="${FORGE_BRANCH:-ai_investigation}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 
 DECK_DIR="$HOME/.forge/decks/constructed"
