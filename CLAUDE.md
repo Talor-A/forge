@@ -42,9 +42,6 @@ Subclassing `LobbyPlayerAi` causes instant turn-0 game termination. The game eng
 ### DO NOT add fields to PlayerControllerAi
 Adding a `decisionListener` field to `PlayerControllerAi` breaks the fat jar. The modified `forge-ai` class conflicts with `forge-game` expectations at runtime, causing silent turn-0 failures. All recording must be done via the EventBus (`game.subscribeToEvents()`).
 
-### DO NOT use DataLoader num_workers > 0 with large in-memory datasets
-Python's fork-based DataLoader workers duplicate the entire process memory. With 3-5GB of trajectory data loaded, each worker adds another 5GB. This causes swap thrashing and apparent hangs after epoch 1. Always use `num_workers=0`.
-
 ### Localizer Java 21 fix
 `ResourceBundle.getBundle()` fails in Java 21 with the original fallback code `new Locale("en_US")`. Fixed in `Localizer.java` to use `PropertyResourceBundle` direct file loading as last resort.
 
