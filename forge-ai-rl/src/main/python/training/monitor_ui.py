@@ -167,13 +167,13 @@ class MonitorUI:
         self.ax_wr.set_facecolor('#313244')
         self.ax_wr.set_title('Win Rate vs Heuristic',
             color='#cdd6f4', fontsize=10)
-        self.ax_wr.plot(eval_rounds, win_rates, color='#a6e3a1',
-            linewidth=2, marker='o', markersize=4)
         self.ax_wr.axhline(y=0.5, color='#f38ba8',
-            linestyle='--', linewidth=1, label='50%')
+            linestyle='--', linewidth=1, label='50%', zorder=1)
         self.ax_wr.axhline(y=best_wr, color='#f9e2af',
             linestyle=':', linewidth=1,
-            label=f'best {best_wr:.1%}')
+            label=f'best {best_wr:.1%}', zorder=2)
+        self.ax_wr.plot(eval_rounds, win_rates, color='#a6e3a1',
+            linewidth=2, marker='o', markersize=4, zorder=3)
         self.ax_wr.set_xlim(1, n_rounds + 3)
         self.ax_wr.set_ylim(0, 0.6)
         self.ax_wr.set_ylabel('Win Rate',
