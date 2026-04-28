@@ -102,6 +102,7 @@ mkdir -p "$DECK_DIR"
 # so we look for them under a few likely locations and copy if found.
 WANTED=("Green Stompy.dck" "White Weenie.dck" "Blue Tempo.dck" "Red Aggro.dck")
 SEARCH_ROOTS=(
+    "/workspace/decks"
     "$REPO_DIR/rl_data/decks"
     "$REPO_DIR/forge-ai-rl/decks"
     "$REPO_DIR/decks"
@@ -126,9 +127,16 @@ for name in "${WANTED[@]}"; do
         log "  copied $name from $src"
         found_any=1
     else
-        warn "  $name not found in repo — copy it to $DECK_DIR manually before running 'rltrain collect'"
+        warn "  $name not found — scp it to /workspace/decks/ on the pod and rerun this script"
     fi
 done
+
+if [ "$found_any" = "0" ]; then
+    warn "No decks found. From your Mac:"
+    warn "  scp -i ~/.runpod/ssh/RunPod-Key-Go -P <port> \\"
+    warn "      ~/.forge/decks/constructed/*.dck root@<ip>:/workspace/decks/"
+    warn "Then rerun this bootstrap script."
+fi
 
 # ─── Summary ─────────────────────────────────────────────────────────
 log "Bootstrap complete."
