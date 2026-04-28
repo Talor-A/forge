@@ -157,14 +157,16 @@ class MonitorUI:
         # All x-axes use true round numbers so charts are comparable
         n_rounds = rnd  # total rounds completed
         all_rounds = range(1, n_rounds + 1)
-        # eval rounds: every eval_interval (infer from ratio)
-        eval_interval = max(1, round(n_rounds / len(win_rates))) \
-            if win_rates else 1
-        eval_rounds = [i * eval_interval for i in
-                       range(1, len(win_rates) + 1)]
-        gp_rounds = [i * eval_interval for i in
-                     range(1, len(atk_rates) + 1)] if atk_rates \
-                    else eval_rounds
+        # eval rounds: spread evenly so the last point lands on n_rounds
+        def _spread(n_pts):
+            if n_pts <= 0:
+                return []
+            if n_pts == 1:
+                return [n_rounds]
+            step = n_rounds / n_pts
+            return [round((i + 1) * step) for i in range(n_pts)]
+        eval_rounds = _spread(len(win_rates))
+        gp_rounds = _spread(len(atk_rates)) if atk_rates else eval_rounds
 
         # Shared x-axis: span all data with ~7% right padding
         max_x = max(
