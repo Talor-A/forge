@@ -54,12 +54,19 @@ df -h /workspace | tail -1
 
 # ─── 3. Repo clone / update ──────────────────────────────────────────
 log "Step 3/6  Repo at $REPO_DIR"
+CLONE_DEPTH="${CLONE_DEPTH:-1}"
 if [ ! -d "$REPO_DIR/.git" ]; then
-    log "  cloning $REPO_URL"
-    git clone "$REPO_URL" "$REPO_DIR"
+    log "  shallow clone (depth=$CLONE_DEPTH) of $REPO_URL"
+    if [ -n "$FORGE_BRANCH" ]; then
+        git clone --depth "$CLONE_DEPTH" --branch "$FORGE_BRANCH" \
+            --single-branch "$REPO_URL" "$REPO_DIR"
+    else
+        git clone --depth "$CLONE_DEPTH" --single-branch \
+            "$REPO_URL" "$REPO_DIR"
+    fi
 else
     log "  already cloned, fetching"
-    git -C "$REPO_DIR" fetch --quiet
+    git -C "$REPO_DIR" fetch --depth "$CLONE_DEPTH" --quiet
 fi
 if [ -n "$FORGE_BRANCH" ]; then
     git -C "$REPO_DIR" checkout "$FORGE_BRANCH"
