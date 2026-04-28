@@ -34,7 +34,7 @@ die()  { printf '\n\033[1;31m[bootstrap FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 # ─── 1. System packages ──────────────────────────────────────────────
 log "Step 1/6  System packages"
 NEED_PKGS=()
-for pkg in openjdk-21-jdk maven git python3-pip python3-venv htop tmux curl; do
+for pkg in openjdk-21-jdk maven git python3-pip python3-venv htop tmux curl xvfb; do
     dpkg -s "$pkg" >/dev/null 2>&1 || NEED_PKGS+=("$pkg")
 done
 if [ ${#NEED_PKGS[@]} -gt 0 ]; then

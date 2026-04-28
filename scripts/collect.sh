@@ -76,6 +76,9 @@ JAVA_VER=$(java -version 2>&1 | head -1)
 echo "  java: $JAVA_VER"
 echo "$JAVA_VER" | grep -q '"21' || die "Java 21 required, got: $JAVA_VER"
 
+# xvfb-run (Forge's Main needs a virtual display even for rltrain)
+command -v xvfb-run >/dev/null || die "xvfb-run missing — apt install xvfb (or rerun runpod_bootstrap.sh)"
+
 # Decks
 DECK_DIR="$HOME/.forge/decks/constructed"
 for d in "${DECKS[@]}"; do
@@ -153,7 +156,9 @@ for i in $(seq 0 $((JVMS - 1))); do
     mkdir -p "$OUT_I"
     log "JVM $i  -> -n $PER_JVM  out=$OUT_I  log=$LOG_I"
 
-    java -Xmx${JVM_XMX_MB}m \
+    # xvfb-run provides a virtual X display; Forge's Main instantiates
+    # GuiDesktop on every entry point, which fails without one.
+    xvfb-run -a java -Xmx${JVM_XMX_MB}m \
         --add-opens java.base/java.lang=ALL-UNNAMED \
         --add-opens java.base/java.util=ALL-UNNAMED \
         --add-opens java.base/java.text=ALL-UNNAMED \
