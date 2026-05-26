@@ -21,7 +21,7 @@ java -Xmx8192m \
     --add-opens java.base/java.text=ALL-UNNAMED \
     --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
-    -jar target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar \
+    -jar target/forge-gui-desktop-2.0.13-SNAPSHOT-jar-with-dependencies.jar \
     rltrain collect \
     -d "Green Stompy.dck" -d "White Weenie.dck" -d "Blue Tempo.dck" -d "Red Aggro.dck" \
     -n 1000 -t 16 \
@@ -30,7 +30,6 @@ java -Xmx8192m \
 
 ### Build command (from project root)
 ```bash
-cd /home/maustin/forge
 mvn package -pl forge-gui-desktop -am -Denforcer.skip=true -Dcheckstyle.skip=true -DskipTests -q
 ```
 
@@ -58,13 +57,13 @@ source forge-ai-rl/venv/bin/activate
 ### Training UI (Tkinter dashboard with live charts)
 ```bash
 cd forge-ai-rl/src/main/python
-python training/training_ui.py --data-dir /path/to/trajectories --device cuda --epochs 100
+python training/train_decisions_ui.py --data-dir /path/to/trajectories --device cuda --epochs 50
 ```
 
 ### GPU: RTX 3080 (10GB VRAM)
 - Model: 11M params, 42MB, uses ~51MB VRAM for inference
 - Training batch 64 with AMP: ~0.4GB VRAM
-- num_workers=0 mandatory (see gotcha above)
+- `mmap_dataset.py` and `train_value.py` hard-code `num_workers=0`; `train_decisions_ui.py` exposes `--num-workers`
 
 ## Trajectory Data Format
 
@@ -81,4 +80,4 @@ Decision types with action data:
 - Phase snapshots — `main1_turn_N` state snapshots
 
 ## Back up trajectory data before regenerating
-Previous versions stored in `rl_data/trajectories_v1_endgame/` and `rl_data/trajectories_v2_midgame/`.
+Move existing trajectories to a versioned sibling dir (e.g. `rl_data/trajectories_v3_<tag>/`) before re-running collection — the collector writes into the target dir without checking for prior runs.
