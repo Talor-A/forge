@@ -201,10 +201,11 @@ public class RecordingPlayerController extends PlayerController {
     @Override
     public CardCollectionView chooseCardsToDiscardFrom(
             Player p, SpellAbility sa,
-            CardCollection valid, int min, int max) {
+            CardCollection valid, int min, int max,
+            CardCollectionView visibleToChooser) {
         CardCollectionView result =
                 delegate.chooseCardsToDiscardFrom(
-                        p, sa, valid, min, max);
+                        p, sa, valid, min, max, visibleToChooser);
         record(DecisionType.CARD_SELECTION,
                 valid.size(),
                 List.of(result != null ? result.size() : 0),

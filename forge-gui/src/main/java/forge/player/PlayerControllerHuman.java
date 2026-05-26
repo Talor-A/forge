@@ -805,20 +805,20 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
     @Override
     public boolean confirmAction(final SpellAbility sa, final PlayerActionConfirmMode mode, final String message,
                                  List<String> options, Card cardToShow, Map<String, Object> params) {
+        final boolean result;
         // Another card should be displayed in the prompt on mouse over rather than the SA source
         if (cardToShow != null) {
             tempShowCard(cardToShow);
-            boolean result = options.isEmpty() ? InputConfirm.confirm(this, cardToShow.getView(), sa, message)
+            result = options.isEmpty() ? InputConfirm.confirm(this, cardToShow.getView(), sa, message)
                     : InputConfirm.confirm(this, cardToShow.getView(), message, true, options);
             endTempShowCards();
             recordConfirm(cardToShow.getView(), result);
-            return result;
+        } else {
+            // The general case: display the source of the SA in the prompt on mouse over
+            result = options.isEmpty() ? InputConfirm.confirm(this, sa, message) :
+                    InputConfirm.confirm(this, sa.getHostCard().getView(), sa, message, true, options);
+            recordConfirm(sa, result);
         }
-
-        // The general case: display the source of the SA in the prompt on mouse over
-        final boolean result = options.isEmpty() ? InputConfirm.confirm(this, sa, message) :
-                InputConfirm.confirm(this, sa.getHostCard().getView(), sa, message, true, options);
-        recordConfirm(sa, result);
 
         if (gameRecorder != null) {
             try {
@@ -893,19 +893,14 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
             else
                 cardView = wrapper.getCardView();
             return this.getGui().confirm(cardView, buildQuestion.toString().replaceAll("\n", " "));
-        } else {
-            final InputConfirm inp = new InputConfirm(this, buildQuestion.toString(), wrapper);
-            inp.showAndWait();
-            boolean result = inp.getResult();
-
-            if (gameRecorder != null) {
-                try {
-                    gameRecorder.recordBinaryDecision(result, "trigger_" + regtrig.getHostCard().getName());
-                } catch (Exception e) { /* ignore */ }
-            }
-            return result;
         }
-        return InputConfirm.confirm(this, wrapper, buildQuestion.toString());
+        boolean result = InputConfirm.confirm(this, wrapper, buildQuestion.toString());
+        if (gameRecorder != null) {
+            try {
+                gameRecorder.recordBinaryDecision(result, "trigger_" + regtrig.getHostCard().getName());
+            } catch (Exception e) { /* ignore */ }
+        }
+        return result;
     }
 
     @Override
