@@ -46,4 +46,8 @@ server = ModelServer(model, host="127.0.0.1", port=0, device="cpu")
 print(f"torch {torch.__version__} | MTGModel + ModelServer imported OK")
 PY
 
+step "Python unit tests"
+PYTHONPATH="$PY_DIR" python3 -m unittest discover \
+    -s "$RL_DIR/src/test/python" -p 'test_*.py' -v
+
 step "CI OK"
