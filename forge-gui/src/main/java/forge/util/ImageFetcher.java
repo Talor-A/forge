@@ -13,6 +13,7 @@ import forge.model.FModel;
 import java.io.File;
 import java.util.*;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.regex.Pattern;
 
 public abstract class ImageFetcher {
     // see https://scryfall.com/docs/api/languages and
@@ -43,42 +44,47 @@ public abstract class ImageFetcher {
         CardEdition edition = data.getEditions().get(c.getEdition());
         if (edition == null) // Edition does not exist - some error occurred with card data
             return null;
+
         if (hasSetLookup) {
-            List<PaperCard> clones = StaticData.instance().getCommonCards().getAllCards(c.getName());
+            // Always try the requested print first. The old fallback skipped it
+            // entirely and went straight to alternate prints, which can fetch
+            // the wrong frame.
+            addScryfallUrl(c, face, useArtCrop, downloadUrls);
+
+            List<PaperCard> clones = StaticData.instance().getCommonCards().getAllCards(c);
             for (PaperCard pc : clones) {
-                if (clones.size() > 1) { // Clones only
-                    if (!c.getEdition().equalsIgnoreCase(pc.getEdition())) {
-                        CardEdition ed = data.getEditions().get(pc.getEdition());
-                        if (ed != null) {
-                            String setCode = ed.getScryfallCode();
-                            String langCode = ed.getCardsLangCode();
-                            downloadUrls.add(ForgeConstants.URL_PIC_SCRYFALL_DOWNLOAD + ImageUtil.getScryfallDownloadUrl(pc, face, setCode, langCode, useArtCrop));
-                        }
-                    }
-                } else {// original from set
-                    CardEdition ed = data.getEditions().get(pc.getEdition());
-                    if (ed != null) {
-                        String setCode = ed.getScryfallCode();
-                        String langCode = ed.getCardsLangCode();
-                        downloadUrls.add(ForgeConstants.URL_PIC_SCRYFALL_DOWNLOAD + ImageUtil.getScryfallDownloadUrl(pc, face, setCode, langCode, useArtCrop));
-                    }
+                if (c.getEdition().equalsIgnoreCase(pc.getEdition())) {
+                    continue;
                 }
+                if (!shouldTryScryfallSetLookupCandidate(c, pc)) {
+                    continue;
+                }
+                addScryfallUrl(pc, face, useArtCrop, downloadUrls);
             }
         } else {
+            addScryfallUrl(c, face, useArtCrop, downloadUrls);
             String setCode = edition.getScryfallCode();
-            String langCode = edition.getCardsLangCode();
-            String primaryUrl = ImageUtil.getScryfallDownloadUrl(c, face, setCode, langCode, useArtCrop);
-            downloadUrls.add(ForgeConstants.URL_PIC_SCRYFALL_DOWNLOAD + primaryUrl);
-
-            // It seems like the scryfall lookup might be better if we didn't include the language code at all?
             downloadUrls.add(ForgeConstants.URL_PIC_SCRYFALL_DOWNLOAD + ImageUtil.getScryfallDownloadUrl(c, face, setCode, "", useArtCrop));
-
-            String alternateUrl = ImageUtil.getScryfallDownloadUrl(c, face, setCode, langCode, useArtCrop);
-            if (!alternateUrl.equals(primaryUrl)) {
-                downloadUrls.add(ForgeConstants.URL_PIC_SCRYFALL_DOWNLOAD + alternateUrl);
-            }
         }
         return null;
+    }
+
+    private void addScryfallUrl(PaperCard card, String face, boolean useArtCrop, ArrayList<String> downloadUrls) {
+        CardEdition edition = StaticData.instance().getEditions().get(card.getEdition());
+        if (edition == null) {
+            return;
+        }
+
+        String setCode = edition.getScryfallCode();
+        String langCode = edition.getCardsLangCode();
+        String primaryUrl = ForgeConstants.URL_PIC_SCRYFALL_DOWNLOAD + ImageUtil.getScryfallDownloadUrl(card, face, setCode, langCode, useArtCrop);
+        if (!downloadUrls.contains(primaryUrl)) {
+            downloadUrls.add(primaryUrl);
+        }
+    }
+
+    protected boolean shouldTryScryfallSetLookupCandidate(PaperCard requestedCard, PaperCard candidate) {
+        return true;
     }
 
     public static String getPlanechaseFilename(final String cardName) {
@@ -101,10 +107,28 @@ public abstract class ImageFetcher {
         if (imageKey.startsWith(ImageKeys.BOOSTER_PREFIX)) {
             final ArrayList<String> downloadUrls = new ArrayList<>();
             final String filename = imageKey.substring(ImageKeys.BOOSTER_PREFIX.length());
-            // TODO Update image server or alternative hosting
-            downloadUrls.add("https://downloads.cardforge.org/images/products/boosters/" + filename);
-            System.out.println("Fetching from " + downloadUrls);
+            // Look up the download URL from booster-images.txt
+            final List<String> boosterFileContent = FileUtil.readFile(ForgeConstants.IMAGE_LIST_QUEST_BOOSTERS_FILE);
 
+            for (String line : boosterFileContent) {
+                boolean exactMatch = line.endsWith(filename);
+                boolean filenameHasNoExtension = filename.lastIndexOf('.') == -1;
+                boolean matchesWithExtension = line.matches(".*" + Pattern.quote(filename) + "\\.[^.]+$");
+
+                if (exactMatch || (filenameHasNoExtension && matchesWithExtension)) {
+                    if (line.startsWith("http")) {
+                        downloadUrls.add(line);
+                    } else {
+                        downloadUrls.add(ForgeConstants.GITHUB_ASSETS_BASE + "images/boosters/" + line);
+                    }
+                    break;
+                }
+            }
+
+            if (downloadUrls.isEmpty()) {
+                System.err.println("No booster image URL found for: " + filename);
+                return;
+            }
 
             FileUtil.ensureDirectoryExists(ForgeConstants.CACHE_BOOSTER_PICS_DIR);
             File destFile = new File(ForgeConstants.CACHE_BOOSTER_PICS_DIR, filename);
@@ -208,7 +232,7 @@ public abstract class ImageFetcher {
                     }
                     downloadUrls.add(setDownload.toString());
                 } else {
-                    List<PaperCard> clones = StaticData.instance().getCommonCards().getAllCards(paperCard.getName());
+                    List<PaperCard> clones = StaticData.instance().getCommonCards().getAllCards(paperCard);
                     for (PaperCard pc : clones) {
                         if (clones.size() > 1) {//clones only
                             if (!paperCard.getEdition().equalsIgnoreCase(pc.getEdition())) {
@@ -221,13 +245,17 @@ public abstract class ImageFetcher {
                 }
             }
             final String cardCollectorNumber = paperCard.getCollectorNumber();
-            if (!cardCollectorNumber.equals(IPaperCard.NO_COLLECTOR_NUMBER) && !cardCollectorNumber.equals("0")) {
-                this.getScryfallDownloadURL(paperCard, face, useArtCrop, hasSetLookup, filename, downloadUrls);
-            } else {
-                System.out.println("Card " + paperCard.getName() + " does not have a collector number, skipping scryfall download.");
-                ImageKeys.missingCards.add(filename);
+ 
+            if (cardCollectorNumber.equals(IPaperCard.NO_COLLECTOR_NUMBER)) {
+                if (!ImageKeys.missingCards.contains(filename)) {
+                    System.out.println("Card " + paperCard.getName() + " does not have a collector number, skipping scryfall download.");
+                    ImageKeys.missingCards.add(filename);
+                }
+                
                 return;
             }
+
+            this.getScryfallDownloadURL(paperCard, face, useArtCrop, hasSetLookup, filename, downloadUrls);
         } else if (ImageKeys.getTokenKey(ImageKeys.HIDDEN_CARD).equals(imageKey)) {
             // Extra logic for hidden card to not clog the other logic
             final String filename = "hidden.png";
@@ -267,6 +295,15 @@ public abstract class ImageFetcher {
                     || destFile.exists())
                 return;
 
+            // token-images.txt lets mods route specific tokens to hosted URLs.
+            for (org.apache.commons.lang3.tuple.Pair<String, String> pair :
+                    FileUtil.readNameUrlFile(ForgeConstants.IMAGE_LIST_TOKENS_FILE)) {
+                if (filename.equalsIgnoreCase(pair.getLeft())) {
+                    downloadUrls.add(pair.getRight());
+                    break;
+                }
+            }
+
             if (tempdata.length < 2) {
                 if (!"planechase".equals(tempdata[0]))
                     System.err.println("Token image key is malformed: " + imageKey);
@@ -276,9 +313,13 @@ public abstract class ImageFetcher {
 
             // Load the paper token from filename + edition
             CardEdition edition = StaticData.instance().getEditions().get(setCode);
-            if (edition == null || edition.getType() == CardEdition.Type.CUSTOM_SET)
-                return; //Custom set token, skip fetching.
-
+            if (edition == null || edition.getType() == CardEdition.Type.CUSTOM_SET) {
+                // Custom/unknown set (e.g. TDLS/Duelist): rely on the URL map above.
+                if (downloadUrls.isEmpty()) return;
+                ImageKeys.missingCards.add(filename);
+                setupObserver(destFile.getAbsolutePath(), callback, downloadUrls);
+                return;
+            }
             // PaperToken pt = StaticData.instance().getAllTokens().getToken(tokenName, setCode);
             Collection<CardEdition.EditionEntry> allTokens = edition.getTokens().get(tokenName);
 

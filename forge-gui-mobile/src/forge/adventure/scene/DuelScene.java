@@ -17,7 +17,6 @@ import forge.adventure.player.AdventurePlayer;
 import forge.adventure.stage.GameHUD;
 import forge.adventure.stage.IAfterMatch;
 import forge.adventure.util.AdventureEventController;
-import forge.adventure.util.AdventureModes;
 import forge.adventure.util.Config;
 import forge.adventure.util.Current;
 import forge.assets.FBufferedImage;
@@ -126,12 +125,12 @@ public class DuelScene extends ForgeScene {
                 if (eventData != null) {
                     //In an event. Apply the ante result to the current event deck.
                     eventData.registeredDeck.getOrCreate(DeckSection.Sideboard).add(anteResult.wonCards);
-                    if(eventData.draftedDeck != null)
-                        eventData.draftedDeck.getOrCreate(DeckSection.Sideboard).add(anteResult.wonCards);
+                    if(eventData.rewardDeck != null)
+                        eventData.rewardDeck.getOrCreate(DeckSection.Sideboard).add(anteResult.wonCards);
                     for(PaperCard card : anteResult.lostCards) {
                         eventData.registeredDeck.removeAnteCard(card);
-                        if(eventData.draftedDeck != null)
-                            eventData.draftedDeck.removeAnteCard(card);
+                        if(eventData.rewardDeck != null)
+                            eventData.rewardDeck.removeAnteCard(card);
                     }
                     //Could also add the cards to the opponent's pool, but their games aren't simulated and they never edit their decks.
                 }
@@ -267,7 +266,11 @@ public class DuelScene extends ForgeScene {
         };
         cardDisplay.setHeight(Forge.getScreenHeight() / 3);
 
-        String message = card.getName();
+        int ownedCount = Current.player().getCollectionCards(true).count(card);
+        String ownedInfo = won
+                ? (ownedCount == 0 ? " (New!)" : " (Owned: " + ownedCount + ")")
+                : (ownedCount > 0 ? " (Remaining: " + ownedCount + ")" : "");
+        String message = card.getName() + ownedInfo;
         List<String> buttons;
         if (won && eventData == null) {
             int sellPrice = Current.player().cardSellPrice(card);
@@ -301,12 +304,10 @@ public class DuelScene extends ForgeScene {
             changeStartCards += data.changeStartCards;
             startCards.addAll(data.startBattleWithCards());
             startCardsInCommandZone.addAll(data.startBattleWithCardsInCommandZone());
-
             extraManaShards += data.extraManaShards;
         }
         player.addExtraCardsOnBattlefield(startCards);
         player.addExtraCardsInCommandZone(startCardsInCommandZone);
-
         if (lifeMod != 0)
             player.setStartingLife(Math.max(1, lifeMod + player.getStartingLife()));
         player.setStartingHand(player.getStartingHand() + changeStartCards);
@@ -326,7 +327,7 @@ public class DuelScene extends ForgeScene {
         String isDeckMissingMsg = "";
         if (eventData != null && eventData.eventRules != null) {
             mainGameType = eventData.eventRules.gameType;
-        } else if (AdventurePlayer.current().getAdventureMode() == AdventureModes.Commander){
+        } else if (AdventurePlayer.current().isCommanderMode()){
             mainGameType = GameType.Commander;
         } else {
             mainGameType = GameType.Adventure;
@@ -422,17 +423,23 @@ public class DuelScene extends ForgeScene {
                 this.AIExtras = aiCards;
                 deck = deckProxy.getDeck();
             } else if (this.arenaBattleChallenge) {
-                deck = Aggregates.random(DeckProxy.getAllGeneticAIDecks()).getDeck();
+                if (Config.instance().getConfigData().enableGeneticAI) {
+                    deck = Aggregates.random(DeckProxy.getAllGeneticAIDecks()).getDeck();
+                } else {
+                    deck = currentEnemy.generateDeck(Current.player().isFantasyMode(), false);
+                }
             } else if (this.eventData != null) {
                 deck = eventData.nextOpponent.getDeck();
             } else {
-                deck = currentEnemy.copyPlayerDeck ? this.playerDeck : currentEnemy.generateDeck(Current.player().isFantasyMode(), Current.player().isUsingCustomDeck() || Current.player().isHardorInsaneDifficulty());
+                boolean useGeneticAI = Config.instance().getConfigData().enableGeneticAI && (Current.player().isUsingCustomDeck() || Current.player().isHardorInsaneDifficulty());
+                deck = currentEnemy.copyPlayerDeck ? this.playerDeck : currentEnemy.generateDeck(Current.player().isFantasyMode(), useGeneticAI);
             }
             if (deck == null) {
                 isDeckMissing = true;
-                isDeckMissingMsg = "Deck for " + currentEnemy.getName() + " is missing! " + (this.eventData == null ? "Genetic AI deck will be used." : "Player deck will be used.");
+                boolean canUseGeneticAI = Config.instance().getConfigData().enableGeneticAI;
+                isDeckMissingMsg = "Deck for " + currentEnemy.getName() + " is missing! " + (this.eventData == null ? (canUseGeneticAI ? "Genetic AI deck will be used." : "Player deck will be used.") : "Player deck will be used.");
                 System.err.println(isDeckMissingMsg);
-                deck = this.eventData == null ? Aggregates.random(DeckProxy.getAllGeneticAIDecks()).getDeck() : this.playerDeck;
+                deck = this.eventData == null && canUseGeneticAI ? Aggregates.random(DeckProxy.getAllGeneticAIDecks()).getDeck() : this.playerDeck;
             }
             RegisteredPlayer aiPlayer = RegisteredPlayer.forVariants(playerCount, appliedVariants, deck, null, false, null, null);
 
@@ -500,6 +507,7 @@ public class DuelScene extends ForgeScene {
         }
         rules.setPlayForAnte(FModel.getPreferences().getPrefBoolean(ForgePreferences.FPref.UI_ANTE));
         rules.setMatchAnteRarity(FModel.getPreferences().getPrefBoolean(ForgePreferences.FPref.UI_ANTE_MATCH_RARITY));
+        rules.setAnteIncludeBasicLands(FModel.getPreferences().getPrefBoolean(ForgePreferences.FPref.UI_ANTE_INCLUDE_BASIC_LANDS));
         rules.setManaBurn(false);
         rules.setWarnAboutAICards(false);
 

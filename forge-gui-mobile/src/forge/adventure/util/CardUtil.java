@@ -17,6 +17,7 @@ import forge.deck.DeckSection;
 import forge.deck.DeckgenUtil;
 import forge.deck.io.DeckSerializer;
 import forge.game.GameFormat;
+import forge.game.GameType;
 import forge.item.BoosterPack;
 import forge.item.PaperCard;
 import forge.item.PaperCardPredicates;
@@ -25,7 +26,10 @@ import forge.item.generation.UnOpenedProduct;
 import forge.model.FModel;
 import forge.util.Aggregates;
 import forge.util.IterableUtil;
-
+import forge.card.MagicColor;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.function.Predicate;
@@ -79,7 +83,7 @@ public class CardUtil {
                 return !this.shouldBeEqual;
             if (!this.editions.isEmpty() && !this.editions.contains(card.getEdition())) {
                 boolean found = false;
-                List<PaperCard> allPrintings = FModel.getMagicDb().getCommonCards().getAllCards(card.getCardName());
+                List<PaperCard> allPrintings = FModel.getMagicDb().getCommonCards().getAllCards(card);
                 for (PaperCard c : allPrintings) {
                     if (this.editions.contains(c.getEdition())) {
                         found = true;
@@ -91,7 +95,7 @@ public class CardUtil {
             }
             if (!this.minDate.isEmpty()) {
                 boolean found = false;
-                List<PaperCard> allPrintings = FModel.getMagicDb().getCommonCards().getAllCards(card.getCardName());
+                List<PaperCard> allPrintings = FModel.getMagicDb().getCommonCards().getAllCards(card);
                 List<CardEdition> cardEditionList = new ArrayList<>();
 
                 Date d = parseDate(this.minDate);
@@ -328,12 +332,54 @@ public class CardUtil {
         }
         return result;
     }
+    private static AdventureReadPriceList.PriceData priceData;
+
+    /**
+     * Clear the cached price data. Call this when switching adventures/planes
+     * so prices are reloaded from the new adventure's cardprices.txt.
+     */
+    public static void clearPriceCache() {
+        priceData = null;
+    }
+
+    private static AdventureReadPriceList.PriceData getPriceData() {
+        if (priceData == null) {
+            priceData = AdventureReadPriceList.loadPrices();
+        }
+        return priceData;
+    }
+
+    /**
+     * Returns the price mode for the current adventure's price list.
+     * FORCED means custom prices are always active (toggle disabled).
+     * OPTIONAL means the player controls it via the settings toggle.
+     */
+    public static AdventureReadPriceList.PriceMode getPriceMode() {
+        return getPriceData().mode;
+    }
 
     public static int getCardPrice(PaperCard card) {
         if (card == null)
             return 0;
+        CardRarity effectiveRarity = card.getRarity();
 
-        return switch (card.getRarity()) {
+        if (card.getRarity() == CardRarity.BasicLand
+                && !card.isVeryBasicLand()
+                && !MagicColor.Constant.SNOW_LANDS.contains(card.getName())
+                && !card.getName().equals("Wastes")) {
+            effectiveRarity = CardRarity.Common; // adjust for lands which are L rarity but are not basic lands
+        }
+        AdventureReadPriceList.PriceData data = getPriceData();
+        boolean useCustomPrices = data.mode == AdventureReadPriceList.PriceMode.FORCED
+                || Config.instance().getConfigData().usePriceListPrices;
+
+        if (useCustomPrices) {
+            Integer price = data.prices.get(card.getName());
+            if (price != null) {
+                return price;
+            }
+        }    
+        return switch (effectiveRarity) {
             case BasicLand -> 5;
             case Common -> 50;
             case Uncommon -> 150;
@@ -342,9 +388,27 @@ public class CardUtil {
             default -> 600;
         };
     }
+    public static int getBoosterPrice(Deck booster) {
+    	if (booster == null)
+            return 0;
+    	String editionCode = booster.getComment();
+        AdventureReadPriceList.PriceData data = getPriceData();
+        boolean useCustomPrices = data.mode == AdventureReadPriceList.PriceMode.FORCED
+                || Config.instance().getConfigData().usePriceListPrices;
 
+        if (useCustomPrices) {
+            Integer price = data.prices.get(editionCode);
+            if (price != null) {
+                return price;
+            }
+        }
+        return 1000;
+     }
+    
     public static int getRewardPrice(Reward reward) {
         PaperCard card = reward.getCard();
+        Deck booster = reward.getDeck();
+
         if (card != null)
             return getCardPrice(card);
         if (reward.getItem() != null)
@@ -355,12 +419,9 @@ public class CardUtil {
             return reward.getCount() * 500;
         if (reward.getType() == Reward.Type.Gold)
             return reward.getCount();
-        /*
-         * if(reward.getType() == Reward.Type.CardPack)
-         * return reward.getDeck().get(DeckSection.Main).countAll()*70;
-         */
-        // TODO: Heitor - Price by card count and type of boosterPack.
-
+		if(reward.getType() == Reward.Type.CardPack)                // TODO: Heitor - Price by card count and type of boosterPack.
+         return getBoosterPrice(booster);
+		
         return 1000;
     }
 
@@ -690,6 +751,9 @@ public class CardUtil {
         }
 
         if (forAI && (isFantasyMode || useGeneticAI)) {
+            if (isFantasyMode && "Commander".equalsIgnoreCase(Config.instance().getConfigData().chaosDeckFormat)) {
+                return DeckgenUtil.generateCommanderDeck(true, GameType.Commander);
+            }
             return DeckgenUtil.getRandomOrPreconOrThemeDeck(colors, forAI, isTheme, useGeneticAI);
         }
 
@@ -784,9 +848,9 @@ public class CardUtil {
             if (Config.instance().getSettingData().excludeAlchemyVariants) {
                 combined_predicate = editionFilter.and(PaperCardPredicates.IS_REBALANCED.negate());
             }
-            validCards = FModel.getMagicDb().getCommonCards().getAllCards(cardName, combined_predicate);
+            validCards = FModel.getMagicDb().getCommonCards().getAllCardsNoAlt(cardName, combined_predicate);
         } else {
-            validCards = FModel.getMagicDb().getCommonCards().getUniqueCardsNoAlt(cardName);
+            validCards = List.of(FModel.getMagicDb().getCommonCards().getUniqueByNameNoAlt(cardName));
             // Filter to allowed editions to prevent showing printings from wrong sets.
             if (configData.allowedEditions != null && configData.allowedEditions.length > 0) {
                 Set<String> allowed = new HashSet<>(Arrays.asList(configData.allowedEditions));
@@ -795,7 +859,7 @@ public class CardUtil {
                     .collect(Collectors.toList());
                 if (validCards.isEmpty()) {
                     // Card was from a non-allowed edition, find any printing from an allowed one.
-                    validCards = FModel.getMagicDb().getCommonCards().getAllCards(cardName).stream()
+                    validCards = FModel.getMagicDb().getCommonCards().getAllCardsNoAlt(cardName).stream()
                         .filter(card -> allowed.contains(card.getEdition()))
                         .collect(Collectors.toList());
                 }
@@ -820,8 +884,8 @@ public class CardUtil {
             }
         }
         List<PaperCard> cardPool = Config.instance().getSettingData().useAllCardVariants
-                ? FModel.getMagicDb().getCommonCards().getAllCards(cardName)
-                : FModel.getMagicDb().getCommonCards().getUniqueCardsNoAlt(cardName);
+                ? FModel.getMagicDb().getCommonCards().getAllCardsNoAlt(cardName)
+                : List.of(FModel.getMagicDb().getCommonCards().getUniqueByNameNoAlt(cardName));
         List<PaperCard> validCards = cardPool.stream()
                 .filter(input -> input.getEdition().equals(edition)).collect(Collectors.toList());
 
@@ -846,12 +910,12 @@ public class CardUtil {
             }
             // For unique cards, replace non-allowed printings with allowed ones.
             List<PaperCard> filtered = new ArrayList<>();
-            for (PaperCard card : FModel.getMagicDb().getCommonCards().getUniqueCardsNoAlt()) {
+            for (PaperCard card : FModel.getMagicDb().getCommonCards().getUniqueCards()) {
                 if (card == null) continue;
                 if (allowed.contains(card.getEdition())) {
                     filtered.add(card);
                 } else {
-                    for (PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(card.getName())) {
+                    for (PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(card)) {
                         if (allowed.contains(p.getEdition())) {
                             filtered.add(p);
                             break;
@@ -863,7 +927,7 @@ public class CardUtil {
         }
         return allCardVariants
             ? FModel.getMagicDb().getCommonCards().getAllCards()
-            : FModel.getMagicDb().getCommonCards().getUniqueCardsNoAlt();
+            : FModel.getMagicDb().getCommonCards().getUniqueCards();
     }
 
     /**
@@ -907,7 +971,7 @@ public class CardUtil {
         Set<String> allowed = new HashSet<>(Arrays.asList(configData.allowedEditions));
         if (allowed.contains(card.getEdition()))
             return card;
-        for (PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(card.getName())) {
+        for (PaperCard p : FModel.getMagicDb().getCommonCards().getAllCards(card)) {
             if (allowed.contains(p.getEdition()))
                 return p;
         }

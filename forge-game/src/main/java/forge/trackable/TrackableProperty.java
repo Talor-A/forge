@@ -145,43 +145,15 @@ public enum TrackableProperty {
     OrigProduceMana(TrackableTypes.ColorSetType),
     OrigProduceAnyMana(TrackableTypes.BooleanType),
 
-    KeywordKey(TrackableTypes.StringType),
+    Keywords(TrackableTypes.KeywordCollectionViewType),
     HasAnnihilator(TrackableTypes.BooleanType),
-    HasDeathtouch(TrackableTypes.BooleanType),
-    HasToxic(TrackableTypes.BooleanType),
-    HasDevoid(TrackableTypes.BooleanType),
-    HasDefender(TrackableTypes.BooleanType),
-    HasDivideDamage(TrackableTypes.BooleanType),
-    HasDoubleStrike(TrackableTypes.BooleanType),
-    HasDoubleTeam(TrackableTypes.BooleanType),
-    HasExalted(TrackableTypes.BooleanType),
-    HasFirstStrike(TrackableTypes.BooleanType),
-    HasFlying(TrackableTypes.BooleanType),
-    HasFear(TrackableTypes.BooleanType),
-    HasHexproof(TrackableTypes.BooleanType),
-    HasHorsemanship(TrackableTypes.BooleanType),
-    HasIndestructible(TrackableTypes.BooleanType),
-    HasIntimidate(TrackableTypes.BooleanType),
-    HasLifelink(TrackableTypes.BooleanType),
-    HasMenace(TrackableTypes.BooleanType),
-    HasReach(TrackableTypes.BooleanType),
-    HasShadow(TrackableTypes.BooleanType),
-    HasShroud(TrackableTypes.BooleanType),
-    HasTrample(TrackableTypes.BooleanType),
-    HasVigilance(TrackableTypes.BooleanType),
-    HasLandwalk(TrackableTypes.BooleanType),
-    HasAftermath(TrackableTypes.BooleanType),
-    ProtectionKey(TrackableTypes.StringType),
-    HexproofKey(TrackableTypes.StringType),
-    HasHaste(TrackableTypes.BooleanType),
-    HasInfect(TrackableTypes.BooleanType),
-    HasStorm(TrackableTypes.BooleanType),
     HasWard(TrackableTypes.BooleanType),
-    HasWither(TrackableTypes.BooleanType),
+
     BlockAdditional(TrackableTypes.IntegerType),
     BlockAny(TrackableTypes.BooleanType),
     AbilityText(TrackableTypes.StringType),
     NonAbilityText(TrackableTypes.StringType),
+    HasDivideDamage(TrackableTypes.BooleanType),
     FoilIndex(TrackableTypes.IntegerType),
 
     CantHaveKeyword(TrackableTypes.StringSetType),
@@ -206,7 +178,6 @@ public enum TrackableProperty {
     OptionalAdditionalVote(TrackableTypes.IntegerType),
     ControlVotes(TrackableTypes.BooleanType),
     AdditionalVillainousChoices(TrackableTypes.IntegerType),
-    Keywords(TrackableTypes.KeywordCollectionViewType, FreezeMode.IgnoresFreeze),
     Commander(TrackableTypes.CardViewCollectionType, FreezeMode.IgnoresFreeze),
     CommanderCast(TrackableTypes.IntegerMapType),
     CommanderDamage(TrackableTypes.IntegerMapType),
@@ -234,6 +205,7 @@ public enum TrackableProperty {
     HasPriority(TrackableTypes.BooleanType, FreezeMode.IgnoresFreeze),
     AvatarLifeDifference(TrackableTypes.IntegerType, FreezeMode.IgnoresFreeze),
     HasLost(TrackableTypes.BooleanType),
+    HasAvailableActions(TrackableTypes.BooleanType),
 
     //SpellAbility
     HostCard(TrackableTypes.CardViewType),
@@ -334,27 +306,4 @@ public enum TrackableProperty {
         return ((TrackableType<T>) type).getDefaultValue();
     }
 
-    @SuppressWarnings("unchecked")
-    public <T> T deserialize(TrackableDeserializer td, T oldValue) {
-        return ((TrackableType<T>) type).deserialize(td, oldValue);
-    }
-
-    @SuppressWarnings("unchecked")
-    public <T> void serialize(TrackableSerializer ts, T value) {
-        ((TrackableType<T>) type).serialize(ts, value);
-    }
-
-    //cache array of all properties to allow quick lookup by ordinal,
-    //which reduces the size and improves performance of serialization
-    //we don't need to worry about the values changing since we will ensure
-    //both players are on the same version of Forge before allowing them to connect
-    private static TrackableProperty[] props = values();
-
-    public static int serialize(TrackableProperty prop) {
-        return prop.ordinal();
-    }
-
-    public static TrackableProperty deserialize(int ordinal) {
-        return props[ordinal];
-    }
 }

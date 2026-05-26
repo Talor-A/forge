@@ -3,11 +3,11 @@ package forge.adventure.data;
 import com.badlogic.gdx.scenes.scene2d.ui.Image;
 import com.badlogic.gdx.utils.Array;
 import forge.Forge;
-import forge.StaticData;
 import forge.adventure.character.EnemySprite;
 import forge.adventure.pointofintrest.PointOfInterestChanges;
 import forge.adventure.scene.RewardScene;
 import forge.adventure.util.AdventureEventController;
+import forge.adventure.util.AdventureOverrides;
 import forge.adventure.util.Config;
 import forge.adventure.util.Current;
 import forge.adventure.util.Reward;
@@ -55,7 +55,7 @@ public class AdventureEventData implements Serializable {
     public AdventureEventController.EventFormat format;
     private transient Random random = new Random();
     public Deck registeredDeck;
-    public Deck draftedDeck; //Copy of registered before basic lands are added for event reward purposes
+    public Deck rewardDeck; //Copy of registered before basic lands are added for event reward purposes
     public List<Deck> jumpstartBoosters = new ArrayList<>();
     public boolean isDraftComplete = false;
     public String description = "";
@@ -146,7 +146,7 @@ public class AdventureEventData implements Serializable {
 
     public CardBlock getCardBlock() {
         if (cardBlock == null) {
-            cardBlock = FModel.getBlocks().get(cardBlockName);
+            cardBlock = AdventureOverrides.instance().getBlock(cardBlockName);
         }
         return cardBlock;
     }
@@ -183,6 +183,10 @@ public class AdventureEventData implements Serializable {
     private static final Predicate<CardEdition> filterStandard = FModel.getFormats().getStandard().editionLegalPredicate;
 
     public static Predicate<CardEdition> selectSetPool() {
+        if (Config.instance().getConfigData().vintageOnlyEditions) {
+            return filterVintage;
+        }
+
         final int rollD100 = MyRandom.getRandom().nextInt(100);
         Predicate<CardEdition> rolledFilter;
         if (rollD100 < 30) {
@@ -245,7 +249,7 @@ public class AdventureEventData implements Serializable {
 
     public static List<CardBlock> getValidDraftBlocks(List<CardEdition> validEditions) {
         List<CardBlock> legalBlocks = new ArrayList<>();
-        for (CardBlock b : FModel.getBlocks()) { // for each block
+        for (CardBlock b : AdventureOverrides.instance().allBlocks()) { // for each block
             if (b.getSets().isEmpty() || (b.getCntBoostersDraft() < 1))
                 continue;
             if (!isValidDraftBlock(b, validEditions))
@@ -273,7 +277,7 @@ public class AdventureEventData implements Serializable {
     }
 
     private static CardBlock pickJumpstartCardBlock() {
-        Iterable<CardBlock> src = FModel.getBlocks(); //all blocks
+        Iterable<CardBlock> src = AdventureOverrides.instance().allBlocks(); //all blocks
         List<CardBlock> legalBlocks = new ArrayList<>();
         ConfigData configData = Config.instance().getConfigData();
         if (configData.allowedJumpstart != null) {
@@ -328,7 +332,7 @@ public class AdventureEventData implements Serializable {
                 if (isMetaSet) {
                     booster = cardBlock.getBooster(setCode);
                 } else {
-                    SealedTemplate template = StaticData.instance().getBoosters().get(setCode);
+                    SealedTemplate template = AdventureOverrides.instance().getBoosterTemplate(setCode);
                     if (template == null) continue;
                     booster = new UnOpenedProduct(template);
                 }
@@ -343,10 +347,10 @@ public class AdventureEventData implements Serializable {
             registeredDeck.getOrCreate(DeckSection.Sideboard).addAll(humanPool);
             registeredDeck.setName("Sealed Pool - " + cardBlockName);
 
-            // Store copy for rewards
-            draftedDeck = new Deck();
-            draftedDeck.getOrCreate(DeckSection.Sideboard).addAll(humanPool);
-            draftedDeck.setName("Sealed Pool Cards");
+            // Store the reward deck consisting of every card in the opened sealed boosters
+            rewardDeck = new Deck();
+            rewardDeck.getOrCreate(DeckSection.Main).addAll(humanPool);
+            rewardDeck.setName("Sealed Pool Cards");
 
             // Generate AI opponents' decks
             for (AdventureEventParticipant participant : participants) {
@@ -366,7 +370,7 @@ public class AdventureEventData implements Serializable {
                     if (isMetaSet) {
                         booster = cardBlock.getBooster(setCode);
                     } else {
-                        SealedTemplate template = StaticData.instance().getBoosters().get(setCode);
+                        SealedTemplate template = AdventureOverrides.instance().getBoosterTemplate(setCode);
                         if (template == null) continue;
                         booster = new UnOpenedProduct(template);
                     }
@@ -482,20 +486,27 @@ public class AdventureEventData implements Serializable {
         MyRandom.setRandom(getEventRandom());
 
         int numBoosters;
+        String[] ret;
+
         if (format == AdventureEventController.EventFormat.Sealed) {
             numBoosters = selectedBlock.getCntBoostersSealed();
+            ret = new String[numBoosters];
+
+            for (int i = 0; i < numBoosters; i++) {
+                ret[i] = selectedBlock.getSets().get(i % selectedBlock.getNumberSets()).getCode();
+            }
         } else {
             numBoosters = selectedBlock.getCntBoostersDraft();
+            ret = new String[numBoosters];
+
+            for (int i = 0; i < numBoosters; i++) {
+                if (i < selectedBlock.getNumberSets())
+                    ret[i] = selectedBlock.getSets().get(i).getCode();
+                else
+                    ret[i] = Aggregates.random(selectedBlock.getSets()).getCode();
+            }
         }
 
-        String[] ret = new String[numBoosters];
-
-        for (int i = 0; i < numBoosters; i++) {
-            if (i < selectedBlock.getNumberSets())
-                ret[i] = selectedBlock.getSets().get(i).getCode();
-            else
-                ret[i] = Aggregates.random(selectedBlock.getSets()).getCode();
-        }
         MyRandom.setRandom(placeholder);
         return ret;
     }
@@ -730,15 +741,18 @@ public class AdventureEventData implements Serializable {
             rewards[3] = new AdventureEventReward();
             rewards[3].minWins = 3;
             rewards[3].maxWins = 3;
-            draftedDeck.setName("Drafted Deck");
-            draftedDeck.setComment("Prize for placing 1st overall in draft event");
-            rewards[3].cardRewards = new Deck[]{draftedDeck};
+            rewardDeck.setName("Drafted Deck");
+            rewardDeck.setComment("Prize for placing 1st overall in draft event");
+            rewards[3].cardRewards = new Deck[]{rewardDeck};
 
         } else if (format == AdventureEventController.EventFormat.Sealed) {
 
-            if (wins == 3) {
-                rewards[3].cardRewards = new Deck[]{draftedDeck};
-            }
+            rewards[3] = new AdventureEventReward();
+            rewards[3].minWins = 3;
+            rewards[3].maxWins = 3;
+            rewardDeck.setName("Sealed Card Pool");
+            rewardDeck.setComment("Prize for placing 1st overall in sealed event");
+            rewards[3].cardRewards = new Deck[]{rewardDeck};
 
         } else if (format == AdventureEventController.EventFormat.Jumpstart) {
 
