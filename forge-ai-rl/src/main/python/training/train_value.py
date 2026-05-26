@@ -391,6 +391,11 @@ def main():
     parser.add_argument('--save-every', type=int, default=10)
     parser.add_argument('--max-files', type=int, default=None,
         help='Limit number of files to load (for testing)')
+    parser.add_argument('--early-stop-train-acc', type=float, default=None,
+        help='Stop once train accuracy meets/exceeds this value for '
+             '--early-stop-patience consecutive epochs (e.g., 1.0 for 100%%).')
+    parser.add_argument('--early-stop-patience', type=int, default=2,
+        help='Consecutive epochs threshold must hold before stopping.')
     args = parser.parse_args()
 
     # Setup
@@ -470,6 +475,7 @@ def main():
     print_epoch_header()
     best_val_acc = 0
     best_epoch = 0
+    acc_streak = 0
     t_total_start = time.time()
     save_path = os.path.join(
         args.save_dir, 'best_value_model.pt')
@@ -510,6 +516,17 @@ def main():
             writer.add_scalar('val/accuracy', vacc, epoch)
             writer.add_scalar('train/lr',
                 scheduler.get_last_lr()[0], epoch)
+
+        if args.early_stop_train_acc is not None:
+            if tacc >= args.early_stop_train_acc:
+                acc_streak += 1
+                if acc_streak >= args.early_stop_patience:
+                    print(f'  Early stop: train_acc ≥ '
+                          f'{args.early_stop_train_acc:.1%} for '
+                          f'{acc_streak} epochs', flush=True)
+                    break
+            else:
+                acc_streak = 0
 
     # Final
     model.save(os.path.join(
