@@ -441,9 +441,6 @@ def main():
         num_workers=0,
         pin_memory=device.startswith('cuda'))
 
-    print(f'  Split: {n_train} train / {n_val} val',
-          flush=True)
-
     # Model
     model = MTGModel.from_size("xl").to(device)
     params = model.count_parameters()
