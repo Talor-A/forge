@@ -58,10 +58,19 @@ _JAVA_HOME = os.environ.get('JAVA_HOME') or \
 JAVA_BIN = os.path.join(_JAVA_HOME, 'bin', 'java') \
     if os.path.exists(os.path.join(_JAVA_HOME, 'bin', 'java')) \
     else 'java'
-FORGE_JAR = os.path.join(
-    PROJECT_ROOT,
-    'forge-gui-desktop/target/'
-    'forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar')
+def _resolve_forge_jar() -> str:
+    target_dir = Path(PROJECT_ROOT) / 'forge-gui-desktop' / 'target'
+    matches = sorted(target_dir.glob(
+        'forge-gui-desktop-*-jar-with-dependencies.jar'))
+    if not matches:
+        # Fall back to a path that names the expected pattern so any error
+        # message points the user at where to look / what to build.
+        return str(target_dir
+                   / 'forge-gui-desktop-SNAPSHOT-jar-with-dependencies.jar')
+    return str(matches[-1])
+
+
+FORGE_JAR = _resolve_forge_jar()
 _DECK_DIR = os.path.expanduser('~/.forge/decks/constructed/')
 DECKS = [_DECK_DIR + 'Green Stompy.dck',
          _DECK_DIR + 'White Weenie.dck',

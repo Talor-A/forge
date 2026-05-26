@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-FORGE_JAR="$PROJECT_ROOT/forge-gui-desktop/target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar"
+FORGE_JAR=$(ls "$PROJECT_ROOT/forge-gui-desktop/target/"forge-gui-desktop-*-jar-with-dependencies.jar 2>/dev/null | tail -n1)
 DATA_DIR="$PROJECT_ROOT/rl_data/eval_trajectories"
 NUM_GAMES="${1:-100}"
 

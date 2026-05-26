@@ -38,6 +38,7 @@ lsof -i :$PORT 2>/dev/null | grep LISTEN && echo "SERVER: ALIVE" || { echo "SERV
 
 # Run eval
 echo "Running $GAMES games..."
+FORGE_JAR=$(ls /home/maustin/forge/forge-gui-desktop/target/forge-gui-desktop-*-jar-with-dependencies.jar 2>/dev/null | tail -n1)
 cd /home/maustin/forge/forge-gui-desktop
 java -Xmx8192m \
     --add-opens java.base/java.lang=ALL-UNNAMED \
@@ -45,7 +46,7 @@ java -Xmx8192m \
     --add-opens java.base/java.text=ALL-UNNAMED \
     --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
-    -jar target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar \
+    -jar "$FORGE_JAR" \
     rltrain evaluate \
     -d "Green Stompy.dck" -d "White Weenie.dck" -d "Blue Tempo.dck" -d "Red Aggro.dck" \
     -n "$GAMES" -o /tmp/rl_verify \
@@ -80,7 +81,7 @@ grep "RL_MODEL_ATTACK" /tmp/rl_verify/traj_*.jsonl 2>/dev/null | head -5 || \
     --add-opens java.base/java.text=ALL-UNNAMED \
     --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
-    -jar target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar \
+    -jar "$FORGE_JAR" \
     rltrain evaluate \
     -d "Green Stompy.dck" -d "White Weenie.dck" \
     -n 1 -o /tmp/rl_verify_probs \

@@ -16,6 +16,7 @@ echo ""
 
 mkdir -p "$OUTPUT"
 
+FORGE_JAR=$(ls /home/maustin/forge/forge-gui-desktop/target/forge-gui-desktop-*-jar-with-dependencies.jar 2>/dev/null | tail -n1)
 cd /home/maustin/forge/forge-gui-desktop
 java -Xmx12g \
     --add-opens java.base/java.lang=ALL-UNNAMED \
@@ -23,7 +24,7 @@ java -Xmx12g \
     --add-opens java.base/java.text=ALL-UNNAMED \
     --add-opens java.base/java.lang.reflect=ALL-UNNAMED \
     --add-opens java.desktop/javax.imageio.spi=ALL-UNNAMED \
-    -jar target/forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar \
+    -jar "$FORGE_JAR" \
     rltrain mcts-collect \
     -d "Green Stompy.dck" -d "White Weenie.dck" \
     -d "Blue Tempo.dck" -d "Red Aggro.dck" \
