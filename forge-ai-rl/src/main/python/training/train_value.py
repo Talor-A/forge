@@ -313,17 +313,22 @@ def train_epoch(model, loader, optimizer, scaler,
             pred = model.get_value(emb).squeeze(-1)
             loss = nn.functional.mse_loss(pred, tgt)
 
+        assert torch.isfinite(loss), "value train loss non-finite"
         if scaler:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
+            gn = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), 1.0)
+            assert torch.isfinite(gn) and gn > 0, \
+                f"value train grad norm dead: {gn}"
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
+            gn = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), 1.0)
+            assert torch.isfinite(gn) and gn > 0, \
+                f"value train grad norm dead: {gn}"
             optimizer.step()
 
         bs = tgt.shape[0]

@@ -305,6 +305,8 @@ def _process_file(task):
                                   dtype=np.float32)
             if len(flat_raw) == 0:
                 continue
+            assert len(flat_raw) == GAME_STATE_DIM, \
+                f"gameStateFlat: got {len(flat_raw)}, expected {GAME_STATE_DIM}"
             flat = np.zeros(GAME_STATE_DIM, dtype=np.float32)
             fl = min(len(flat_raw), GAME_STATE_DIM)
             flat[:fl] = flat_raw[:fl]
@@ -312,6 +314,8 @@ def _process_file(task):
 
             gf_raw = np.asarray(rec.get('globalFeatures', []),
                                 dtype=np.float32)
+            assert len(gf_raw) in (0, GLOBAL_DIM), \
+                f"globalFeatures: got {len(gf_raw)}, expected 0 or {GLOBAL_DIM}"
             g = np.zeros(GLOBAL_DIM, dtype=np.float32)
             gl = min(len(gf_raw), GLOBAL_DIM)
             if gl > 0:

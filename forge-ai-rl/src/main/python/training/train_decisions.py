@@ -324,14 +324,18 @@ def train_attack_head(model, samples, args, device, use_amp):
             if scaler:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
+                gn = torch.nn.utils.clip_grad_norm_(
                     model.attack_head.parameters(), 1.0)
+                assert torch.isfinite(gn) and gn > 0, \
+                    f"attack imitation grad norm dead: {gn}"
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
+                gn = torch.nn.utils.clip_grad_norm_(
                     model.attack_head.parameters(), 1.0)
+                assert torch.isfinite(gn) and gn > 0, \
+                    f"attack imitation grad norm dead: {gn}"
                 optimizer.step()
 
             tloss += loss.item() * total
@@ -469,6 +473,7 @@ def _attack_batch(model, batch, device, use_amp):
         loss = (loss * creature_mask.float()).sum() / \
                creature_mask.float().sum().clamp(min=1)
 
+    assert torch.isfinite(loss), "attack imitation loss non-finite"
     # Accuracy: per-creature binary accuracy
     with torch.no_grad():
         preds = (logits > 0).float()
@@ -542,14 +547,18 @@ def train_block_head(model, samples, args, device, use_amp):
             if scaler:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
+                gn = torch.nn.utils.clip_grad_norm_(
                     model.block_head.parameters(), 1.0)
+                assert torch.isfinite(gn) and gn > 0, \
+                    f"block imitation grad norm dead: {gn}"
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
+                gn = torch.nn.utils.clip_grad_norm_(
                     model.block_head.parameters(), 1.0)
+                assert torch.isfinite(gn) and gn > 0, \
+                    f"block imitation grad norm dead: {gn}"
                 optimizer.step()
             tl += loss.item() * total
             tc += correct
@@ -677,6 +686,7 @@ def _block_batch(model, batch, device, use_amp):
         loss = (loss * creature_mask.float()).sum() / \
                creature_mask.float().sum().clamp(min=1)
 
+    assert torch.isfinite(loss), "block imitation loss non-finite"
     with torch.no_grad():
         preds = (logits > 0).float()
         correct = ((preds == targets) *

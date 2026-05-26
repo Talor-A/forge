@@ -118,6 +118,9 @@ def _compute_gae_returns(records, won, shaping_coeff=0.0):
 
     # Returns = advantages + values (for value network training)
     returns = advantages + values
+    assert len(advantages) == n and len(returns) == n
+    assert np.isfinite(advantages).all(), "GAE advantages non-finite"
+    assert np.isfinite(returns).all(), "GAE returns non-finite"
     return list(zip(advantages, returns))
 
 
@@ -458,6 +461,10 @@ def compute_ppo_batch(model, head, samples, device,
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
+            assert abs(advantage.mean().item()) < 1e-3, \
+                f"adv mean post-norm: {advantage.mean().item()}"
+            assert abs(advantage.std().item() - 1.0) < 1e-2, \
+                f"adv std post-norm: {advantage.std().item()}"
 
         # PPO clipped objective
         ratio = torch.exp(log_probs - old_log_probs)
@@ -482,6 +489,7 @@ def compute_ppo_batch(model, head, samples, device,
             0.5 * value_loss -
             0.03 * entropy)  # attack: high exploration ok
 
+    assert torch.isfinite(total_loss), "ppo attack/block loss non-finite"
     metrics = {
         'policy_loss': policy_loss.item(),
         'value_loss': value_loss.item(),
@@ -647,6 +655,10 @@ def compute_ppo_block_batch(model, samples, device,
         advantage = gae_advantages_b
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+            assert abs(advantage.mean().item()) < 1e-3, \
+                f"adv mean post-norm: {advantage.mean().item()}"
+            assert abs(advantage.std().item() - 1.0) < 1e-2, \
+                f"adv std post-norm: {advantage.std().item()}"
 
         ratio = torch.exp(total_log_prob - old_log_probs)
         surr1 = ratio * advantage
@@ -657,6 +669,7 @@ def compute_ppo_block_batch(model, samples, device,
 
         total_loss = policy_loss + 0.5 * value_loss - 0.03 * entropy  # block: increased for exploration
 
+    assert torch.isfinite(total_loss), "ppo block loss non-finite"
     metrics = {
         'policy_loss': policy_loss.item(),
         'value_loss': value_loss.item(),
@@ -770,6 +783,10 @@ def compute_ppo_priority_batch(model, head, samples,
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
+            assert abs(advantage.mean().item()) < 1e-3, \
+                f"adv mean post-norm: {advantage.mean().item()}"
+            assert abs(advantage.std().item() - 1.0) < 1e-2, \
+                f"adv std post-norm: {advantage.std().item()}"
 
         # PPO clipped objective
         ratio = torch.exp(log_probs - old_log_probs)
@@ -789,6 +806,7 @@ def compute_ppo_priority_batch(model, head, samples,
             0.5 * value_loss -
             0.03 * entropy)  # priority: increased for exploration
 
+    assert torch.isfinite(total_loss), "ppo priority loss non-finite"
     metrics = {
         'policy_loss': policy_loss.item(),
         'value_loss': value_loss.item(),
@@ -882,6 +900,10 @@ def compute_ppo_target_batch(model, samples, device,
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
+            assert abs(advantage.mean().item()) < 1e-3, \
+                f"adv mean post-norm: {advantage.mean().item()}"
+            assert abs(advantage.std().item() - 1.0) < 1e-2, \
+                f"adv std post-norm: {advantage.std().item()}"
 
         ratio = torch.exp(log_probs - old_log_probs)
         surr1 = ratio * advantage
@@ -892,6 +914,7 @@ def compute_ppo_target_batch(model, samples, device,
         entropy = dist.entropy().mean()
         total_loss = policy_loss + 0.5 * value_loss - 0.03 * entropy  # target: increased for exploration
 
+    assert torch.isfinite(total_loss), "ppo target loss non-finite"
     metrics = {
         'policy_loss': policy_loss.item(),
         'value_loss': value_loss.item(),
@@ -981,6 +1004,10 @@ def compute_ppo_mulligan_batch(model, samples, device,
         if advantage.numel() > 1:
             advantage = (advantage - advantage.mean()) / \
                 (advantage.std() + 1e-8)
+            assert abs(advantage.mean().item()) < 1e-3, \
+                f"adv mean post-norm: {advantage.mean().item()}"
+            assert abs(advantage.std().item() - 1.0) < 1e-2, \
+                f"adv std post-norm: {advantage.std().item()}"
 
         ratio = torch.exp(log_probs - old_log_probs)
         surr1 = ratio * advantage
@@ -993,6 +1020,7 @@ def compute_ppo_mulligan_batch(model, samples, device,
                          (1-keep_prob).clamp(min=1e-8))).mean()
         total_loss = policy_loss + 0.5 * value_loss - 0.03 * entropy  # mulligan: increased for exploration
 
+    assert torch.isfinite(total_loss), "ppo mulligan loss non-finite"
     metrics = {
         'policy_loss': policy_loss.item(),
         'value_loss': value_loss.item(),
@@ -1517,21 +1545,22 @@ def main():
                     model, model.attack_head, batch,
                     device, use_amp)
 
-                if torch.isnan(loss):
-                    continue
-
                 optimizer.zero_grad()
                 if scaler:
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
+                    gn = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 0.5)
+                    assert torch.isfinite(gn) and gn > 0, \
+                        f"attack grad norm dead: {gn}"
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
+                    gn = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 0.5)
+                    assert torch.isfinite(gn) and gn > 0, \
+                        f"attack grad norm dead: {gn}"
                     optimizer.step()
 
                 total_pl += metrics['policy_loss']
@@ -1551,21 +1580,22 @@ def main():
                     model, model.block_head, batch,
                     device, use_amp)
 
-                if torch.isnan(loss):
-                    continue
-
                 optimizer.zero_grad()
                 if scaler:
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
+                    gn = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 0.5)
+                    assert torch.isfinite(gn) and gn > 0, \
+                        f"block grad norm dead: {gn}"
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
+                    gn = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 0.5)
+                    assert torch.isfinite(gn) and gn > 0, \
+                        f"block grad norm dead: {gn}"
                     optimizer.step()
 
                 total_pl += metrics['policy_loss']
@@ -1586,21 +1616,22 @@ def main():
                         model, model.priority_head,
                         batch, device, use_amp)
 
-                if torch.isnan(loss):
-                    continue
-
                 optimizer.zero_grad()
                 if scaler:
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
+                    gn = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 0.5)
+                    assert torch.isfinite(gn) and gn > 0, \
+                        f"priority grad norm dead: {gn}"
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
+                    gn = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), 0.5)
+                    assert torch.isfinite(gn) and gn > 0, \
+                        f"priority grad norm dead: {gn}"
                     optimizer.step()
 
                 total_pl += metrics['policy_loss']

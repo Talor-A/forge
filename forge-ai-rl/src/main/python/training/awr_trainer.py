@@ -135,6 +135,7 @@ def compute_awr_priority_batch(model, head, samples, device,
         probs = torch.softmax(logits, dim=-1)
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
+    assert torch.isfinite(loss), "awr priority loss non-finite"
     metrics = {
         'policy_loss': loss.item(),
         'entropy': entropy.item(),
@@ -217,6 +218,7 @@ def compute_awr_attack_batch(model, head, samples, device,
                      + (1-probs) * torch.log((1-probs).clamp(min=1e-8)))
         entropy = (entropy * cm.float()).sum() / cm.float().sum().clamp(min=1)
 
+    assert torch.isfinite(loss), "awr attack loss non-finite"
     metrics = {
         'policy_loss': loss.item(),
         'entropy': entropy.item(),
@@ -374,21 +376,22 @@ def awr_thread(state, args):
                             batch, device, use_amp,
                             temperature=args.temperature)
 
-                    if torch.isnan(loss):
-                        continue
-
                     optimizer.zero_grad()
                     if scaler:
                         scaler.scale(loss).backward()
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(
+                        gn = torch.nn.utils.clip_grad_norm_(
                             model.parameters(), 1.0)
+                        assert torch.isfinite(gn) and gn > 0, \
+                            f"awr priority grad norm dead: {gn}"
                         scaler.step(optimizer)
                         scaler.update()
                     else:
                         loss.backward()
-                        torch.nn.utils.clip_grad_norm_(
+                        gn = torch.nn.utils.clip_grad_norm_(
                             model.parameters(), 1.0)
+                        assert torch.isfinite(gn) and gn > 0, \
+                            f"awr priority grad norm dead: {gn}"
                         optimizer.step()
 
                     total_pl += metrics['policy_loss']
@@ -411,21 +414,22 @@ def awr_thread(state, args):
                                 batch, device, use_amp,
                                 temperature=args.temperature)
 
-                        if torch.isnan(loss):
-                            continue
-
                         optimizer.zero_grad()
                         if scaler:
                             scaler.scale(loss).backward()
                             scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(
+                            gn = torch.nn.utils.clip_grad_norm_(
                                 model.parameters(), 1.0)
+                            assert torch.isfinite(gn) and gn > 0, \
+                                f"awr attack grad norm dead: {gn}"
                             scaler.step(optimizer)
                             scaler.update()
                         else:
                             loss.backward()
-                            torch.nn.utils.clip_grad_norm_(
+                            gn = torch.nn.utils.clip_grad_norm_(
                                 model.parameters(), 1.0)
+                            assert torch.isfinite(gn) and gn > 0, \
+                                f"awr attack grad norm dead: {gn}"
                             optimizer.step()
 
                         total_pl += metrics['policy_loss']

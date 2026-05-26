@@ -44,6 +44,14 @@ def parse_game_state(flat, global_feats):
     """Parse flat game state into zone tensors.
     Canonical implementation — all other files should import
     this function rather than defining their own copy."""
+    # Boundary: payloads from Java are either exactly the full size
+    # or empty (PING health check). Anything else is a data format
+    # drift bug we want to hear about loudly.
+    assert len(flat) in (0, GAME_STATE_DIM), \
+        f"gameStateFlat: got {len(flat)}, expected 0 or {GAME_STATE_DIM}"
+    assert len(global_feats) in (0, GLOBAL_DIM), \
+        f"globalFeatures: got {len(global_feats)}, expected 0 or {GLOBAL_DIM}"
+
     g = np.zeros(GLOBAL_DIM, dtype=np.float32)
     gl = min(len(global_feats), GLOBAL_DIM)
     if gl > 0:
