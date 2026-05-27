@@ -31,7 +31,8 @@ class CardSetEncoder(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # enable_nested_tensor=False: nested-tensor fast path is unimplemented on MPS
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
         self.output_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, card_features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -113,7 +114,7 @@ class GameStateTransformer(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.cross_zone_transformer = nn.TransformerEncoder(cross_layer, num_layers=1)
+        self.cross_zone_transformer = nn.TransformerEncoder(cross_layer, num_layers=1, enable_nested_tensor=False)
 
         # Final projection to output_dim
         # 7 zone embeddings: global, my_board, opp_board, hand, my_gy, opp_gy, stack

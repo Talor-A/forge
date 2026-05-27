@@ -58,6 +58,35 @@ def _identity_collate(batch):
     return batch
 
 
+def _loader_kwargs(num_workers: int) -> dict:
+    """DataLoader kwargs that pick safe multiprocessing on macOS.
+
+    Hard guard: on darwin, every DataLoader worker re-mmaps the
+    multi-GB shared/game_state.npy. Mach VM compressor accounts
+    per-process — even though pages are shared at the VFS layer,
+    5 tasks × 6+GB address space pegs the compressor and panics
+    the kernel (WindowServer watchdog). spawn doesn't help; the
+    re-mmap is the trigger. We've reproduced this twice. The same
+    guard exists in forge-ai-investigation's value_trainer.py and
+    decisions_trainer.py — see those for context. Override with
+    FORGE_ALLOW_MAC_WORKERS=1 if you really mean it.
+    """
+    if (num_workers > 0 and sys.platform == 'darwin'
+            and os.environ.get('FORGE_ALLOW_MAC_WORKERS') != '1'):
+        print(f'  [safety] macOS detected; forcing num_workers=0 '
+              f'(was {num_workers}). Set FORGE_ALLOW_MAC_WORKERS=1 '
+              f'to override (kernel-panic risk).', flush=True)
+        num_workers = 0
+    kw = {
+        'num_workers': num_workers,
+        'persistent_workers': num_workers > 0,
+        'collate_fn': _identity_collate,
+    }
+    if num_workers > 0 and sys.platform == 'darwin':
+        kw['multiprocessing_context'] = 'spawn'
+    return kw
+
+
 # ── Shared state ─────────────────────────────────────
 
 @dataclass
@@ -842,17 +871,11 @@ def train_head_mmap(model, head, head_name,
     scaler = torch.amp.GradScaler('cuda') if use_amp \
         else None
 
-    nw = args.num_workers
+    lkw = _loader_kwargs(args.num_workers)
     train_loader = tud.DataLoader(
-        train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=nw,
-        persistent_workers=nw > 0,
-        collate_fn=_identity_collate)
+        train_ds, batch_size=args.batch_size, shuffle=True, **lkw)
     val_loader = tud.DataLoader(
-        val_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=nw,
-        persistent_workers=nw > 0,
-        collate_fn=_identity_collate)
+        val_ds, batch_size=args.batch_size, shuffle=False, **lkw)
 
     best_acc = 0
     save_path = os.path.join(
@@ -1004,17 +1027,11 @@ def train_priority_head_mmap(model, head,
         else None
 
     # DataLoaders with list collation (batch = list of dicts)
-    nw = args.num_workers
+    lkw = _loader_kwargs(args.num_workers)
     train_loader = tud.DataLoader(
-        train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=nw,
-        persistent_workers=nw > 0,
-        collate_fn=_identity_collate)
+        train_ds, batch_size=args.batch_size, shuffle=True, **lkw)
     val_loader = tud.DataLoader(
-        val_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=nw,
-        persistent_workers=nw > 0,
-        collate_fn=_identity_collate)
+        val_ds, batch_size=args.batch_size, shuffle=False, **lkw)
 
     best_acc = 0
     save_path = os.path.join(
@@ -1184,17 +1201,11 @@ def train_joint_mmap(model, head_configs, args, state,
         head_schedulers[name] = \
             optim.lr_scheduler.CosineAnnealingLR(
                 head_optimizers[name], T_max=args.epochs)
-        nw = args.num_workers
+        lkw = _loader_kwargs(args.num_workers)
         head_loaders[name] = tud.DataLoader(
-            train_ds, batch_size=args.batch_size,
-            shuffle=True, num_workers=nw,
-            persistent_workers=nw > 0,
-            collate_fn=_identity_collate)
+            train_ds, batch_size=args.batch_size, shuffle=True, **lkw)
         head_val_loaders[name] = tud.DataLoader(
-            val_ds, batch_size=args.batch_size,
-            shuffle=False, num_workers=nw,
-            persistent_workers=nw > 0,
-            collate_fn=_identity_collate)
+            val_ds, batch_size=args.batch_size, shuffle=False, **lkw)
         head_best_acc[name] = 0.0
         n_params = sum(p.numel() for p in head.parameters())
         log(state, f"  {name}: {len(train_ds)} train, "
@@ -1407,11 +1418,20 @@ def train_joint_mmap(model, head_configs, args, state,
     return head_best_acc
 
 
+def _auto_device():
+    if torch.cuda.is_available():
+        return 'cuda'
+    mps = getattr(torch.backends, 'mps', None)
+    if mps is not None and mps.is_available():
+        return 'mps'
+    return 'cpu'
+
+
 def trainer_thread(state, args):
     try:
         profile = auto_detect_profile()
-        device = args.device or (
-            'cuda' if torch.cuda.is_available() else 'cpu')
+        device = args.device or _auto_device()
+        # AMP is CUDA-only in this codebase; MPS/CPU run fp32.
         use_amp = profile.use_amp and device.startswith(
             'cuda')
 
@@ -2025,6 +2045,9 @@ def main():
              'loading (safe with legacy in-RAM datasets). '
              'mmap-backed datasets are fork-safe; try 4-8 to '
              'parallelize JSON parsing / collation.')
+    parser.add_argument('--headless', action='store_true',
+        help='Skip the Tk dashboard and run training in the '
+             'main thread. Required for non-display sessions.')
     parser.add_argument('--model-size', default='xl',
         choices=['small', 'medium', 'large', 'xl'],
         help='Model size: small (512/23M), medium '
@@ -2032,6 +2055,10 @@ def main():
     args = parser.parse_args()
 
     state = TrainingState()
+
+    if args.headless:
+        trainer_thread(state, args)
+        return
 
     t = threading.Thread(target=trainer_thread,
         args=(state, args), daemon=True)

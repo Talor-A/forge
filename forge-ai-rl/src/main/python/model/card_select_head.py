@@ -31,7 +31,7 @@ class CardSelectHead(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.candidate_attention = nn.TransformerEncoder(encoder_layer, num_layers=1)
+        self.candidate_attention = nn.TransformerEncoder(encoder_layer, num_layers=1, enable_nested_tensor=False)
 
         # Score each card for selection
         self.score_network = nn.Sequential(

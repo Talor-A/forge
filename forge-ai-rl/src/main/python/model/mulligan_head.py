@@ -31,7 +31,7 @@ class MulliganHead(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.hand_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.hand_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2, enable_nested_tensor=False)
 
         # Keep/mulligan decision
         self.keep_classifier = nn.Sequential(

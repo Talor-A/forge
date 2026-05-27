@@ -33,7 +33,7 @@ class AttackHead(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.attacker_attention = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.attacker_attention = nn.TransformerEncoder(encoder_layer, num_layers=2, enable_nested_tensor=False)
 
         # Binary classifier per creature: attack or not
         self.attack_classifier = nn.Sequential(
