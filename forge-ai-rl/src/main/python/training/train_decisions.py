@@ -407,77 +407,124 @@ def train_block_head(model, train_ds, val_ds, args,
     return best_val_acc
 
 
+def _unpack_block_pairs(pair_features, action_mask, card_dim):
+    """Reconstruct separate blocker/attacker tensors from flat pair features.
+
+    Pairs are ordered b0a0, b0a1, ..., b1a0, b1a1, ...
+    n_attackers is inferred by scanning until the blocker-half features change.
+
+    Returns:
+        blocker_feats:  (n_blockers, card_dim) float32
+        attacker_feats: (n_attackers, card_dim) float32
+        targets:        (n_blockers,) int64 — chosen attacker index per blocker,
+                        or n_attackers for "don't block"
+    """
+    n_pairs = len(pair_features)
+    cd = card_dim
+    if n_pairs == 0:
+        empty = np.zeros((0, cd), dtype=np.float32)
+        return empty, empty, np.zeros(0, dtype=np.int64)
+
+    first_blocker = pair_features[0, :cd]
+    n_attackers = 1
+    for j in range(1, n_pairs):
+        if np.allclose(pair_features[j, :cd], first_blocker, atol=0.01):
+            n_attackers += 1
+        else:
+            break
+
+    n_blockers = n_pairs // n_attackers
+
+    blocker_feats = np.stack([
+        pair_features[b * n_attackers, :cd] for b in range(n_blockers)
+    ])
+    attacker_feats = np.stack([
+        pair_features[a, cd:cd * 2] for a in range(n_attackers)
+    ])
+
+    # Default: don't block (n_attackers is the "no block" sentinel)
+    targets = np.full(n_blockers, n_attackers, dtype=np.int64)
+    for b in range(n_blockers):
+        for a in range(n_attackers):
+            idx = b * n_attackers + a
+            if idx < n_pairs and action_mask[idx] > 0.5:
+                targets[b] = a
+                break
+
+    return blocker_feats, attacker_feats, targets
+
+
 def _block_batch(model, batch, device, use_amp):
-    """Same as _attack_batch but for block pairs."""
-    max_c = max(s['n_pairs'] for s in batch)
-    max_c = max(max_c, 1)
+    """Process one batch of block decisions using BlockHead."""
     bs = len(batch)
     cd = CARD_DIM
 
-    creature_feats = torch.zeros(bs, max_c, cd,
-                                  device=device)
-    creature_mask = torch.zeros(bs, max_c,
-                                 dtype=torch.bool,
-                                 device=device)
-    targets = torch.zeros(bs, max_c, device=device)
+    # Unpack each sample's flat pairs into separate blocker/attacker tensors
+    # and integer per-blocker targets. Must happen before batch allocation so
+    # we know max_blockers and max_attackers across the batch.
+    unpacked = [
+        _unpack_block_pairs(s['pair_features'], s['action_mask'], cd)
+        for s in batch
+    ]
+
+    max_bl = max((len(bf) for bf, _, _ in unpacked), default=0)
+    max_bl = max(max_bl, 1)
+    max_at = max((len(af) for _, af, _ in unpacked), default=0)
+    max_at = max(max_at, 1)
+
+    blocker_feats = torch.zeros(bs, max_bl, cd, device=device)
+    blocker_mask = torch.zeros(bs, max_bl, dtype=torch.bool, device=device)
+    attacker_feats = torch.zeros(bs, max_at, cd, device=device)
+    attacker_mask = torch.zeros(bs, max_at, dtype=torch.bool, device=device)
+    # targets[i, b] = attacker index or max_at for "don't block"
+    targets = torch.full((bs, max_bl), max_at, dtype=torch.long, device=device)
     global_feats = torch.zeros(bs, GLOBAL_DIM, device=device)
 
     my_board = torch.zeros(bs, 40, cd, device=device)
-    my_board_m = torch.zeros(bs, 40, dtype=torch.bool,
-                              device=device)
+    my_board_m = torch.zeros(bs, 40, dtype=torch.bool, device=device)
     opp_board = torch.zeros(bs, 40, cd, device=device)
-    opp_board_m = torch.zeros(bs, 40, dtype=torch.bool,
-                               device=device)
+    opp_board_m = torch.zeros(bs, 40, dtype=torch.bool, device=device)
     hand = torch.zeros(bs, 15, cd, device=device)
-    hand_m = torch.zeros(bs, 15, dtype=torch.bool,
-                          device=device)
+    hand_m = torch.zeros(bs, 15, dtype=torch.bool, device=device)
     my_gy = torch.zeros(bs, 20, cd, device=device)
-    my_gy_m = torch.zeros(bs, 20, dtype=torch.bool,
-                           device=device)
+    my_gy_m = torch.zeros(bs, 20, dtype=torch.bool, device=device)
     opp_gy = torch.zeros(bs, 20, cd, device=device)
-    opp_gy_m = torch.zeros(bs, 20, dtype=torch.bool,
-                            device=device)
+    opp_gy_m = torch.zeros(bs, 20, dtype=torch.bool, device=device)
     stack = torch.zeros(bs, 10, cd, device=device)
-    stack_m = torch.zeros(bs, 10, dtype=torch.bool,
-                           device=device)
+    stack_m = torch.zeros(bs, 10, dtype=torch.bool, device=device)
 
-    for i, s in enumerate(batch):
-        # MmapBlockDataset returns pair_features (CARD_DIM*2)
-        # but the legacy attack_head consumer below expects
-        # CARD_DIM. Take the first CARD_DIM channels — the
-        # blocker half. Pre-mmap code did the same truncation
-        # implicitly via the (n, CARD_DIM) tensor allocation.
-        nc = s['n_pairs']
-        pair = s['pair_features']
-        creature_feats[i, :nc] = torch.from_numpy(
-            pair[:, :cd].copy())
-        creature_mask[i, :nc] = True
-        targets[i, :nc] = torch.from_numpy(
-            s['action_mask'])
+    for i, (s, (bf, af, tgt)) in enumerate(zip(batch, unpacked)):
+        nb, na = len(bf), len(af)
+        if nb > 0:
+            blocker_feats[i, :nb] = torch.from_numpy(bf)
+            blocker_mask[i, :nb] = True
+            tgt_t = torch.from_numpy(tgt).long()
+            tgt_t[tgt_t == na] = max_at  # remap per-sample "no block" to batch index
+            targets[i, :nb] = tgt_t
+        if na > 0:
+            attacker_feats[i, :na] = torch.from_numpy(af)
+            attacker_mask[i, :na] = True
 
         g, zones, masks = parse_game_state(
             s['game_state_flat'], s['global_features'])
         global_feats[i] = torch.from_numpy(g)
-        my_board[i] = torch.from_numpy(
-            zones['my_board'])
-        my_board_m[i] = torch.from_numpy(
-            masks['my_board_mask'])
-        opp_board[i] = torch.from_numpy(
-            zones['opp_board'])
-        opp_board_m[i] = torch.from_numpy(
-            masks['opp_board_mask'])
+        my_board[i] = torch.from_numpy(zones['my_board'])
+        my_board_m[i] = torch.from_numpy(masks['my_board_mask'])
+        opp_board[i] = torch.from_numpy(zones['opp_board'])
+        opp_board_m[i] = torch.from_numpy(masks['opp_board_mask'])
         hand[i] = torch.from_numpy(zones['hand'])
-        hand_m[i] = torch.from_numpy(
-            masks['hand_mask'])
+        hand_m[i] = torch.from_numpy(masks['hand_mask'])
         my_gy[i] = torch.from_numpy(zones['my_gy'])
-        my_gy_m[i] = torch.from_numpy(
-            masks['my_gy_mask'])
+        my_gy_m[i] = torch.from_numpy(masks['my_gy_mask'])
         opp_gy[i] = torch.from_numpy(zones['opp_gy'])
-        opp_gy_m[i] = torch.from_numpy(
-            masks['opp_gy_mask'])
+        opp_gy_m[i] = torch.from_numpy(masks['opp_gy_mask'])
         stack[i] = torch.from_numpy(zones['stack'])
-        stack_m[i] = torch.from_numpy(
-            masks['stack_mask'])
+        stack_m[i] = torch.from_numpy(masks['stack_mask'])
+
+    assert (targets >= 0).all() and (targets <= max_at).all(), \
+        f"block targets out of range [0, {max_at}]: min={targets.min()}, max={targets.max()}"
+    assert not blocker_mask.any() or (targets[blocker_mask] <= max_at).all(), \
+        "valid blocker has target > max_at — 'don't block' remap missed a sample"
 
     with torch.amp.autocast('cuda', enabled=use_amp):
         with torch.no_grad():
@@ -490,22 +537,24 @@ def _block_batch(model, batch, device, use_amp):
                 opp_gy, opp_gy_m,
                 stack, stack_m)
 
-        # Block head: use same interface as attack head
-        # (binary per creature: block or not)
-        logits = model.attack_head(
-            state, creature_feats, creature_mask)
+        # logits: (bs, max_bl, max_at + 1) — last column is "don't block"
+        logits = model.block_head(
+            state, blocker_feats, blocker_mask,
+            attacker_feats, attacker_mask)
 
-        loss = nn.functional.binary_cross_entropy_with_logits(
-            logits, targets, reduction='none')
-        loss = (loss * creature_mask.float()).sum() / \
-               creature_mask.float().sum().clamp(min=1)
+        flat_logits = logits.reshape(-1, max_at + 1)
+        flat_targets = targets.reshape(-1)
+        flat_mask = blocker_mask.reshape(-1)
+        loss = nn.functional.cross_entropy(
+            flat_logits, flat_targets, reduction='none')
+        loss = (loss * flat_mask.float()).sum() / \
+               flat_mask.float().sum().clamp(min=1)
 
     assert torch.isfinite(loss), "block imitation loss non-finite"
     with torch.no_grad():
-        preds = (logits > 0).float()
-        correct = ((preds == targets) *
-                   creature_mask.float()).sum().item()
-        total = creature_mask.float().sum().item()
+        preds = flat_logits.argmax(dim=-1)
+        correct = ((preds == flat_targets) * flat_mask).sum().item()
+        total = flat_mask.float().sum().item()
 
     return loss, correct, total
 
