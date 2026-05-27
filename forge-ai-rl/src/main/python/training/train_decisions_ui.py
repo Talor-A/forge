@@ -58,6 +58,41 @@ def _identity_collate(batch):
     return batch
 
 
+def _dump_epoch_snapshot(save_dir, mode, epoch, total_epochs,
+                         head_metrics, head_best_acc,
+                         epoch_time, elapsed, args):
+    """Write a per-epoch JSON snapshot for monitor_ui.
+
+    One file per epoch, never overwritten — preserves history
+    across pause/resume. Monitor globs and concatenates.
+
+    head_metrics: {head_name: {'train_loss','val_loss',
+                                'train_acc','val_acc'}}
+    """
+    import datetime as _dt
+    out_dir = os.path.join(save_dir, 'training_state')
+    os.makedirs(out_dir, exist_ok=True)
+    payload = {
+        'mode': mode,
+        'epoch': epoch,
+        'total_epochs': total_epochs,
+        'epoch_time_s': epoch_time,
+        'elapsed_s': elapsed,
+        'timestamp': _dt.datetime.now().isoformat(timespec='seconds'),
+        'batch_size': getattr(args, 'batch_size', None),
+        'lr': getattr(args, 'lr', None),
+        'heads': {
+            name: {**m, 'best_val_acc': head_best_acc.get(name, 0.0)}
+            for name, m in head_metrics.items()
+        },
+    }
+    path = os.path.join(out_dir, f'epoch_{epoch:04d}.json')
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
 def _loader_kwargs(num_workers: int) -> dict:
     """DataLoader kwargs that pick safe multiprocessing on macOS.
 
@@ -970,6 +1005,15 @@ def train_head_mmap(model, head, head_name,
             f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
             f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
 
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        _dump_epoch_snapshot(
+            args.save_dir, f'head:{head_name}', epoch, args.epochs,
+            {head_name: {'train_loss': tl, 'val_loss': vl,
+                         'train_acc': ta, 'val_acc': va}},
+            {head_name: best_acc},
+            state.epoch_time, state.elapsed, args)
+
         if np.isnan(tl) or np.isnan(vl):
             log(state,
                 f"  NaN detected! Stopping {head_name}.")
@@ -1123,6 +1167,15 @@ def train_priority_head_mmap(model, head,
             f"  Epoch {epoch:>3d}/{args.epochs} | "
             f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
             f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
+
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        _dump_epoch_snapshot(
+            args.save_dir, 'priority', epoch, args.epochs,
+            {'priority': {'train_loss': tl, 'val_loss': vl,
+                          'train_acc': ta, 'val_acc': va}},
+            {'priority': best_acc},
+            state.epoch_time, state.elapsed, args)
 
         if np.isnan(tl) or np.isnan(vl):
             log(state,
@@ -1350,6 +1403,7 @@ def train_joint_mmap(model, head_configs, args, state,
         # Log results
         log_parts = [f"Epoch {epoch:>3d}/{args.epochs}"]
         any_improved = False
+        epoch_metrics = {}
         for name in sorted(head_stats.keys()):
             ts = head_stats[name]
             vs = head_val_stats[name]
@@ -1387,6 +1441,10 @@ def train_joint_mmap(model, head_configs, args, state,
             log_parts.append(
                 f"{name}=A{ta:.0%}/{va:.0%}{improved} "
                 f"L{tl:.2f}/{vl:.2f}")
+            epoch_metrics[name] = {
+                'train_loss': tl, 'val_loss': vl,
+                'train_acc': ta, 'val_acc': va,
+            }
 
         log(state, "  " + " | ".join(log_parts))
 
@@ -1400,6 +1458,11 @@ def train_joint_mmap(model, head_configs, args, state,
         state.eta = (args.epochs - epoch) * state.epoch_time
         state.epoch_progress = 1.0
         state.chart_dirty = True
+
+        _dump_epoch_snapshot(
+            args.save_dir, 'joint', epoch, args.epochs,
+            epoch_metrics, head_best_acc,
+            state.epoch_time, state.elapsed, args)
 
         if device.startswith('cuda'):
             torch.cuda.synchronize()

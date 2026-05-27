@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -20,6 +21,12 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 REFRESH_MS = 3000  # redraw every 3 seconds
+
+# Distinct colors for up to 8 decision heads
+HEAD_COLORS = [
+    '#89b4fa', '#f38ba8', '#a6e3a1', '#f9e2af',
+    '#fab387', '#cba6f7', '#94e2d5', '#eba0ac',
+]
 
 
 class MonitorUI:
@@ -263,17 +270,186 @@ class MonitorUI:
         self.canvas.draw()
 
 
+class DecisionsMonitorUI:
+    """Monitor for supervised decisions training.
+
+    Reads <state-dir>/epoch_*.json files (one per epoch, never
+    overwritten — pause-and-resume safe) and renders loss + acc
+    timeseries per head.
+    """
+
+    def __init__(self, root, state_dir):
+        self.root = root
+        self.state_dir = state_dir
+        root.title("MTG RL — Decisions Training Monitor")
+        root.geometry("1200x720")
+        root.configure(bg='#1e1e2e')
+
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('H.TLabel', font=('Helvetica', 15, 'bold'),
+            background='#1e1e2e', foreground='#cdd6f4')
+        style.configure('S.TLabel', font=('Consolas', 11),
+            background='#1e1e2e', foreground='#a6adc8')
+        style.configure('D.TFrame', background='#1e1e2e')
+
+        self._build(root)
+        self._refresh()
+
+    def _build(self, root):
+        m = ttk.Frame(root, style='D.TFrame')
+        m.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        ttk.Label(m, text="MTG RL — Decisions Training Monitor",
+            style='H.TLabel').pack(pady=(0, 4))
+
+        self.status_var = tk.StringVar(value="Loading...")
+        ttk.Label(m, textvariable=self.status_var,
+            style='S.TLabel').pack()
+
+        cf = ttk.Frame(m, style='D.TFrame')
+        cf.pack(fill=tk.BOTH, expand=True, pady=4)
+        self.fig = Figure(figsize=(12, 6), dpi=100,
+            facecolor='#1e1e2e')
+        self.ax_loss = self.fig.add_subplot(121)
+        self.ax_acc = self.fig.add_subplot(122)
+        for ax, title in [
+            (self.ax_loss, 'Loss (solid=train, dashed=val)'),
+            (self.ax_acc, 'Accuracy (solid=train, dashed=val)'),
+        ]:
+            ax.set_facecolor('#313244')
+            ax.set_title(title, color='#cdd6f4', fontsize=10)
+            ax.tick_params(colors='#6c7086', labelsize=8)
+            for sp in ax.spines.values():
+                sp.set_color('#45475a')
+        self.fig.tight_layout(pad=2)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=cf)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(m,
+            text=f"Watching: {self.state_dir}  •  refresh every {REFRESH_MS//1000}s",
+            style='S.TLabel').pack(pady=(4, 0))
+
+    def _load_snapshots(self):
+        """Glob and load all epoch_*.json. Returns list sorted by epoch."""
+        paths = sorted(glob.glob(os.path.join(
+            self.state_dir, 'epoch_*.json')))
+        snaps = []
+        for p in paths:
+            try:
+                with open(p) as f:
+                    snaps.append(json.load(f))
+            except Exception:
+                continue
+        snaps.sort(key=lambda s: s.get('epoch', 0))
+        return snaps
+
+    def _refresh(self):
+        try:
+            snaps = self._load_snapshots()
+            self._update(snaps)
+        except Exception as e:
+            self.status_var.set(f"Error reading state: {e}")
+        self.root.after(REFRESH_MS, self._refresh)
+
+    def _update(self, snaps):
+        if not snaps:
+            self.status_var.set(
+                f"No epoch_*.json found in {self.state_dir}")
+            return
+
+        last = snaps[-1]
+        total = last.get('total_epochs', '?')
+        self.status_var.set(
+            f"Epoch {last.get('epoch')}/{total}  •  "
+            f"mode={last.get('mode')}  •  "
+            f"epoch_time={last.get('epoch_time_s', 0):.1f}s  •  "
+            f"updated {last.get('timestamp', '')}")
+
+        # Build per-head series: head -> {epoch: (tl, vl, ta, va)}
+        per_head = {}
+        for s in snaps:
+            ep = s.get('epoch', 0)
+            for name, m in s.get('heads', {}).items():
+                per_head.setdefault(name, []).append((
+                    ep,
+                    m.get('train_loss'), m.get('val_loss'),
+                    m.get('train_acc'), m.get('val_acc'),
+                ))
+
+        self.ax_loss.clear()
+        self.ax_acc.clear()
+        for ax, title in [
+            (self.ax_loss, 'Loss (solid=train, dashed=val)'),
+            (self.ax_acc, 'Accuracy (solid=train, dashed=val)'),
+        ]:
+            ax.set_facecolor('#313244')
+            ax.set_title(title, color='#cdd6f4', fontsize=10)
+            ax.tick_params(colors='#6c7086', labelsize=8)
+            for sp in ax.spines.values():
+                sp.set_color('#45475a')
+            ax.set_xlabel('Epoch', color='#a6adc8', fontsize=9)
+
+        for i, name in enumerate(sorted(per_head.keys())):
+            color = HEAD_COLORS[i % len(HEAD_COLORS)]
+            rows = per_head[name]
+            xs = [r[0] for r in rows]
+            tl = [r[1] for r in rows if r[1] is not None]
+            vl = [r[2] for r in rows if r[2] is not None]
+            ta = [r[3] for r in rows if r[3] is not None]
+            va = [r[4] for r in rows if r[4] is not None]
+            xs_l = xs[:len(tl)]
+            xs_a = xs[:len(ta)]
+            if tl:
+                self.ax_loss.plot(xs_l, tl, color=color,
+                    linewidth=1.5, label=name)
+            if vl:
+                self.ax_loss.plot(xs_l[:len(vl)], vl, color=color,
+                    linewidth=1.5, linestyle='--')
+            if ta:
+                self.ax_acc.plot(xs_a, ta, color=color,
+                    linewidth=1.5, label=name)
+            if va:
+                self.ax_acc.plot(xs_a[:len(va)], va, color=color,
+                    linewidth=1.5, linestyle='--')
+
+        self.ax_loss.set_ylabel('Loss', color='#a6adc8', fontsize=9)
+        self.ax_acc.set_ylabel('Accuracy', color='#a6adc8', fontsize=9)
+        self.ax_acc.set_ylim(0, 1.0)
+        for ax in (self.ax_loss, self.ax_acc):
+            ax.legend(fontsize=8, facecolor='#313244',
+                edgecolor='#45475a', labelcolor='#cdd6f4',
+                ncol=2, loc='best')
+
+        self.fig.tight_layout(pad=2)
+        self.canvas.draw()
+
+
 def main():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from training.ppo_trainer import PROJECT_ROOT
     parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['ppo', 'decisions'],
+        default='ppo', help='Which trainer to monitor.')
     parser.add_argument('--state-file',
-        default=os.path.join(PROJECT_ROOT,
-            'rl_data/checkpoints/ppo_training_state.json'))
+        help='(ppo mode) Path to ppo_training_state.json. '
+             'Defaults to rl_data/checkpoints/ppo_training_state.json.')
+    parser.add_argument('--state-dir',
+        help='(decisions mode) Directory containing '
+             'epoch_*.json snapshots (typically '
+             '<save-dir>/training_state).')
     args = parser.parse_args()
 
     root = tk.Tk()
-    MonitorUI(root, args.state_file)
+    if args.mode == 'decisions':
+        if not args.state_dir:
+            parser.error('--state-dir required in decisions mode')
+        DecisionsMonitorUI(root, args.state_dir)
+    else:
+        from training.ppo_trainer import PROJECT_ROOT
+        state_file = args.state_file or os.path.join(
+            PROJECT_ROOT,
+            'rl_data/checkpoints/ppo_training_state.json')
+        MonitorUI(root, state_file)
     root.mainloop()
 
 
