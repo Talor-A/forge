@@ -112,4 +112,6 @@ class MulliganHead(nn.Module):
             selected.append(action)
             current_mask = current_mask.scatter(1, action.unsqueeze(1), False)
 
-        return torch.stack(selected, dim=1) if selected else torch.empty(0), total_log_prob
+        if selected:
+            return torch.stack(selected, dim=1), total_log_prob
+        return torch.zeros(game_state.shape[0], 0, dtype=torch.long, device=game_state.device), total_log_prob

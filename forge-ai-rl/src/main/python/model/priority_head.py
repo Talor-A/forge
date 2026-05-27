@@ -60,8 +60,8 @@ class PriorityHead(nn.Module):
         actions = self.action_projection(action_features)  # (batch, max_actions, hidden_dim)
         state = self.state_projection(game_state).unsqueeze(1)  # (batch, 1, hidden_dim)
 
-        # Cross-attention: actions query, state is key/value
-        attn_out, _ = self.cross_attention(actions, state.expand(-1, max_actions, -1), state.expand(-1, max_actions, -1))
+        # Cross-attention: actions query the single game-state token as key/value
+        attn_out, _ = self.cross_attention(actions, state, state)
 
         # Combine attention output with original action features
         combined = torch.cat([attn_out, actions], dim=-1)  # (batch, max_actions, hidden_dim * 2)

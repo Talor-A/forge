@@ -77,7 +77,8 @@ class CardSelectHead(nn.Module):
         context = state
 
         for _ in range(num_select):
-            if not current_mask.any():
+            has_valid = current_mask.any(dim=-1)  # (batch,) — per-element check
+            if not has_valid.any():
                 break
 
             state_exp = context.unsqueeze(1).expand(-1, cards.shape[1], -1)
@@ -85,9 +86,14 @@ class CardSelectHead(nn.Module):
             logits = self.score_network(combined).squeeze(-1)
             logits = logits.masked_fill(~current_mask, float('-inf'))
 
-            dist = torch.distributions.Categorical(logits=logits)
+            # Temporarily open slot 0 for exhausted elements so Categorical
+            # doesn't see an all-inf row and crash. Their log_prob is not counted.
+            safe_logits = logits.clone()
+            safe_logits[~has_valid, 0] = 0.0
+
+            dist = torch.distributions.Categorical(logits=safe_logits)
             action = dist.sample()
-            total_log_prob += dist.log_prob(action)
+            total_log_prob = total_log_prob + dist.log_prob(action) * has_valid.float()
             selected.append(action)
 
             # Update context

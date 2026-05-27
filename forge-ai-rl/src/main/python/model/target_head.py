@@ -62,7 +62,6 @@ class TargetHead(nn.Module):
 
         # Pointer attention scores
         logits = (query * keys).sum(dim=-1) / self.scale  # (batch, max_targets)
-        logits = logits.squeeze(1) if logits.dim() == 3 else logits
         logits = logits.masked_fill(~target_mask, float('-inf'))
 
         return logits
