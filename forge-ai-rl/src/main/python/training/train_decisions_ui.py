@@ -184,216 +184,6 @@ def log(state, msg):
 ## parse_game_state imported from mmap_dataset
 
 
-def load_decisions(data_dir, state, max_files=None,
-                   heads=None, chunk_size=200):
-    """Load decision samples in chunks to bound memory.
-
-    For priority (140K+ samples), loads chunk_size files
-    at a time. For attack/block (small), loads all at once.
-    """
-    from training.chunked_loader import load_decision_samples
-
-    state.phase = "loading"
-    state.status = "Loading trajectory files..."
-
-    path = Path(data_dir)
-    files = sorted(path.glob('traj_*.jsonl'))
-    if max_files:
-        files = files[:max_files]
-    state.files_total = len(files)
-
-    attack_samples = []
-    block_samples = []
-    priority_samples = []
-
-    # Load in chunks to bound memory
-    for ci in range(0, len(files), chunk_size):
-        chunk_files = files[ci:ci + chunk_size]
-        a, b, p = load_decision_samples(
-            chunk_files, heads=
-            list(heads) if heads else None)
-        attack_samples.extend(a)
-        block_samples.extend(b)
-        priority_samples.extend(p)
-        state.files_loaded = min(ci + chunk_size,
-                                 len(files))
-        state.attack_samples = len(attack_samples)
-        state.block_samples = len(block_samples)
-        state.priority_samples = len(priority_samples)
-
-    state.status = (
-        f"Loaded {len(attack_samples)} attack, "
-        f"{len(block_samples)} block, "
-        f"{len(priority_samples)} priority decisions")
-    return attack_samples, block_samples, priority_samples
-
-
-def load_decisions_old(data_dir, state, max_files=None,
-                   heads=None):
-    """Original load function — kept as fallback."""
-    state.phase = "loading"
-    state.status = "Loading trajectory files..."
-
-    path = Path(data_dir)
-    files = sorted(path.glob('traj_*.jsonl'))
-    if max_files:
-        files = files[:max_files]
-    state.files_total = len(files)
-
-    attack_samples = []
-    block_samples = []
-    priority_samples = []
-
-    for i, filepath in enumerate(files):
-        state.files_loaded = i + 1
-        try:
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-            if len(lines) < 2:
-                continue
-            header = json.loads(lines[0])
-            won = header.get('won', False)
-
-            for line in lines[1:]:
-                rec = json.loads(line)
-                dt = rec.get('decisionType', '')
-
-                # Skip decision types we're not training
-                if heads:
-                    if dt == 'PRIORITY_ACTION' and \
-                            'priority' not in heads:
-                        continue
-                    if dt == 'DECLARE_ATTACKERS' and \
-                            'attack' not in heads:
-                        continue
-                    if dt == 'DECLARE_BLOCKERS' and \
-                            'block' not in heads:
-                        continue
-
-                cand = rec.get('candidateFeatures', [])
-                sel = rec.get('selectedIndices', [])
-
-                if len(cand) < 1:
-                    continue
-
-                gf = np.array(
-                    rec.get('globalFeatures', []),
-                    dtype=np.float32)
-                np.clip(gf, -10, 10, out=gf)
-                gf = np.nan_to_num(gf)
-                g = np.zeros(64, dtype=np.float32)
-                gl = min(len(gf), 64)
-                if gl > 0:
-                    g[:gl] = gf[:gl]
-
-                flat = np.array(
-                    rec.get('gameStateFlat', []),
-                    dtype=np.float32)
-                np.clip(flat, -10, 10, out=flat)
-                flat = np.nan_to_num(flat)
-
-                if dt == 'PRIORITY_ACTION':
-                    # Priority: 64-dim action features,
-                    # single-select (softmax CE)
-                    n = len(cand)
-                    actions = np.zeros(
-                        (n, 64), dtype=np.float32)
-                    for j, cf in enumerate(cand):
-                        cl = min(len(cf), 64)
-                        actions[j, :cl] = np.array(
-                            cf[:cl], dtype=np.float32)
-                    np.clip(actions, -10, 10, out=actions)
-                    actions = np.nan_to_num(actions)
-
-                    # Selected index (single-select)
-                    selected_idx = sel[0] if sel else n - 1
-                    if selected_idx >= n:
-                        selected_idx = n - 1
-
-                    priority_samples.append({
-                        'global_features': g,
-                        'game_state_flat': flat,
-                        'action_features': actions,
-                        'selected_idx': selected_idx,
-                        'n_actions': n,
-                        'won': 1.0 if won else 0.0,
-                    })
-                    state.priority_samples = len(
-                        priority_samples)
-                    continue
-
-                if dt == 'DECLARE_ATTACKERS':
-                    # Attack: card features,
-                    # multi-select (binary BCE)
-                    n = len(cand)
-                    creatures = np.zeros(
-                        (n, CARD_DIM), dtype=np.float32)
-                    for j, cf in enumerate(cand):
-                        cl = min(len(cf), CARD_DIM)
-                        creatures[j, :cl] = np.array(
-                            cf[:cl], dtype=np.float32)
-                    np.clip(creatures, -10, 10,
-                            out=creatures)
-                    creatures = np.nan_to_num(creatures)
-
-                    mask = np.zeros(n, dtype=np.float32)
-                    for idx in sel:
-                        if 0 <= idx < n:
-                            mask[idx] = 1.0
-
-                    attack_samples.append({
-                        'global_features': g,
-                        'game_state_flat': flat,
-                        'creature_features': creatures,
-                        'action_mask': mask,
-                        'n_creatures': n,
-                        'won': 1.0 if won else 0.0,
-                    })
-                    state.attack_samples = len(
-                        attack_samples)
-
-                elif dt == 'DECLARE_BLOCKERS':
-                    # Block: 256-dim pair features
-                    # (blocker+attacker concat),
-                    # multi-select assignment
-                    n = len(cand)
-                    feat_dim = len(cand[0]) if cand else 0
-                    if feat_dim < 200:
-                        continue  # skip old-format data
-
-                    pairs = np.zeros(
-                        (n, 256), dtype=np.float32)
-                    for j, cf in enumerate(cand):
-                        cl = min(len(cf), 256)
-                        pairs[j, :cl] = np.array(
-                            cf[:cl], dtype=np.float32)
-                    np.clip(pairs, -10, 10, out=pairs)
-                    pairs = np.nan_to_num(pairs)
-
-                    mask = np.zeros(n, dtype=np.float32)
-                    for idx in sel:
-                        if 0 <= idx < n:
-                            mask[idx] = 1.0
-
-                    block_samples.append({
-                        'global_features': g,
-                        'game_state_flat': flat,
-                        'pair_features': pairs,
-                        'action_mask': mask,
-                        'n_pairs': n,
-                        'won': 1.0 if won else 0.0,
-                    })
-                    state.block_samples = len(
-                        block_samples)
-        except Exception:
-            pass
-
-    state.status = (
-        f"Loaded {len(attack_samples)} attack, "
-        f"{len(block_samples)} block, "
-        f"{len(priority_samples)} priority decisions")
-    return attack_samples, block_samples, priority_samples
-
 
 # ── Batch processing ─────────────────────────────────
 
@@ -1019,453 +809,6 @@ def make_block_batch(model, batch, device, use_amp,
     return loss, correct, total
 
 
-def train_block_head(model, head, samples, args,
-                     state, device, use_amp):
-    """Train the block head with per-blocker CE loss."""
-    state.current_head = 'block'
-    state.status = "Training block head..."
-    log(state, f"\n=== Training block head ===")
-    log(state, f"Samples: {len(samples)}")
-
-    for p in model.state_encoder.parameters():
-        p.requires_grad = False
-    for p in model.value_network.parameters():
-        p.requires_grad = False
-    for p in head.parameters():
-        p.requires_grad = True
-
-    state.head_params = sum(
-        p.numel() for p in head.parameters())
-    log(state, f"Head params: {state.head_params:,}")
-
-    optimizer = optim.AdamW(
-        head.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs)
-    scaler = torch.amp.GradScaler('cuda') if use_amp \
-        else None
-
-    # Split by game to prevent data leakage
-    from training.chunked_loader import split_by_game
-    train_s, val_s = split_by_game(samples)
-
-    best_acc = 0
-    save_path = os.path.join(
-        args.save_dir, 'best_block_model.pt')
-
-    tl_list = state.block_train_losses
-    ta_list = state.block_train_accs
-    vl_list = state.block_val_losses
-    va_list = state.block_val_accs
-
-    start = time.time()
-
-    for epoch in range(1, args.epochs + 1):
-        state.epoch = epoch
-        state.status = (
-            f"Training block head: "
-            f"epoch {epoch}/{args.epochs}")
-        t0 = time.time()
-
-        model.train()
-        random.shuffle(train_s)
-        tloss, tc, tt = 0, 0, 0
-
-        for bi in range(0, len(train_s), args.batch_size):
-            batch = train_s[bi:bi + args.batch_size]
-            if len(batch) < 2:
-                continue
-            state.epoch_progress = bi / max(
-                len(train_s), 1)
-
-            loss, correct, total = make_block_batch(
-                model, batch, device, use_amp, head)
-
-            optimizer.zero_grad()
-            if scaler:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    head.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    head.parameters(), 1.0)
-                optimizer.step()
-
-            tloss += loss.item() * max(total, 1)
-            tc += correct
-            tt += total
-
-        scheduler.step()
-
-        model.eval()
-        vloss, vc, vt = 0, 0, 0
-        with torch.no_grad():
-            for bi in range(0, len(val_s), args.batch_size):
-                batch = val_s[bi:bi + args.batch_size]
-                if len(batch) < 2:
-                    continue
-                loss, correct, total = make_block_batch(
-                    model, batch, device, use_amp, head)
-                vloss += loss.item() * max(total, 1)
-                vc += correct
-                vt += total
-
-        ta = tc / max(tt, 1)
-        va = vc / max(vt, 1)
-        tl = tloss / max(tt, 1)
-        vl = vloss / max(vt, 1)
-
-        state.current_train_loss = tl
-        state.current_train_acc = ta
-        state.current_val_loss = vl
-        state.current_val_acc = va
-        tl_list.append(tl)
-        ta_list.append(ta)
-        vl_list.append(vl)
-        va_list.append(va)
-
-        if va > best_acc:
-            best_acc = va
-            model.save(save_path)
-
-        state.block_best_acc = best_acc
-
-        status = ' *BEST*' if va == best_acc and va > 0 \
-            else ''
-        log(state,
-            f"  Epoch {epoch:>3d}/{args.epochs} | "
-            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
-            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
-
-        if np.isnan(tl) or np.isnan(vl):
-            log(state,
-                "  NaN detected! Stopping block training.")
-            break
-
-        state.epoch_time = time.time() - t0
-        state.elapsed = time.time() - start
-        state.eta = (args.epochs - epoch) * state.epoch_time
-        state.epoch_progress = 1.0
-        state.chart_dirty = True
-
-        if device.startswith('cuda'):
-            torch.cuda.synchronize()
-            state.gpu_mem_used_mb = (
-                torch.cuda.memory_allocated() / 1024**2)
-            state.gpu_mem_total_mb = (
-                torch.cuda.get_device_properties(0)
-                .total_memory / 1024**2)
-
-        time.sleep(0.05)
-
-    return best_acc
-
-
-def train_priority_head(model, head, samples, args,
-                        state, device, use_amp):
-    """Train the priority head with CrossEntropyLoss."""
-    state.current_head = 'priority'
-    state.status = "Training priority head..."
-    log(state, f"\n=== Training priority head ===")
-    log(state, f"Samples: {len(samples)}")
-
-    for p in model.state_encoder.parameters():
-        p.requires_grad = False
-    for p in model.value_network.parameters():
-        p.requires_grad = False
-    for p in head.parameters():
-        p.requires_grad = True
-
-    state.head_params = sum(
-        p.numel() for p in head.parameters())
-    log(state, f"Head params: {state.head_params:,}")
-
-    optimizer = optim.AdamW(
-        head.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs)
-    scaler = torch.amp.GradScaler('cuda') if use_amp \
-        else None
-
-    # Split by game to prevent data leakage
-    from training.chunked_loader import split_by_game
-    train_s, val_s = split_by_game(samples)
-
-    best_acc = 0
-    save_path = os.path.join(
-        args.save_dir, 'best_priority_model.pt')
-
-    tl_list = state.priority_train_losses
-    ta_list = state.priority_train_accs
-    vl_list = state.priority_val_losses
-    va_list = state.priority_val_accs
-
-    start = time.time()
-
-    for epoch in range(1, args.epochs + 1):
-        state.epoch = epoch
-        state.status = (
-            f"Training priority head: "
-            f"epoch {epoch}/{args.epochs}")
-        t0 = time.time()
-
-        # Train
-        model.train()
-        random.shuffle(train_s)
-        tloss, tc, tt = 0, 0, 0
-
-        for bi in range(0, len(train_s), args.batch_size):
-            batch = train_s[bi:bi + args.batch_size]
-            if len(batch) < 2:
-                continue
-            state.epoch_progress = bi / max(
-                len(train_s), 1)
-
-            loss, correct, total = make_priority_batch(
-                model, batch, device, use_amp, head)
-
-            optimizer.zero_grad()
-            if scaler:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    head.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    head.parameters(), 1.0)
-                optimizer.step()
-
-            tloss += loss.item() * total
-            tc += correct
-            tt += total
-
-        scheduler.step()
-
-        # Val
-        model.eval()
-        vloss, vc, vt = 0, 0, 0
-        with torch.no_grad():
-            for bi in range(0, len(val_s), args.batch_size):
-                batch = val_s[bi:bi + args.batch_size]
-                if len(batch) < 2:
-                    continue
-                loss, correct, total = make_priority_batch(
-                    model, batch, device, use_amp, head)
-                vloss += loss.item() * total
-                vc += correct
-                vt += total
-
-        ta = tc / max(tt, 1)
-        va = vc / max(vt, 1)
-        tl = tloss / max(tt, 1)
-        vl = vloss / max(vt, 1)
-
-        state.current_train_loss = tl
-        state.current_train_acc = ta
-        state.current_val_loss = vl
-        state.current_val_acc = va
-        tl_list.append(tl)
-        ta_list.append(ta)
-        vl_list.append(vl)
-        va_list.append(va)
-
-        if va > best_acc:
-            best_acc = va
-            model.save(save_path)
-
-        state.priority_best_acc = best_acc
-
-        status = ' *BEST*' if va == best_acc and va > 0 \
-            else ''
-        log(state,
-            f"  Epoch {epoch:>3d}/{args.epochs} | "
-            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
-            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
-
-        if np.isnan(tl) or np.isnan(vl):
-            log(state,
-                "  NaN detected! Stopping priority training.")
-            break
-
-        state.epoch_time = time.time() - t0
-        state.elapsed = time.time() - start
-        state.eta = (args.epochs - epoch) * state.epoch_time
-        state.epoch_progress = 1.0
-        state.chart_dirty = True
-
-        if device.startswith('cuda'):
-            torch.cuda.synchronize()
-            state.gpu_mem_used_mb = (
-                torch.cuda.memory_allocated() / 1024**2)
-            state.gpu_mem_total_mb = (
-                torch.cuda.get_device_properties(0)
-                .total_memory / 1024**2)
-
-        time.sleep(0.05)
-
-    return best_acc
-
-
-# ── Training thread ──────────────────────────────────
-
-def train_head(model, head, head_name, samples, args,
-               state, device, use_amp):
-    state.current_head = head_name
-    state.status = f"Training {head_name} head..."
-    log(state, f"\n=== Training {head_name} head ===")
-    log(state, f"Samples: {len(samples)}")
-
-    for p in model.state_encoder.parameters():
-        p.requires_grad = False
-    for p in model.value_network.parameters():
-        p.requires_grad = False
-    for p in head.parameters():
-        p.requires_grad = True
-
-    state.head_params = sum(
-        p.numel() for p in head.parameters())
-    log(state, f"Head params: {state.head_params:,}")
-
-    optimizer = optim.AdamW(
-        head.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs)
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
-
-    # Split by game to prevent data leakage
-    from training.chunked_loader import split_by_game
-    train_s, val_s = split_by_game(samples)
-
-    best_acc = 0
-    save_path = os.path.join(
-        args.save_dir, f'best_{head_name}_model.pt')
-
-    # Get the right metric lists
-    tl_list = getattr(state, f'{head_name}_train_losses',
-                      state.block_train_losses)
-    ta_list = getattr(state, f'{head_name}_train_accs',
-                      state.block_train_accs)
-    vl_list = getattr(state, f'{head_name}_val_losses',
-                      state.block_val_losses)
-    va_list = getattr(state, f'{head_name}_val_accs',
-                      state.block_val_accs)
-
-    start = time.time()
-
-    for epoch in range(1, args.epochs + 1):
-        state.epoch = epoch
-        state.status = (
-            f"Training {head_name} head: "
-            f"epoch {epoch}/{args.epochs}")
-        t0 = time.time()
-
-        # Train
-        model.train()
-        random.shuffle(train_s)
-        tloss, tc, tt = 0, 0, 0
-        n_batches = max(
-            1, len(train_s) // args.batch_size)
-
-        for bi in range(0, len(train_s), args.batch_size):
-            batch = train_s[bi:bi + args.batch_size]
-            if len(batch) < 2:
-                continue
-            state.epoch_progress = bi / max(
-                len(train_s), 1)
-
-            loss, correct, total = make_batch(
-                model, batch, device, use_amp, head)
-
-            optimizer.zero_grad()
-            if scaler:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    head.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    head.parameters(), 1.0)
-                optimizer.step()
-
-            tloss += loss.item() * total
-            tc += correct
-            tt += total
-
-        scheduler.step()
-
-        # Val
-        model.eval()
-        vloss, vc, vt = 0, 0, 0
-        with torch.no_grad():
-            for bi in range(0, len(val_s), args.batch_size):
-                batch = val_s[bi:bi + args.batch_size]
-                if len(batch) < 2:
-                    continue
-                loss, correct, total = make_batch(
-                    model, batch, device, use_amp, head)
-                vloss += loss.item() * total
-                vc += correct
-                vt += total
-
-        ta = tc / max(tt, 1)
-        va = vc / max(vt, 1)
-        tl = tloss / max(tt, 1)
-        vl = vloss / max(vt, 1)
-
-        state.current_train_loss = tl
-        state.current_train_acc = ta
-        state.current_val_loss = vl
-        state.current_val_acc = va
-        tl_list.append(tl)
-        ta_list.append(ta)
-        vl_list.append(vl)
-        va_list.append(va)
-
-        if va > best_acc:
-            best_acc = va
-            model.save(save_path)
-
-        setattr(state, f'{head_name}_best_acc', best_acc)
-
-        status = ' *BEST*' if va == best_acc and va > 0 else ''
-        log(state,
-            f"  Epoch {epoch:>3d}/{args.epochs} | "
-            f"TrLoss {tl:.4f} TrAcc {ta:.1%} | "
-            f"VlLoss {vl:.4f} VlAcc {va:.1%}{status}")
-
-        # Early stop on NaN
-        if np.isnan(tl) or np.isnan(vl):
-            log(state, f"  NaN detected! Stopping {head_name} training.")
-            break
-
-        state.epoch_time = time.time() - t0
-        state.elapsed = time.time() - start
-        state.eta = (args.epochs - epoch) * state.epoch_time
-        state.epoch_progress = 1.0
-        state.chart_dirty = True
-
-        if device.startswith('cuda'):
-            torch.cuda.synchronize()
-            state.gpu_mem_used_mb = (
-                torch.cuda.memory_allocated() / 1024**2)
-            state.gpu_mem_total_mb = (
-                torch.cuda.get_device_properties(0)
-                .total_memory / 1024**2)
-
-        time.sleep(0.05)
-
-    return best_acc
-
 
 def train_head_mmap(model, head, head_name,
                     train_ds, val_ds, args, state,
@@ -2084,144 +1427,134 @@ def trainer_thread(state, args):
                  if args.heads != 'all'
                  else all_heads)
 
-        preprocessed_dir = os.path.join(
-            os.path.dirname(args.data_dir),
-            'preprocessed')
-        use_mmap = os.path.exists(
-            os.path.join(preprocessed_dir,
-                         'metadata.json'))
+        # Decision data is always loaded via preprocessed mmap
+        # arrays. If args.data_dir points at trajectories, look
+        # for a sibling 'preprocessed' dir; otherwise treat
+        # data_dir itself as the preprocessed dir.
+        candidate_dirs = [
+            args.data_dir,
+            os.path.join(
+                os.path.dirname(args.data_dir),
+                'preprocessed'),
+        ]
+        preprocessed_dir = next(
+            (d for d in candidate_dirs
+             if os.path.exists(
+                 os.path.join(d, 'metadata.json'))),
+            None)
+        if preprocessed_dir is None:
+            raise RuntimeError(
+                "No preprocessed data found. Run "
+                "training/preprocess_trajectories.py "
+                f"on the trajectory dir, then point "
+                f"--data-dir at the output. Searched: "
+                f"{candidate_dirs}")
 
-        if use_mmap:
-            from training.mmap_dataset import (
-                MmapPriorityDataset,
-                MmapAttackDataset,
-                MmapBlockDataset,
-                MmapTargetDataset,
-                MmapCardSelectDataset,
-                MmapMulliganDataset,
-                MmapBinaryDataset)
-            import json as json_mod
+        from training.mmap_dataset import (
+            MmapPriorityDataset,
+            MmapAttackDataset,
+            MmapBlockDataset,
+            MmapTargetDataset,
+            MmapCardSelectDataset,
+            MmapMulliganDataset,
+            MmapBinaryDataset)
+        import json as json_mod
 
-            state.status = "Loading preprocessed data..."
-            with open(os.path.join(preprocessed_dir,
-                                   'metadata.json')) as f:
-                meta = json_mod.load(f)
+        state.status = "Loading preprocessed data..."
+        with open(os.path.join(preprocessed_dir,
+                               'metadata.json')) as f:
+            meta = json_mod.load(f)
 
-            priority_samples = []
-            attack_samples = []
-            block_samples = []
-
-            if 'priority' in heads_list:
-                # Priority uses DataLoader directly
-                # (too large to materialize into list)
-                priority_train_ds = MmapPriorityDataset(
-                    preprocessed_dir, train=True)
-                priority_val_ds = MmapPriorityDataset(
-                    preprocessed_dir, train=False)
-                state.priority_samples = len(
-                    priority_train_ds)
-                log(state,
-                    f"Priority: {len(priority_train_ds)}"
-                    f" train, {len(priority_val_ds)}"
-                    f" val samples (mmap)")
-
-            if 'attack' in heads_list:
-                attack_train_ds = MmapAttackDataset(
-                    preprocessed_dir, train=True)
-                attack_val_ds = MmapAttackDataset(
-                    preprocessed_dir, train=False)
-                state.attack_samples = len(
-                    attack_train_ds)
-                log(state,
-                    f"Attack: {len(attack_train_ds)}"
-                    f" train, {len(attack_val_ds)}"
-                    f" val samples (mmap)")
-
-            if 'block' in heads_list:
-                block_train_ds = MmapBlockDataset(
-                    preprocessed_dir, train=True)
-                block_val_ds = MmapBlockDataset(
-                    preprocessed_dir, train=False)
-                state.block_samples = len(
-                    block_train_ds)
-                log(state,
-                    f"Block: {len(block_train_ds)}"
-                    f" train, {len(block_val_ds)}"
-                    f" val samples (mmap)")
-
-            target_train_ds = target_val_ds = None
-            if 'target' in heads_list:
-                target_train_ds = MmapTargetDataset(
-                    preprocessed_dir, train=True)
-                target_val_ds = MmapTargetDataset(
-                    preprocessed_dir, train=False)
-                if len(target_train_ds) > 0:
-                    log(state,
-                        f"Target: {len(target_train_ds)}"
-                        f" train, {len(target_val_ds)}"
-                        f" val samples (mmap)")
-                else:
-                    log(state, "Target: no data")
-                    target_train_ds = None
-
-            card_select_train_ds = card_select_val_ds = None
-            if 'card_select' in heads_list:
-                card_select_train_ds = MmapCardSelectDataset(
-                    preprocessed_dir, train=True)
-                card_select_val_ds = MmapCardSelectDataset(
-                    preprocessed_dir, train=False)
-                if len(card_select_train_ds) > 0:
-                    log(state,
-                        f"Card Select: {len(card_select_train_ds)}"
-                        f" train, {len(card_select_val_ds)}"
-                        f" val samples (mmap)")
-                else:
-                    log(state, "Card Select: no data")
-                    card_select_train_ds = None
-
-            mulligan_train_ds = mulligan_val_ds = None
-            if 'mulligan' in heads_list:
-                mulligan_train_ds = MmapMulliganDataset(
-                    preprocessed_dir, train=True)
-                mulligan_val_ds = MmapMulliganDataset(
-                    preprocessed_dir, train=False)
-                if len(mulligan_train_ds) > 0:
-                    log(state,
-                        f"Mulligan: {len(mulligan_train_ds)}"
-                        f" train, {len(mulligan_val_ds)}"
-                        f" val samples (mmap)")
-                else:
-                    log(state, "Mulligan: no data")
-                    mulligan_train_ds = None
-
-            binary_train_ds = binary_val_ds = None
-            if 'binary' in heads_list:
-                binary_train_ds = MmapBinaryDataset(
-                    preprocessed_dir, train=True)
-                binary_val_ds = MmapBinaryDataset(
-                    preprocessed_dir, train=False)
-                if len(binary_train_ds) > 0:
-                    log(state,
-                        f"Binary: {len(binary_train_ds)}"
-                        f" train, {len(binary_val_ds)}"
-                        f" val samples (mmap)")
-                else:
-                    log(state, "Binary: no data")
-                    binary_train_ds = None
-        else:
-            # Fallback: load from JSONL (chunked)
+        priority_train_ds = priority_val_ds = None
+        if 'priority' in heads_list:
+            priority_train_ds = MmapPriorityDataset(
+                preprocessed_dir, train=True)
+            priority_val_ds = MmapPriorityDataset(
+                preprocessed_dir, train=False)
+            state.priority_samples = len(priority_train_ds)
             log(state,
-                "No preprocessed data — loading JSONL")
-            heads_filter = (
-                list(heads_list)
-                if heads_list != ['priority', 'attack',
-                                  'block']
-                else None)
-            attack_samples, block_samples, \
-                priority_samples = load_decisions(
-                    args.data_dir, state,
-                    args.max_files,
-                    heads=heads_filter)
+                f"Priority: {len(priority_train_ds)}"
+                f" train, {len(priority_val_ds)} val (mmap)")
+
+        attack_train_ds = attack_val_ds = None
+        if 'attack' in heads_list:
+            attack_train_ds = MmapAttackDataset(
+                preprocessed_dir, train=True)
+            attack_val_ds = MmapAttackDataset(
+                preprocessed_dir, train=False)
+            state.attack_samples = len(attack_train_ds)
+            log(state,
+                f"Attack: {len(attack_train_ds)}"
+                f" train, {len(attack_val_ds)} val (mmap)")
+
+        block_train_ds = block_val_ds = None
+        if 'block' in heads_list:
+            block_train_ds = MmapBlockDataset(
+                preprocessed_dir, train=True)
+            block_val_ds = MmapBlockDataset(
+                preprocessed_dir, train=False)
+            state.block_samples = len(block_train_ds)
+            log(state,
+                f"Block: {len(block_train_ds)}"
+                f" train, {len(block_val_ds)} val (mmap)")
+
+        target_train_ds = target_val_ds = None
+        if 'target' in heads_list:
+            target_train_ds = MmapTargetDataset(
+                preprocessed_dir, train=True)
+            target_val_ds = MmapTargetDataset(
+                preprocessed_dir, train=False)
+            if len(target_train_ds) > 0:
+                log(state,
+                    f"Target: {len(target_train_ds)}"
+                    f" train, {len(target_val_ds)} val (mmap)")
+            else:
+                log(state, "Target: no data")
+                target_train_ds = None
+
+        card_select_train_ds = card_select_val_ds = None
+        if 'card_select' in heads_list:
+            card_select_train_ds = MmapCardSelectDataset(
+                preprocessed_dir, train=True)
+            card_select_val_ds = MmapCardSelectDataset(
+                preprocessed_dir, train=False)
+            if len(card_select_train_ds) > 0:
+                log(state,
+                    f"Card Select: {len(card_select_train_ds)}"
+                    f" train, {len(card_select_val_ds)} val"
+                    f" (mmap)")
+            else:
+                log(state, "Card Select: no data")
+                card_select_train_ds = None
+
+        mulligan_train_ds = mulligan_val_ds = None
+        if 'mulligan' in heads_list:
+            mulligan_train_ds = MmapMulliganDataset(
+                preprocessed_dir, train=True)
+            mulligan_val_ds = MmapMulliganDataset(
+                preprocessed_dir, train=False)
+            if len(mulligan_train_ds) > 0:
+                log(state,
+                    f"Mulligan: {len(mulligan_train_ds)}"
+                    f" train, {len(mulligan_val_ds)} val"
+                    f" (mmap)")
+            else:
+                log(state, "Mulligan: no data")
+                mulligan_train_ds = None
+
+        binary_train_ds = binary_val_ds = None
+        if 'binary' in heads_list:
+            binary_train_ds = MmapBinaryDataset(
+                preprocessed_dir, train=True)
+            binary_val_ds = MmapBinaryDataset(
+                preprocessed_dir, train=False)
+            if len(binary_train_ds) > 0:
+                log(state,
+                    f"Binary: {len(binary_train_ds)}"
+                    f" train, {len(binary_val_ds)} val (mmap)")
+            else:
+                log(state, "Binary: no data")
+                binary_train_ds = None
 
         # Load model
         state.phase = "training"
@@ -2248,7 +1581,7 @@ def trainer_thread(state, args):
         log(state, f"Heads to train: {heads_list}")
 
         # Joint training mode: all heads + value + unfrozen encoder
-        if getattr(args, 'joint', False) and use_mmap:
+        if getattr(args, 'joint', False):
             # Load value dataset for joint training
             from training.mmap_dataset import MmapValueDataset
             value_train_ds = MmapValueDataset(
@@ -2326,51 +1659,34 @@ def trainer_thread(state, args):
                 return  # skip sequential training
 
         # Train priority head first (softmax CE, not BCE)
-        if 'priority' in heads_list:
-            if use_mmap and priority_train_ds:
-                train_priority_head_mmap(
-                    model, model.priority_head,
-                    priority_train_ds, priority_val_ds,
-                    args, state, device, use_amp)
-            elif priority_samples:
-                train_priority_head(
-                    model, model.priority_head,
-                    priority_samples, args, state,
-                    device, use_amp)
+        if 'priority' in heads_list and priority_train_ds:
+            train_priority_head_mmap(
+                model, model.priority_head,
+                priority_train_ds, priority_val_ds,
+                args, state, device, use_amp)
 
         # Train attack head
-        if 'attack' in heads_list:
+        if 'attack' in heads_list and attack_train_ds:
             state.epoch = 0
             state.epoch_progress = 0
-            if use_mmap and attack_train_ds:
-                train_head_mmap(
-                    model, model.attack_head, 'attack',
-                    attack_train_ds, attack_val_ds,
-                    args, state, device, use_amp,
-                    make_batch)
-            elif attack_samples:
-                train_head(model, model.attack_head,
-                           'attack', attack_samples,
-                           args, state, device, use_amp)
+            train_head_mmap(
+                model, model.attack_head, 'attack',
+                attack_train_ds, attack_val_ds,
+                args, state, device, use_amp,
+                make_batch)
 
         # Train block head (pair-based assignment)
-        if 'block' in heads_list:
+        if 'block' in heads_list and block_train_ds:
             state.epoch = 0
             state.epoch_progress = 0
-            if use_mmap and block_train_ds:
-                train_head_mmap(
-                    model, model.block_head, 'block',
-                    block_train_ds, block_val_ds,
-                    args, state, device, use_amp,
-                    make_block_batch)
-            elif block_samples:
-                train_block_head(
-                    model, model.block_head,
-                    block_samples, args, state,
-                    device, use_amp)
+            train_head_mmap(
+                model, model.block_head, 'block',
+                block_train_ds, block_val_ds,
+                args, state, device, use_amp,
+                make_block_batch)
 
         # Train target head (single-select CE, 256-dim candidates)
-        if 'target' in heads_list and use_mmap and target_train_ds:
+        if 'target' in heads_list and target_train_ds:
             state.epoch = 0
             state.epoch_progress = 0
             train_head_mmap(
@@ -2380,7 +1696,7 @@ def trainer_thread(state, args):
                 make_target_batch)
 
         # Train card select head (multi-select, like attack)
-        if 'card_select' in heads_list and use_mmap and card_select_train_ds:
+        if 'card_select' in heads_list and card_select_train_ds:
             state.epoch = 0
             state.epoch_progress = 0
             log(state, f"\n=== Training card_select head (mmap) ===")
@@ -2392,7 +1708,7 @@ def trainer_thread(state, args):
                 make_batch)
 
         # Train mulligan head (binary keep/mull)
-        if 'mulligan' in heads_list and use_mmap and mulligan_train_ds:
+        if 'mulligan' in heads_list and mulligan_train_ds:
             state.epoch = 0
             state.epoch_progress = 0
             train_head_mmap(
@@ -2402,7 +1718,7 @@ def trainer_thread(state, args):
                 make_mulligan_batch)
 
         # Train binary head (simple BCE from game state)
-        if 'binary' in heads_list and use_mmap and binary_train_ds:
+        if 'binary' in heads_list and binary_train_ds:
             state.epoch = 0
             state.epoch_progress = 0
             train_head_mmap(

@@ -20,11 +20,9 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
 import time
-import random
 import logging
 
 import numpy as np
@@ -39,8 +37,11 @@ sys.path.insert(0, os.path.dirname(
 
 from model.mtg_model import MTGModel
 from model.gpu_config import auto_detect_profile
-from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
-from pathlib import Path
+from training.mmap_dataset import (
+    parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM,
+    ZONES_CONFIG, MmapAttackDataset, MmapBlockDataset,
+    SharedState,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,218 +52,28 @@ logger = logging.getLogger(__name__)
 
 
 # ── Data loading ─────────────────────────────────────
+#
+# Decision data is loaded via memory-mapped numpy arrays produced by
+# preprocess_trajectories.py. Train/val split is built into the
+# Mmap*Dataset classes; samples are batched as list-of-dicts via
+# DataLoader(collate_fn=lambda x: x) to match the existing batch fns.
 
-def load_attack_decisions(data_dir, max_files=None):
+
+def _list_collate(batch):
+    """DataLoader collate that returns the raw list of dicts.
+
+    The downstream `_attack_batch` / `_block_batch` fns expect a list
+    of per-sample dicts so they can pad to the batch's max creature
+    count. PyTorch's default collate would stack along dim 0, which
+    breaks on variable-length creature arrays.
     """
-    Load DECLARE_ATTACKERS decisions with candidate features.
-
-    Returns list of dicts with:
-    - game_state_flat: full game state
-    - global_features: 64 global features
-    - creature_features: (N, CARD_DIM) features per creature
-    - attack_mask: (N,) bool — which creatures attacked
-    - won: whether this player won
-    """
-    path = Path(data_dir)
-    files = sorted(path.glob('traj_*.jsonl'))
-    if max_files:
-        files = files[:max_files]
-
-    samples = []
-    skipped = 0
-
-    print(f'  Loading attack decisions from {len(files)} '
-          f'files...', flush=True)
-
-    from training.chunked_loader import extract_game_id
-
-    for i, filepath in enumerate(files):
-        if i % 200 == 0:
-            print(f'  {i}/{len(files)} files, '
-                  f'{len(samples)} attack samples...',
-                  end='\r', flush=True)
-        try:
-            gid = extract_game_id(filepath)
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-            if len(lines) < 2:
-                continue
-
-            header = json.loads(lines[0])
-            won = header.get('won', False)
-
-            for line in lines[1:]:
-                rec = json.loads(line)
-                if rec.get('decisionType') != \
-                        'DECLARE_ATTACKERS':
-                    continue
-
-                cand_feats = rec.get('candidateFeatures', [])
-                selected = rec.get('selectedIndices', [])
-
-                # Need at least 1 creature to be meaningful
-                if len(cand_feats) < 1:
-                    skipped += 1
-                    continue
-
-                # Parse features
-                n_creatures = len(cand_feats)
-                creatures = np.zeros(
-                    (n_creatures, CARD_DIM), dtype=np.float32)
-                for j, cf in enumerate(cand_feats):
-                    cl = min(len(cf), CARD_DIM)
-                    creatures[j, :cl] = np.array(
-                        cf[:cl], dtype=np.float32)
-
-                # Clamp
-                np.clip(creatures, -10, 10, out=creatures)
-                creatures = np.nan_to_num(creatures)
-
-                # Attack mask
-                attack_mask = np.zeros(
-                    n_creatures, dtype=np.float32)
-                for idx in selected:
-                    if 0 <= idx < n_creatures:
-                        attack_mask[idx] = 1.0
-
-                # Global features
-                gf = np.array(
-                    rec.get('globalFeatures', []),
-                    dtype=np.float32)
-                np.clip(gf, -10, 10, out=gf)
-                gf = np.nan_to_num(gf)
-                g = np.zeros(64, dtype=np.float32)
-                gl = min(len(gf), 64)
-                if gl > 0:
-                    g[:gl] = gf[:gl]
-
-                # Full game state
-                flat = np.array(
-                    rec.get('gameStateFlat', []),
-                    dtype=np.float32)
-                np.clip(flat, -10, 10, out=flat)
-                flat = np.nan_to_num(flat)
-
-                samples.append({
-                    'global_features': g,
-                    'game_state_flat': flat,
-                    'creature_features': creatures,
-                    'attack_mask': attack_mask,
-                    'n_creatures': n_creatures,
-                    'won': 1.0 if won else 0.0,
-                    'game_id': gid,
-                })
-
-        except Exception:
-            pass
-
-    print(f'  Loaded {len(samples)} attack decisions '
-          f'(skipped {skipped} empty)', flush=True)
-
-    # Stats
-    if samples:
-        avg_creatures = np.mean(
-            [s['n_creatures'] for s in samples])
-        avg_attackers = np.mean(
-            [s['attack_mask'].sum() for s in samples])
-        attack_rate = np.mean(
-            [s['attack_mask'].mean() for s in samples])
-        print(f'  Avg creatures: {avg_creatures:.1f}, '
-              f'avg attackers: {avg_attackers:.1f}, '
-              f'attack rate: {attack_rate:.1%}', flush=True)
-
-    return samples
-
-
-def load_block_decisions(data_dir, max_files=None):
-    """Load DECLARE_BLOCKERS decisions."""
-    path = Path(data_dir)
-    files = sorted(path.glob('traj_*.jsonl'))
-    if max_files:
-        files = files[:max_files]
-
-    samples = []
-
-    from training.chunked_loader import extract_game_id
-
-    print(f'  Loading block decisions...', flush=True)
-
-    for filepath in files:
-        try:
-            gid = extract_game_id(filepath)
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-            if len(lines) < 2:
-                continue
-            header = json.loads(lines[0])
-            won = header.get('won', False)
-
-            for line in lines[1:]:
-                rec = json.loads(line)
-                if rec.get('decisionType') != \
-                        'DECLARE_BLOCKERS':
-                    continue
-
-                cand_feats = rec.get('candidateFeatures', [])
-                selected = rec.get('selectedIndices', [])
-                if len(cand_feats) < 1:
-                    continue
-
-                n = len(cand_feats)
-                pair_dim = CARD_DIM * 2  # blocker + attacker
-                creatures = np.zeros(
-                    (n, pair_dim), dtype=np.float32)
-                for j, cf in enumerate(cand_feats):
-                    cl = min(len(cf), pair_dim)
-                    creatures[j, :cl] = np.array(
-                        cf[:cl], dtype=np.float32)
-                np.clip(creatures, -10, 10, out=creatures)
-                creatures = np.nan_to_num(creatures)
-
-                block_mask = np.zeros(n, dtype=np.float32)
-                for idx in selected:
-                    if 0 <= idx < n:
-                        block_mask[idx] = 1.0
-
-                gf = np.array(
-                    rec.get('globalFeatures', []),
-                    dtype=np.float32)
-                np.clip(gf, -10, 10, out=gf)
-                gf = np.nan_to_num(gf)
-                g = np.zeros(64, dtype=np.float32)
-                gl = min(len(gf), 64)
-                if gl > 0:
-                    g[:gl] = gf[:gl]
-
-                flat = np.array(
-                    rec.get('gameStateFlat', []),
-                    dtype=np.float32)
-                np.clip(flat, -10, 10, out=flat)
-                flat = np.nan_to_num(flat)
-
-                samples.append({
-                    'global_features': g,
-                    'game_state_flat': flat,
-                    'creature_features': creatures,
-                    'block_mask': block_mask,
-                    'n_creatures': n,
-                    'won': 1.0 if won else 0.0,
-                    'game_id': gid,
-                })
-        except Exception:
-            pass
-
-    print(f'  Loaded {len(samples)} block decisions',
-          flush=True)
-    return samples
-
-
-## parse_game_state imported from mmap_dataset
+    return batch
 
 
 # ── Training ─────────────────────────────────────────
 
-def train_attack_head(model, samples, args, device, use_amp):
+def train_attack_head(model, train_ds, val_ds, args,
+                      device, use_amp):
     """Train the attack head via imitation learning."""
     print('\n  === Training Attack Head ===', flush=True)
 
@@ -286,11 +97,16 @@ def train_attack_head(model, samples, args, device, use_amp):
         optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
-    # Split by game to prevent data leakage
-    from training.chunked_loader import split_by_game
-    train_samples, val_samples = split_by_game(samples)
-    print(f'  Train: {len(train_samples)} | '
-          f'Val: {len(val_samples)} (by game)', flush=True)
+    print(f'  Train: {len(train_ds)} | '
+          f'Val: {len(val_ds)} (by file_id)', flush=True)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True,
+        num_workers=0, collate_fn=_list_collate,
+        drop_last=False)
+    val_loader = torch.utils.data.DataLoader(
+        val_ds, batch_size=args.batch_size, shuffle=False,
+        num_workers=0, collate_fn=_list_collate)
 
     best_val_acc = 0
     save_path = os.path.join(
@@ -307,16 +123,11 @@ def train_attack_head(model, samples, args, device, use_amp):
 
         # Train
         model.train()
-        random.shuffle(train_samples)
         tloss, tcorrect, ttotal = 0, 0, 0
 
-        for bi in range(0, len(train_samples),
-                        args.batch_size):
-            batch = train_samples[
-                bi:bi + args.batch_size]
+        for batch in train_loader:
             if len(batch) < 2:
                 continue
-
             loss, correct, total = _attack_batch(
                 model, batch, device, use_amp)
 
@@ -348,10 +159,7 @@ def train_attack_head(model, samples, args, device, use_amp):
         model.eval()
         vloss, vcorrect, vtotal = 0, 0, 0
         with torch.no_grad():
-            for bi in range(0, len(val_samples),
-                            args.batch_size):
-                batch = val_samples[
-                    bi:bi + args.batch_size]
+            for batch in val_loader:
                 if len(batch) < 2:
                     continue
                 loss, correct, total = _attack_batch(
@@ -382,7 +190,13 @@ def train_attack_head(model, samples, args, device, use_amp):
 
 
 def _attack_batch(model, batch, device, use_amp):
-    """Process one batch of attack decisions."""
+    """Process one batch of attack decisions.
+
+    Each sample dict comes from MmapAttackDataset and carries:
+      creature_features: (n, CARD_DIM), action_mask: (n,),
+      n_creatures: int, game_state_flat: (GAME_STATE_DIM,),
+      global_features: (GLOBAL_DIM,).
+    """
     # Pad creatures to max in batch
     max_c = max(s['n_creatures'] for s in batch)
     max_c = max(max_c, 1)
@@ -423,7 +237,7 @@ def _attack_batch(model, batch, device, use_amp):
             s['creature_features'])
         creature_mask[i, :nc] = True
         targets[i, :nc] = torch.from_numpy(
-            s['attack_mask'])
+            s['action_mask'])
 
         g, zones, masks = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -484,7 +298,8 @@ def _attack_batch(model, batch, device, use_amp):
     return loss, correct, total
 
 
-def train_block_head(model, samples, args, device, use_amp):
+def train_block_head(model, train_ds, val_ds, args,
+                     device, use_amp):
     """Train the block head (same structure as attack)."""
     print('\n  === Training Block Head ===', flush=True)
 
@@ -495,18 +310,10 @@ def train_block_head(model, samples, args, device, use_amp):
     for param in model.block_head.parameters():
         param.requires_grad = True
 
-    # Reuse attack training logic with block_mask
-    # Convert block samples to attack format
-    for s in samples:
-        s['attack_mask'] = s['block_mask']
-
     trainable = sum(
         p.numel() for p in model.block_head.parameters())
     print(f'  Trainable params: {trainable:,}', flush=True)
 
-    # Use same training loop but with block head
-    # For now, use the attack head as a stand-in
-    # (same binary per-creature architecture)
     optimizer = optim.AdamW(
         model.block_head.parameters(),
         lr=args.lr, weight_decay=1e-4)
@@ -514,11 +321,16 @@ def train_block_head(model, samples, args, device, use_amp):
         optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
-    # Split by game to prevent data leakage
-    from training.chunked_loader import split_by_game
-    train_s, val_s = split_by_game(samples)
-    print(f'  Train: {len(train_s)} | Val: {len(val_s)}'
-          ' (by game)', flush=True)
+    print(f'  Train: {len(train_ds)} | Val: {len(val_ds)}'
+          ' (by file_id)', flush=True)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True,
+        num_workers=0, collate_fn=_list_collate,
+        drop_last=False)
+    val_loader = torch.utils.data.DataLoader(
+        val_ds, batch_size=args.batch_size, shuffle=False,
+        num_workers=0, collate_fn=_list_collate)
 
     best_val_acc = 0
     save_path = os.path.join(
@@ -534,13 +346,10 @@ def train_block_head(model, samples, args, device, use_amp):
         t0 = time.time()
 
         model.train()
-        random.shuffle(train_s)
         tl, tc, tt = 0, 0, 0
-        for bi in range(0, len(train_s), args.batch_size):
-            batch = train_s[bi:bi + args.batch_size]
+        for batch in train_loader:
             if len(batch) < 2:
                 continue
-            # Use attack_batch but swap the head
             loss, correct, total = _block_batch(
                 model, batch, device, use_amp)
             optimizer.zero_grad()
@@ -569,8 +378,7 @@ def train_block_head(model, samples, args, device, use_amp):
         model.eval()
         vl, vc, vt = 0, 0, 0
         with torch.no_grad():
-            for bi in range(0, len(val_s), args.batch_size):
-                batch = val_s[bi:bi + args.batch_size]
+            for batch in val_loader:
                 if len(batch) < 2:
                     continue
                 loss, correct, total = _block_batch(
@@ -600,8 +408,8 @@ def train_block_head(model, samples, args, device, use_amp):
 
 
 def _block_batch(model, batch, device, use_amp):
-    """Same as _attack_batch but uses block_head."""
-    max_c = max(s['n_creatures'] for s in batch)
+    """Same as _attack_batch but for block pairs."""
+    max_c = max(s['n_pairs'] for s in batch)
     max_c = max(max_c, 1)
     bs = len(batch)
     cd = CARD_DIM
@@ -634,12 +442,18 @@ def _block_batch(model, batch, device, use_amp):
                            device=device)
 
     for i, s in enumerate(batch):
-        nc = s['n_creatures']
+        # MmapBlockDataset returns pair_features (CARD_DIM*2)
+        # but the legacy attack_head consumer below expects
+        # CARD_DIM. Take the first CARD_DIM channels — the
+        # blocker half. Pre-mmap code did the same truncation
+        # implicitly via the (n, CARD_DIM) tensor allocation.
+        nc = s['n_pairs']
+        pair = s['pair_features']
         creature_feats[i, :nc] = torch.from_numpy(
-            s['creature_features'])
+            pair[:, :cd].copy())
         creature_mask[i, :nc] = True
         targets[i, :nc] = torch.from_numpy(
-            s['attack_mask'])  # reused field
+            s['action_mask'])
 
         g, zones, masks = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -702,7 +516,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Train MTG RL Decision Heads')
     parser.add_argument('--data-dir',
-        default='../../rl_data/trajectories')
+        default='../../rl_data/preprocessed',
+        help='Directory produced by preprocess_trajectories.py')
     parser.add_argument('--save-dir',
         default='../../rl_data/checkpoints')
     parser.add_argument('--encoder-checkpoint',
@@ -713,8 +528,7 @@ def main():
         default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--device', default=None)
-    parser.add_argument('--max-files', type=int,
-        default=None)
+    parser.add_argument('--val-split', type=float, default=0.1)
     parser.add_argument('--heads', default='attack,block',
         help='Comma-separated heads to train')
     args = parser.parse_args()
@@ -752,22 +566,40 @@ def main():
 
     heads = args.heads.split(',')
 
+    if not os.path.exists(
+            os.path.join(args.data_dir, 'metadata.json')):
+        print(f'  {args.data_dir} is not a preprocessed '
+              f'dir (missing metadata.json). Run '
+              f'preprocess_trajectories.py first.',
+              flush=True)
+        return
+
+    shared = SharedState(args.data_dir)
+
     if 'attack' in heads:
-        attack_samples = load_attack_decisions(
-            args.data_dir, args.max_files)
-        if attack_samples:
+        train_ds = MmapAttackDataset(
+            args.data_dir, train=True,
+            val_fraction=args.val_split, shared=shared)
+        val_ds = MmapAttackDataset(
+            args.data_dir, train=False,
+            val_fraction=args.val_split, shared=shared)
+        if len(train_ds) > 0:
             train_attack_head(
-                model, attack_samples, args,
+                model, train_ds, val_ds, args,
                 device, use_amp)
         else:
             print('  No attack data found', flush=True)
 
     if 'block' in heads:
-        block_samples = load_block_decisions(
-            args.data_dir, args.max_files)
-        if block_samples:
+        train_ds = MmapBlockDataset(
+            args.data_dir, train=True,
+            val_fraction=args.val_split, shared=shared)
+        val_ds = MmapBlockDataset(
+            args.data_dir, train=False,
+            val_fraction=args.val_split, shared=shared)
+        if len(train_ds) > 0:
             train_block_head(
-                model, block_samples, args,
+                model, train_ds, val_ds, args,
                 device, use_amp)
         else:
             print('  No block data found', flush=True)

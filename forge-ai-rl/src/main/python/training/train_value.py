@@ -116,170 +116,6 @@ def print_summary(best_acc, best_epoch, total_time, save_path):
           flush=True)
 
 
-# ── Dataset with progress ────────────────────────────
-
-def load_dataset_with_progress(data_dir, global_dim=96,
-                                card_dim=256, max_board=40,
-                                max_hand=15, max_gy=20,
-                                max_stack=10, max_files=None):
-    """Load trajectory files with a progress bar."""
-    import json
-    import numpy as np
-    from pathlib import Path
-
-    path = Path(data_dir)
-    files = sorted(path.glob('traj_*.jsonl'))
-    if max_files:
-        files = files[:max_files]
-    if not files:
-        logger.error(f"No trajectory files in {data_dir}")
-        return []
-
-    zones_config = [
-        ('my_board', max_board, card_dim),
-        ('opp_board', max_board, card_dim),
-        ('hand', max_hand, card_dim),
-        ('my_gy', max_gy, card_dim),
-        ('opp_gy', max_gy, card_dim),
-        ('stack', max_stack, card_dim),
-    ]
-
-    samples = []
-    wins = 0
-    losses = 0
-    total_decisions = 0
-
-    print(f'  Loading {len(files)} trajectory files...',
-          flush=True)
-
-    from training.chunked_loader import extract_game_id
-
-    for i, filepath in enumerate(files):
-        if i % 50 == 0 or i == len(files) - 1:
-            progress_bar(i + 1, len(files),
-                         prefix='Loading',
-                         suffix=f'{len(samples)} samples')
-        try:
-            gid = extract_game_id(filepath)
-            with open(filepath, 'r') as f:
-                lines = f.readlines()
-            if len(lines) < 2:
-                continue
-
-            header = json.loads(lines[0])
-            won = header.get('won', False)
-            if won:
-                wins += 1
-            else:
-                losses += 1
-
-            for line in lines[1:]:
-                rec = json.loads(line)
-                flat = np.array(
-                    rec.get('gameStateFlat', []),
-                    dtype=np.float32)
-                gf = np.array(
-                    rec.get('globalFeatures', []),
-                    dtype=np.float32)
-
-                # Clamp extreme values
-                np.clip(flat, -10.0, 10.0, out=flat)
-                flat = np.nan_to_num(flat, nan=0.0,
-                                     posinf=1.0, neginf=-1.0)
-                np.clip(gf, -10.0, 10.0, out=gf)
-                gf = np.nan_to_num(gf, nan=0.0,
-                                   posinf=1.0, neginf=-1.0)
-
-                # Parse zones from flat array
-                g = np.zeros(global_dim, dtype=np.float32)
-                g_len = min(len(gf), global_dim)
-                if g_len > 0:
-                    g[:g_len] = gf[:g_len]
-
-                zones = {}
-                masks = {}
-                offset = global_dim
-                for name, count, dim in zones_config:
-                    zs = count * dim
-                    zd = np.zeros((count, dim),
-                                  dtype=np.float32)
-                    zm = np.zeros(count, dtype=np.bool_)
-                    if offset + zs <= len(flat):
-                        raw = flat[offset:offset + zs].reshape(
-                            count, dim)
-                        for j in range(count):
-                            if np.any(raw[j] != 0):
-                                zd[j] = raw[j]
-                                zm[j] = True
-                    offset += zs
-                    zones[name] = zd
-                    masks[name + '_mask'] = zm
-
-                samples.append({
-                    'global_features': g,
-                    'zones': zones,
-                    'masks': masks,
-                    'won': 1.0 if won else 0.0,
-                    'value_target':
-                        1.0 if won else -1.0,
-                    'game_id': gid,
-                })
-                total_decisions += 1
-
-        except Exception:
-            pass
-
-    print(flush=True)
-    print(f'  Loaded {len(samples)} samples '
-          f'({wins}W/{losses}L, '
-          f'{total_decisions} decisions)', flush=True)
-    return samples
-
-
-class TensorDataset(torch.utils.data.Dataset):
-    """Wraps parsed samples into a PyTorch Dataset."""
-    def __init__(self, samples):
-        self.samples = samples
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        s = self.samples[idx]
-        return {
-            'global_features': torch.from_numpy(
-                s['global_features']),
-            'my_board': torch.from_numpy(
-                s['zones']['my_board']),
-            'my_board_mask': torch.from_numpy(
-                s['masks']['my_board_mask']),
-            'opp_board': torch.from_numpy(
-                s['zones']['opp_board']),
-            'opp_board_mask': torch.from_numpy(
-                s['masks']['opp_board_mask']),
-            'hand': torch.from_numpy(
-                s['zones']['hand']),
-            'hand_mask': torch.from_numpy(
-                s['masks']['hand_mask']),
-            'my_gy': torch.from_numpy(
-                s['zones']['my_gy']),
-            'my_gy_mask': torch.from_numpy(
-                s['masks']['my_gy_mask']),
-            'opp_gy': torch.from_numpy(
-                s['zones']['opp_gy']),
-            'opp_gy_mask': torch.from_numpy(
-                s['masks']['opp_gy_mask']),
-            'stack': torch.from_numpy(
-                s['zones']['stack']),
-            'stack_mask': torch.from_numpy(
-                s['masks']['stack_mask']),
-            'won': torch.tensor(
-                s['won'], dtype=torch.float32),
-            'value_target': torch.tensor(
-                s['value_target'], dtype=torch.float32),
-        }
-
-
 # ── Training loops ───────────────────────────────────
 
 def train_epoch(model, loader, optimizer, scaler,
@@ -383,7 +219,9 @@ def main():
     parser = argparse.ArgumentParser(
         description='Train MTG RL Value Network')
     parser.add_argument('--data-dir',
-        default='../../rl_data/trajectories')
+        default='../../rl_data/preprocessed',
+        help='Directory produced by preprocess_trajectories.py'
+             ' (contains metadata.json + shared/).')
     parser.add_argument('--save-dir',
         default='../../rl_data/checkpoints')
     parser.add_argument('--log-dir',
@@ -394,8 +232,6 @@ def main():
     parser.add_argument('--device', default=None)
     parser.add_argument('--val-split', type=float, default=0.1)
     parser.add_argument('--save-every', type=int, default=10)
-    parser.add_argument('--max-files', type=int, default=None,
-        help='Limit number of files to load (for testing)')
     parser.add_argument('--early-stop-train-acc', type=float, default=None,
         help='Stop once train accuracy meets/exceeds this value for '
              '--early-stop-patience consecutive epochs (e.g., 1.0 for 100%%).')
@@ -425,21 +261,29 @@ def main():
         ('Data', args.data_dir),
     ])
 
-    # Load data
+    # Load preprocessed data via memory-mapped numpy arrays.
+    # Run preprocess_trajectories.py first to produce --data-dir.
     print(flush=True)
-    samples = load_dataset_with_progress(
-        args.data_dir, max_files=args.max_files if hasattr(args, 'max_files') else None)
-    if not samples:
+    from training.mmap_dataset import MmapValueDataset, SharedState
+    if not os.path.exists(
+            os.path.join(args.data_dir, 'metadata.json')):
+        logger.error(
+            f'{args.data_dir} is not a preprocessed dir '
+            f'(missing metadata.json). Run '
+            f'preprocess_trajectories.py first.')
         return
-
-    # Split by game to prevent data leakage
-    from training.chunked_loader import split_by_game
-    train_samples, val_samples = split_by_game(
-        samples, val_fraction=args.val_split)
-    print(f'  Split: {len(train_samples)} train, '
-          f'{len(val_samples)} val (by game)', flush=True)
-    train_ds = TensorDataset(train_samples)
-    val_ds = TensorDataset(val_samples)
+    shared = SharedState(args.data_dir)
+    train_ds = MmapValueDataset(
+        args.data_dir, train=True,
+        val_fraction=args.val_split, shared=shared)
+    val_ds = MmapValueDataset(
+        args.data_dir, train=False,
+        val_fraction=args.val_split, shared=shared)
+    print(f'  Split: {len(train_ds)} train, '
+          f'{len(val_ds)} val (by file_id)', flush=True)
+    if len(train_ds) == 0:
+        logger.error('No training samples — check preprocess')
+        return
 
     train_loader = torch.utils.data.DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,

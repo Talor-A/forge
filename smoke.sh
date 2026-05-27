@@ -30,7 +30,7 @@ JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/java}"
 [ -x "${JAVA_BIN:-}" ] || JAVA_BIN="/opt/homebrew/opt/openjdk@21/bin/java"
 [ -x "$JAVA_BIN" ] || JAVA_BIN="java"
 
-mkdir -p "$OUT_DIR/trajectories" "$OUT_DIR/checkpoints" "$OUT_DIR/logs"
+mkdir -p "$OUT_DIR/trajectories" "$OUT_DIR/preprocessed" "$OUT_DIR/checkpoints" "$OUT_DIR/logs"
 echo "output dir: $OUT_DIR"
 
 step "Collect $GAMES self-play games"
@@ -51,9 +51,18 @@ collected=$(ls "$OUT_DIR/trajectories"/traj_*.jsonl 2>/dev/null | wc -l | tr -d 
 echo "  collected $collected trajectory files"
 [ "$collected" -gt 0 ] || { echo "no trajectories produced — see $OUT_DIR/logs/collect.log" >&2; exit 1; }
 
+step "Preprocess trajectories → mmap arrays"
+( cd "$PY_DIR" && "$VENV_DIR/bin/python" training/preprocess_trajectories.py \
+    --data-dir "$OUT_DIR/trajectories" \
+    --output-dir "$OUT_DIR/preprocessed" ) > "$OUT_DIR/logs/preprocess.log" 2>&1
+[ -f "$OUT_DIR/preprocessed/metadata.json" ] || {
+    echo "preprocessing produced no metadata — see $OUT_DIR/logs/preprocess.log" >&2
+    exit 1
+}
+
 step "Train value head ($EPOCHS epochs)"
 ( cd "$PY_DIR" && "$VENV_DIR/bin/python" training/train_value.py \
-    --data-dir "$OUT_DIR/trajectories" \
+    --data-dir "$OUT_DIR/preprocessed" \
     --save-dir "$OUT_DIR/checkpoints" \
     --log-dir "$OUT_DIR/logs" \
     --device cpu \
