@@ -48,11 +48,23 @@ public class HumanGameRecorder implements IGameRecorder {
 
     public void onGameStart(String gameId) {
         trajectoryRecorder.startGame(gameId);
+        if (game != null) {
+            trajectoryRecorder.setLogSizeSupplier(
+                    () -> game.getGameLog().getLogEntries(null).size());
+        }
         Logger.info("HumanGameRecorder: Recording started for {}", gameId);
     }
 
     public void onGameEnd(boolean won) {
-        trajectoryRecorder.endGame(won);
+        List<String> logLines = new ArrayList<>();
+        if (game != null) {
+            List<forge.game.GameLogEntry> entries =
+                    game.getGameLog().getLogEntries(null);
+            for (int i = entries.size() - 1; i >= 0; i--) {
+                logLines.add(entries.get(i).toString());
+            }
+        }
+        trajectoryRecorder.endGame(won, logLines);
     }
 
     // ── Priority recording ──────────────────────────────

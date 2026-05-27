@@ -59,12 +59,26 @@ public class RecordingControllerAi extends PlayerControllerAi {
 
     public void startRecording(String gameId) {
         recorder.startGame(gameId);
+        Game g = getGame();
+        if (g != null) {
+            recorder.setLogSizeSupplier(
+                    () -> g.getGameLog().getLogEntries(null).size());
+        }
         recording = true;
     }
 
     public void stopRecording(boolean won) {
         if (recording) {
-            recorder.endGame(won);
+            List<String> logLines = new ArrayList<>();
+            Game g = getGame();
+            if (g != null) {
+                List<forge.game.GameLogEntry> entries =
+                        g.getGameLog().getLogEntries(null);
+                for (int i = entries.size() - 1; i >= 0; i--) {
+                    logLines.add(entries.get(i).toString());
+                }
+            }
+            recorder.endGame(won, logLines);
             recording = false;
         }
     }

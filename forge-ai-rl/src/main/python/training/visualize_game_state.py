@@ -1351,6 +1351,7 @@ def load_samples(data_dir, max_samples=500,
                 continue
             header = json.loads(lines[0])
             won = header.get("won", False)
+            game_log = header.get("gameLog", []) or []
 
             for line in lines[1:]:
                 rec = json.loads(line)
@@ -1389,6 +1390,8 @@ def load_samples(data_dir, max_samples=500,
                         "valueEstimate", 0.0),
                     "won": won,
                     "source": source_tag,
+                    "game_log": game_log,
+                    "log_index": rec.get("logIndex", -1),
                 })
                 if len(samples) >= max_samples:
                     break
@@ -1621,6 +1624,40 @@ class GameStateViewer:
             board_col, bg="#252535")
         self.priority_frame.pack(
             fill=tk.X, padx=5, pady=(0, 5))
+
+        # Rightmost: game log panel
+        log_col = tk.Frame(main, bg="#181825", width=360)
+        log_col.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
+        log_col.pack_propagate(False)
+
+        tk.Label(log_col, text="Game Log",
+                 bg="#181825", fg="#f5c2e7",
+                 font=("Consolas", 12, "bold")).pack(padx=5, pady=5)
+
+        log_outer = tk.Frame(log_col, bg="#181825")
+        log_outer.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        log_vsb = tk.Scrollbar(log_outer, orient=tk.VERTICAL)
+        log_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text = tk.Text(log_outer, bg="#181825",
+                                 fg="#cdd6f4",
+                                 font=("Consolas", 9),
+                                 wrap=tk.WORD,
+                                 yscrollcommand=log_vsb.set,
+                                 state=tk.DISABLED)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_vsb.config(command=self.log_text.yview)
+        # Highlight tags
+        self.log_text.tag_configure("recent",
+                                    background="#2a3a2a",
+                                    foreground="#a6e3a1")
+        self.log_text.tag_configure("cursor",
+                                    background="#3a3520",
+                                    foreground="#f9e2af")
+        self.log_text.tag_configure("future",
+                                    foreground="#585b70")
+        self.log_text.tag_configure("turn",
+                                    foreground="#89b4fa",
+                                    font=("Consolas", 9, "bold"))
 
         # Right: model predictions
         pred_col = tk.Frame(main, bg="#181825", width=320)
@@ -2116,6 +2153,9 @@ class GameStateViewer:
         # Model prediction
         self._predict(s)
 
+        # Game log
+        self._update_game_log(s)
+
     def _pre_render_cards(self, cards, candidate_highlights=None,
                           win_rates=None, visit_props=None):
         """Render card images off-screen, return list of PIL images."""
@@ -2256,6 +2296,57 @@ class GameStateViewer:
                     info = decode_card(candidates[i])
                     if info:
                         CardTooltip(lbl, lambda ci=info: format_combat_tooltip(ci))
+
+    def _update_game_log(self, s):
+        """Render the game log, highlighting the lines leading up
+        to this decision."""
+        log_lines = s.get("game_log") or []
+        log_idx = s.get("log_index", -1)
+
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete("1.0", tk.END)
+
+        if not log_lines:
+            self.log_text.insert("1.0",
+                "(no game log — re-collect to record)")
+            self.log_text.config(state=tk.DISABLED)
+            return
+
+        # Determine the window of "recent" entries — those between
+        # the previous decision in this game and this one.
+        # We don't have the previous decision's index, so highlight
+        # the 8 entries immediately preceding log_idx.
+        recent_start = max(0, log_idx - 8) if log_idx > 0 else -1
+
+        for i, line in enumerate(log_lines):
+            start_idx = self.log_text.index(tk.INSERT)
+            self.log_text.insert(tk.END, line + "\n")
+            end_idx = self.log_text.index(tk.INSERT)
+
+            # Apply tags
+            if line.startswith("Turn:"):
+                self.log_text.tag_add("turn", start_idx, end_idx)
+            if log_idx >= 0:
+                if recent_start >= 0 and recent_start <= i < log_idx:
+                    self.log_text.tag_add("recent", start_idx, end_idx)
+                elif i >= log_idx:
+                    self.log_text.tag_add("future", start_idx, end_idx)
+
+        # Cursor marker line: the most recent log entry before this
+        # decision
+        if log_idx > 0 and log_idx - 1 < len(log_lines):
+            marker_line = int(self.log_text.index(
+                f"1.0 + {log_idx - 1} lines").split(".")[0])
+            self.log_text.tag_add(
+                "cursor",
+                f"{marker_line}.0",
+                f"{marker_line + 1}.0")
+            # Scroll the marker into view, centered
+            self.log_text.see(f"{marker_line}.0")
+        else:
+            self.log_text.see("1.0")
+
+        self.log_text.config(state=tk.DISABLED)
 
     def _update_eval_bar(self, value=None):
         """Draw a lichess-style vertical eval bar.

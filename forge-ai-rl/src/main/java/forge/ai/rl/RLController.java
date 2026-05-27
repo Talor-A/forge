@@ -11,6 +11,7 @@ import forge.ai.rl.model.ONNXModelClient;
 import forge.ai.rl.training.TrajectoryRecorder;
 import forge.game.Game;
 import forge.game.GameEntity;
+import forge.game.GameLogEntry;
 import forge.game.card.Card;
 import forge.game.card.CardCollectionView;
 import forge.game.player.Player;
@@ -106,6 +107,10 @@ public class RLController {
     public void onGameStart(String gameId) {
         if (trajectoryRecorder != null) {
             trajectoryRecorder.startGame(gameId);
+            if (game != null) {
+                trajectoryRecorder.setLogSizeSupplier(
+                        () -> game.getGameLog().getLogEntries(null).size());
+            }
         }
         if (config.getMode() == RLModelMode.GRPC) {
             modelClient.connect();
@@ -117,7 +122,15 @@ public class RLController {
      */
     public void onGameEnd(boolean won) {
         if (trajectoryRecorder != null) {
-            trajectoryRecorder.endGame(won);
+            List<String> logLines = new ArrayList<>();
+            if (game != null) {
+                // getLogEntries returns newest-first; reverse to chronological.
+                List<GameLogEntry> entries = game.getGameLog().getLogEntries(null);
+                for (int i = entries.size() - 1; i >= 0; i--) {
+                    logLines.add(entries.get(i).toString());
+                }
+            }
+            trajectoryRecorder.endGame(won, logLines);
         }
     }
 

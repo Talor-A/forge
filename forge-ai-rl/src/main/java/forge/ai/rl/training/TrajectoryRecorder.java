@@ -11,8 +11,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.IntSupplier;
 
 /**
  * Records game trajectories (sequences of state-action-reward tuples) for training.
@@ -28,6 +30,7 @@ public class TrajectoryRecorder {
     private final List<DecisionRecord> currentGame;
     private String gameId;
     private long gameStartTime;
+    private IntSupplier logSizeSupplier;
 
     // Running state for reward shaping
     private int prevLifeAdvantage = 0;
@@ -57,6 +60,13 @@ public class TrajectoryRecorder {
         this.prevLifeAdvantage = 0;
         this.prevCardAdvantage = 0;
         this.prevBoardAdvantage = 0;
+        this.logSizeSupplier = null;
+    }
+
+    /** Provide a supplier that returns the current GameLog entry count, used to
+     * tag each decision with the count of log entries that preceded it. */
+    public void setLogSizeSupplier(IntSupplier supplier) {
+        this.logSizeSupplier = supplier;
     }
 
     /**
@@ -77,6 +87,7 @@ public class TrajectoryRecorder {
         record.visitProportions = result.getVisitProportions();
         record.valueEstimate = result.getValueEstimate();
         record.usedFallback = result.isUsedFallback();
+        record.logIndex = logSizeSupplier != null ? logSizeSupplier.getAsInt() : -1;
 
         // Compute intermediate reward from state changes
         int lifeAdv = myLife - oppLife;
@@ -109,6 +120,14 @@ public class TrajectoryRecorder {
      * @param won true if the RL player won
      */
     public void endGame(boolean won) {
+        endGame(won, Collections.emptyList());
+    }
+
+    /**
+     * End the game and write the trajectory, including a human-readable game log.
+     * @param gameLogLines log entries in chronological order
+     */
+    public void endGame(boolean won, List<String> gameLogLines) {
         if (currentGame.isEmpty()) return;
 
         double terminalReward = won ? 1.0 : -1.0;
@@ -132,6 +151,7 @@ public class TrajectoryRecorder {
             header.won = won;
             header.totalDecisions = currentGame.size();
             header.durationMs = System.currentTimeMillis() - gameStartTime;
+            header.gameLog = gameLogLines;
             writer.write(gson.toJson(header));
             writer.newLine();
 
@@ -165,6 +185,7 @@ public class TrajectoryRecorder {
         boolean won;
         int totalDecisions;
         long durationMs;
+        List<String> gameLog;
     }
 
     private static class DecisionRecord {
@@ -183,5 +204,6 @@ public class TrajectoryRecorder {
         double intermediateReward;
         double terminalReward;
         float[] spellFeatures; // 64-dim source spell for target decisions
+        int logIndex; // GameLog entry count at decision time (-1 if unavailable)
     }
 }
