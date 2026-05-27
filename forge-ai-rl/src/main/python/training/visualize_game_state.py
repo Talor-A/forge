@@ -1434,6 +1434,8 @@ class GameStateViewer:
         root.configure(bg="#1e1e2e")
 
         self._build(root)
+        root.bind_all("<Right>", lambda e: self._next())
+        root.bind_all("<Left>", lambda e: self._prev())
         self._apply_mode_filter()
         if self.samples:
             self._show()
