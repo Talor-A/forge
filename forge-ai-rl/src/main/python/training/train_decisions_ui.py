@@ -1385,7 +1385,8 @@ def train_joint_mmap(model, head_configs, args, state,
                     head_best_acc[name])
 
             log_parts.append(
-                f"{name}={va:.1%}{improved}")
+                f"{name}=A{ta:.0%}/{va:.0%}{improved} "
+                f"L{tl:.2f}/{vl:.2f}")
 
         log(state, "  " + " | ".join(log_parts))
 
