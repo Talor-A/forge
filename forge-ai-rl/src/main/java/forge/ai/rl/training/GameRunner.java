@@ -145,7 +145,7 @@ public class GameRunner {
             for (Player p : game.getPlayers()) {
                 if (p.getController() instanceof PlayerControllerRL) {
                     rlPlayer = p;
-                    ((PlayerControllerRL) p.getController()).getRLController().onGameStart(gameId);
+                    ((PlayerControllerRL) p.getController()).getDecisionService().onGameStart(gameId);
                     break;
                 }
             }
@@ -161,7 +161,7 @@ public class GameRunner {
             // Notify RL controller of game end
             if (rlPlayer != null && rlPlayer.getController() instanceof PlayerControllerRL) {
                 PlayerControllerRL ctrl = (PlayerControllerRL) rlPlayer.getController();
-                ctrl.getRLController().onGameEnd(rlWon);
+                ctrl.getDecisionService().onGameEnd(rlWon);
                 ctrl.logDiagnostics();
             }
 
@@ -203,7 +203,7 @@ public class GameRunner {
         // Notify both players
         for (Player p : game.getPlayers()) {
             if (p.getController() instanceof PlayerControllerRL) {
-                ((PlayerControllerRL) p.getController()).getRLController().onGameStart(gameId + "_" + p.getName());
+                ((PlayerControllerRL) p.getController()).getDecisionService().onGameStart(gameId + "_" + p.getName());
             }
         }
 
@@ -213,7 +213,7 @@ public class GameRunner {
         for (Player p : game.getPlayers()) {
             if (p.getController() instanceof PlayerControllerRL) {
                 boolean won = game.getOutcome() != null && game.getOutcome().isWinner(p.getRegisteredPlayer());
-                ((PlayerControllerRL) p.getController()).getRLController().onGameEnd(won);
+                ((PlayerControllerRL) p.getController()).getDecisionService().onGameEnd(won);
             }
         }
 

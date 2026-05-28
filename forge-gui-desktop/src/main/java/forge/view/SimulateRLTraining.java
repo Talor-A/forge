@@ -805,7 +805,7 @@ public class SimulateRLTraining {
             lobbyToPlayer.put(p.getLobbyPlayer(), p);
             if (p.getController() instanceof PlayerControllerRL) {
                 ((PlayerControllerRL) p.getController())
-                    .getRLController()
+                    .getDecisionService()
                     .onGameStart(gameId + "_" + p.getName());
             }
         }
@@ -848,7 +848,7 @@ public class SimulateRLTraining {
             }
         }
 
-        // Finalize RLController trajectory recorders
+        // Finalize RLDecisionService trajectory recorders
         boolean isTimeout = game.getOutcome() == null
                 || game.getOutcome().isDraw();
         for (Player p : lobbyToPlayer.values()) {
@@ -860,7 +860,7 @@ public class SimulateRLTraining {
                             && game.getOutcome().isWinner(rp);
                 }
                 ((PlayerControllerRL) p.getController())
-                    .getRLController()
+                    .getDecisionService()
                     .onGameEnd(won);
             }
         }

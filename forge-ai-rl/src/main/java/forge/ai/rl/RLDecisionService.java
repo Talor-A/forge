@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Routes decisions to the appropriate model head, manages the model server connection,
  * and records trajectories for training.
  */
-public class RLController {
+public class RLDecisionService {
     // Static registry of latest value estimates per player name, for GUI display
     private static final ConcurrentHashMap<String, Float> latestValueEstimates = new ConcurrentHashMap<>();
 
@@ -52,7 +52,7 @@ public class RLController {
     private Player player;
     private Game game;
 
-    public RLController(RLConfig config) {
+    public RLDecisionService(RLConfig config) {
         this.config = config;
         this.stateEncoder = new GameStateEncoder(config);
         this.inferenceClient = createInferenceClient(config);

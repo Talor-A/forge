@@ -5,7 +5,7 @@ import forge.ai.rl.decisions.DecisionResult;
 
 /**
  * Source of model-policy decisions. Each backend (gRPC server, local ONNX,
- * none-configured) implements this so RLController stays out of the
+ * none-configured) implements this so RLDecisionService stays out of the
  * backend-selection switch.
  */
 public interface InferenceClient {

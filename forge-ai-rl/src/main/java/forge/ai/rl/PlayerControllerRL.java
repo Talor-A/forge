@@ -35,7 +35,7 @@ import java.util.Map;
  */
 public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
-    private final RLController rl;
+    private final RLDecisionService rl;
     private final forge.ai.rl.mcts.MCTSDecisionMaker mcts;
     private final boolean useMCTS;
 
@@ -50,7 +50,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         super(game, p, lp instanceof forge.ai.LobbyPlayerAi
                 ? (forge.ai.LobbyPlayerAi) lp
                 : createFallbackLobby(lp.getName()));
-        this.rl = new RLController(config);
+        this.rl = new RLDecisionService(config);
         this.rl.setPlayer(p);
         this.useMCTS = (config.getMode() == RLModelMode.MCTS);
         if (useMCTS) {
@@ -83,7 +83,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         return lp;
     }
 
-    public RLController getRLController() {
+    public RLDecisionService getDecisionService() {
         return rl;
     }
 

@@ -126,7 +126,7 @@ Rather than one model for all decisions, we use **specialized heads** for each m
 forge-ai-rl/
 ├── src/main/java/forge/ai/rl/
 │   ├── PlayerControllerRL.java          # Implements PlayerController
-│   ├── RLController.java                # Orchestrates decision heads
+│   ├── RLDecisionService.java                # Orchestrates decision heads
 │   ├── GameStateEncoder.java            # Converts game state → feature vectors
 │   ├── ActionEncoder.java               # Encodes available actions
 │   ├── CardEncoder.java                 # Encodes individual cards
@@ -586,7 +586,7 @@ The 64-dim action features encode what a spell IS but not what it DOES in this s
 - [62]: `creature_would_trade` — if playing a creature, would it trade favorably in combat?
 - [63]: `saves_creature` — for protection/hexproof spells, is a creature currently targeted?
 
-**Requires refactoring `ActionEncoder.encode(SpellAbility)` to `ActionEncoder.encode(SpellAbility, Game, Player)` since board-relative features need the game state.** This is a breaking change that requires updating all call sites in PlayerControllerRL, RLController, and HumanGameRecorder. Data regeneration required.
+**Requires refactoring `ActionEncoder.encode(SpellAbility)` to `ActionEncoder.encode(SpellAbility, Game, Player)` since board-relative features need the game state.** This is a breaking change that requires updating all call sites in PlayerControllerRL, RLDecisionService, and HumanGameRecorder. Data regeneration required.
 
 **Full card pool:** The 8 utility features above are universal — they apply to any damage spell, any creature, any pump spell. No card-specific logic needed. The `opponent_can_respond` feature becomes more important with counterspells and interaction-heavy formats.
 

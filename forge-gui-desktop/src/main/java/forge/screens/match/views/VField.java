@@ -43,7 +43,7 @@ import forge.toolbox.FSkin;
 import forge.toolbox.FSkin.SkinImage;
 import forge.toolbox.FSkin.SkinnedPanel;
 import forge.toolbox.special.PhaseIndicator;
-import forge.ai.rl.RLController;
+import forge.ai.rl.RLDecisionService;
 import forge.toolbox.special.PlayerDetailsPanel;
 import forge.util.Localizer;
 import forge.view.arcane.PlayArea;
@@ -418,7 +418,7 @@ public class VField implements IVDoc<CField> {
     }
 
     private void updateWinProbability() {
-        Float value = RLController.getLatestValueEstimate(player.getName());
+        Float value = RLDecisionService.getLatestValueEstimate(player.getName());
         if (value == null) {
             lblWinPct.setVisible(false);
             return;

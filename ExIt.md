@@ -30,7 +30,7 @@ Repeat:
 - `GameStateEncoder.java` — works on any Game object, not just current
 
 **Already built (RL infrastructure):**
-- `RLController.java` — clean decision intercept points for all 5 types
+- `RLDecisionService.java` — clean decision intercept points for all 5 types
 - `requestDecision()` — single routing point that can be redirected to MCTS
 - Model server with batched inference (~200 inferences/sec on GPU)
 - Joint training pipeline with unfrozen encoder
@@ -106,7 +106,7 @@ This is much faster (~5ms per evaluation instead of ~10ms per rollout) and enabl
 | File | Change |
 |------|--------|
 | **NEW:** `forge-ai-rl/.../MCTSDecisionMaker.java` | Core MCTS logic: copy state, try candidates, rollout, pick best |
-| `RLController.java` | Add MCTS mode that routes decisions to MCTSDecisionMaker |
+| `RLDecisionService.java` | Add MCTS mode that routes decisions to MCTSDecisionMaker |
 | `SimulateRLTraining.java` | Add `rltrain mcts-collect` command for MCTS data collection |
 | `RLConfig.java` / `RLModelMode` | Add MCTS mode enum |
 | **NEW:** `scripts/09_exit_collect.sh` | MCTS data collection script |
