@@ -23,7 +23,9 @@ import java.util.List;
  * - Client sends: [4 bytes length (big-endian)] [JSON payload]
  * - Server responds: [4 bytes length (big-endian)] [JSON payload]
  */
-public class ModelServerClient {
+public class ModelServerClient implements InferenceClient {
+
+    private static final int AVAILABILITY_RETRIES = 3;
     private final RLConfig config;
     private final Gson gson;
     private Socket socket;
@@ -136,6 +138,33 @@ public class ModelServerClient {
      */
     public boolean isConnected() {
         return connected;
+    }
+
+    @Override
+    public boolean isAvailable() {
+        return connected;
+    }
+
+    /**
+     * Eagerly connect at startup with retry. The RL training contract is
+     * that gRPC mode MUST reach a server — if it can't, throw rather than
+     * silently fall back to the heuristic and contaminate trajectories.
+     */
+    @Override
+    public void ensureAvailable() {
+        if (connected) return;
+        for (int attempt = 0; attempt < AVAILABILITY_RETRIES; attempt++) {
+            if (connect()) return;
+            try { Thread.sleep(500L * (attempt + 1)); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+        }
+        throw new forge.ai.rl.ModelServerException(
+                "Cannot connect to model server at " + config.getGrpcHost() + ":" + config.getGrpcPort()
+                + " — refusing to fall back to heuristic");
+    }
+
+    @Override
+    public void warmUp() {
+        connect();
     }
 
     /**

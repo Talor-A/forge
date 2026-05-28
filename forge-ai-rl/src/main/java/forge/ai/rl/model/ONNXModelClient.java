@@ -17,7 +17,7 @@ import java.util.*;
  * Loads 9 separate ONNX files (state encoder + 7 decision heads + value).
  * No Python dependency needed.
  */
-public class ONNXModelClient {
+public class ONNXModelClient implements InferenceClient {
 
     private static final int GLOBAL_DIM = 96;
     private static final int CARD_DIM = 256;
@@ -98,6 +98,16 @@ public class ONNXModelClient {
 
     public boolean isLoaded() {
         return loaded;
+    }
+
+    @Override
+    public boolean isAvailable() {
+        return loaded;
+    }
+
+    @Override
+    public void warmUp() {
+        loadModels();
     }
 
     public synchronized DecisionResult requestDecision(DecisionContext context) {

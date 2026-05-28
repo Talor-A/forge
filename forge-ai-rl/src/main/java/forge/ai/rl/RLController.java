@@ -6,7 +6,9 @@ import forge.ai.rl.decisions.DecisionType;
 import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.GameStateEncoder;
 import forge.ai.rl.features.GameStateFeatures;
+import forge.ai.rl.model.InferenceClient;
 import forge.ai.rl.model.ModelServerClient;
+import forge.ai.rl.model.NoInferenceClient;
 import forge.ai.rl.model.ONNXModelClient;
 import forge.ai.rl.training.TrajectoryRecorder;
 import forge.game.Game;
@@ -44,8 +46,7 @@ public class RLController {
 
     private final RLConfig config;
     private final GameStateEncoder stateEncoder;
-    private final ModelServerClient modelClient;
-    private final ONNXModelClient onnxClient;
+    private final InferenceClient inferenceClient;
     private final TrajectoryRecorder trajectoryRecorder;
 
     private Player player;
@@ -54,19 +55,27 @@ public class RLController {
     public RLController(RLConfig config) {
         this.config = config;
         this.stateEncoder = new GameStateEncoder(config);
-        this.modelClient = new ModelServerClient(config);
-
-        // Initialize ONNX client if in ONNX mode
-        if (config.getMode() == RLModelMode.ONNX) {
-            this.onnxClient = new ONNXModelClient(config);
-            this.onnxClient.loadModels();
-        } else {
-            this.onnxClient = null;
-        }
+        this.inferenceClient = createInferenceClient(config);
 
         this.trajectoryRecorder = config.isRecordTrajectories()
                 ? new TrajectoryRecorder(config.getTrajectoryOutputDir())
                 : null;
+    }
+
+    private static InferenceClient createInferenceClient(RLConfig config) {
+        switch (config.getMode()) {
+            case GRPC:
+                return new ModelServerClient(config);
+            case ONNX:
+                ONNXModelClient onnx = new ONNXModelClient(config);
+                onnx.loadModels();
+                return onnx;
+            case HEURISTIC_FALLBACK:
+            case RECORD_HEURISTIC:
+            case MCTS:
+            default:
+                return new NoInferenceClient();
+        }
     }
 
     public void setPlayer(Player player) {
@@ -83,22 +92,12 @@ public class RLController {
      * When false, callers should use heuristic fallback for all decisions.
      */
     public boolean isModelServerAvailable() {
-        if (config.getMode() == RLModelMode.ONNX) {
-            return onnxClient != null && onnxClient.isLoaded();
-        }
-        if (config.getMode() == RLModelMode.GRPC) {
-            if (modelClient.isConnected()) return true;
-            // Try to connect — retry a few times
-            for (int attempt = 0; attempt < 3; attempt++) {
-                if (modelClient.connect()) return true;
-                try { Thread.sleep(500 * (attempt + 1)); } catch (InterruptedException e) { break; }
-            }
-            // GRPC mode MUST have a server — throw, don't silently fall back
-            throw new ModelServerException(
-                    "Cannot connect to model server at " + config.getGrpcHost() + ":" + config.getGrpcPort()
-                    + " — refusing to fall back to heuristic");
-        }
-        return false;
+        if (inferenceClient.isAvailable()) return true;
+        // For modes that require a live backend, ensureAvailable() will retry
+        // and throw on failure. For heuristic/record/MCTS modes it's a no-op
+        // and we just report false.
+        inferenceClient.ensureAvailable();
+        return inferenceClient.isAvailable();
     }
 
     /**
@@ -112,9 +111,7 @@ public class RLController {
                         () -> game.getGameLog().getLogEntries(null).size());
             }
         }
-        if (config.getMode() == RLModelMode.GRPC) {
-            modelClient.connect();
-        }
+        inferenceClient.warmUp();
     }
 
     /**
@@ -735,20 +732,7 @@ public class RLController {
     // --- Internal helpers ---
 
     private DecisionResult requestDecision(DecisionContext context) {
-        DecisionResult result;
-        switch (config.getMode()) {
-            case GRPC:
-                result = modelClient.requestDecision(context);
-                break;
-            case ONNX:
-                result = onnxClient != null ? onnxClient.requestDecision(context) : null;
-                break;
-            case HEURISTIC_FALLBACK:
-            case RECORD_HEURISTIC:
-            default:
-                return null; // caller should use heuristic fallback
-        }
-        // Store latest value estimate for GUI display
+        DecisionResult result = inferenceClient.requestDecision(context);
         if (result != null && player != null) {
             latestValueEstimates.put(player.getName(), result.getValueEstimate());
         }
