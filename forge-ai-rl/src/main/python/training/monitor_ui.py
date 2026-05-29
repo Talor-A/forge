@@ -402,16 +402,16 @@ class DecisionsMonitorUI:
             xs_a = xs[:len(ta)]
             if tl:
                 self.ax_loss.plot(xs_l, tl, color=color,
-                    linewidth=1.5, label=name)
+                    linewidth=1.5, label=name, marker='o', markersize=3)
             if vl:
                 self.ax_loss.plot(xs_l[:len(vl)], vl, color=color,
-                    linewidth=1.5, linestyle='--')
+                    linewidth=1.5, linestyle='--', marker='o', markersize=3)
             if ta:
                 self.ax_acc.plot(xs_a, ta, color=color,
-                    linewidth=1.5, label=name)
+                    linewidth=1.5, label=name, marker='o', markersize=3)
             if va:
                 self.ax_acc.plot(xs_a[:len(va)], va, color=color,
-                    linewidth=1.5, linestyle='--')
+                    linewidth=1.5, linestyle='--', marker='o', markersize=3)
 
         self.ax_loss.set_ylabel('Loss', color='#a6adc8', fontsize=9)
         self.ax_acc.set_ylabel('Accuracy', color='#a6adc8', fontsize=9)
